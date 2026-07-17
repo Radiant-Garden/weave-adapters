@@ -8,6 +8,7 @@
 [![codecov](https://codecov.io/gh/Radiant-Garden/weave-adapters/branch/main/graph/badge.svg)](https://codecov.io/gh/Radiant-Garden/weave-adapters)
 [![Go Reference](https://pkg.go.dev/badge/github.com/radiantgarden/weave-adapters.svg)](https://pkg.go.dev/github.com/radiantgarden/weave-adapters)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![Made in the EU](https://img.shields.io/badge/🇪🇺_Made_in-🇩🇪_Germany-003399)](https://radiantgarden.io)
 
 `weave-adapter-dhcp-windows` exposes Windows Server DHCP as a predictable,
 versioned HTTP/JSON API — with ETags, conditional requests, machine-readable
