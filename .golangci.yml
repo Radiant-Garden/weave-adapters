@@ -129,11 +129,6 @@ formatters:
   enable:
     - gofmt
     - gofumpt
-  disable:
-    - gci
-    - goimports
-    - golines
-    - swaggo
   settings:
     gofumpt:
       extra-rules: true

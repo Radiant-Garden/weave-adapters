@@ -56,8 +56,9 @@ tasks:
       - go vet ./...
 
   lint:
-    desc: Run golangci-lint
+    desc: Verify the golangci-lint config schema and run the linters
     cmds:
+      - golangci-lint config verify
       - golangci-lint run ./...
 
   lint-fix:
