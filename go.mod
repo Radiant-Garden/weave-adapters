@@ -1,6 +1,6 @@
 module github.com/radiantgarden/weave-adapters
 
-go 1.26.3
+go 1.26.5
 
 require (
 	github.com/knadh/koanf/parsers/toml/v2 v2.2.1
