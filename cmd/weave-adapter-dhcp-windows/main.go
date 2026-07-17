@@ -10,7 +10,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -29,8 +28,10 @@ var version = "0.0.0-dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		// observability.Setup may not have run yet; slog.Default still logs.
-		slog.Error("startup failed", "error", err)
+		// Startup failures are operational outcomes, not stray slog calls.
+		// observability.Setup may not have run yet; the events system writes to
+		// slog.Default either way.
+		events.Emit(context.Background(), catalog.SYS005, "error", err.Error())
 		os.Exit(1)
 	}
 }

@@ -19,6 +19,8 @@ const (
 	SYS003 events.EventID = "SYS-003"
 	// SYS004 is emitted when shutdown has completed cleanly.
 	SYS004 events.EventID = "SYS-004"
+	// SYS005 is emitted when the process fails to start.
+	SYS005 events.EventID = "SYS-005"
 )
 
 func init() {
@@ -73,5 +75,21 @@ func init() {
 		Topic:           "Lifecycle",
 		Example:         `{"eventId":"SYS-004","data":{}}`,
 		Troubleshooting: "Informational. Marks a clean end to a process lifecycle.",
+	})
+
+	events.Register(&events.Event{
+		ID:              SYS005,
+		Level:           slog.LevelError,
+		MessageTemplate: "startup failed",
+		Description:     "The process failed to start and is exiting non-zero.",
+		Category:        events.CategorySystem.String(),
+		Topic:           "Lifecycle",
+		Fields: []events.FieldDef{
+			{Name: "error", Type: "string", Required: true, Description: "The startup error."},
+		},
+		Example: `{"eventId":"SYS-005","data":{"error":"loading config: port must be between 1 and 65535, got 0"}}`,
+		Troubleshooting: "The process did not start. Read the error field. Most often it is a " +
+			"config problem: check the config file, WEAVE_ADAPTER_* env vars, and flags. " +
+			"Validate the port range and logSeverity value, then re-run.",
 	})
 }

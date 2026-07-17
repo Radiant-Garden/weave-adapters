@@ -30,7 +30,7 @@ import (
 func TestSYSCatalog_ShouldRegisterAllLifecycleEvents(t *testing.T) {
 	t.Parallel()
 
-	for _, id := range []events.EventID{SYS001, SYS002, SYS003, SYS004} {
+	for _, id := range []events.EventID{SYS001, SYS002, SYS003, SYS004, SYS005} {
 		e, ok := events.Get(id)
 		require.Truef(t, ok, "event %s should be registered", id)
 		assert.Equal(t, events.CategorySystem.String(), e.Category)
