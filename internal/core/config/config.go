@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/go-playground/validator/v10"
 	"github.com/knadh/koanf/parsers/toml/v2"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/env/v2"
@@ -31,22 +32,19 @@ const (
 	maxPort = 65535
 )
 
-// validSeverities is the allowed set for LogSeverity.
-var validSeverities = map[string]bool{
-	"debug": true,
-	"info":  true,
-	"warn":  true,
-	"error": true,
-}
+// validate is the shared struct validator (safe for concurrent use, caches
+// struct metadata).
+var validate = validator.New(validator.WithRequiredStructEnabled())
 
-// Config is the adapter's runtime configuration.
+// Config is the adapter's runtime configuration. Field rules are expressed as
+// validator struct tags and checked by Validate.
 type Config struct {
 	// Port is the TCP port the HTTP server listens on.
-	Port int `koanf:"port"`
+	Port int `koanf:"port" validate:"min=1,max=65535"`
 	// DisableHTTPS must be true in M1 — HTTPS/TLS is not implemented yet.
 	DisableHTTPS bool `koanf:"disableHttps"`
 	// LogSeverity is the log level: debug, info, warn, or error.
-	LogSeverity string `koanf:"logSeverity"`
+	LogSeverity string `koanf:"logSeverity" validate:"oneof=debug info warn error"`
 }
 
 // Load reads configuration from flags, environment, an optional TOML file, and
@@ -158,16 +156,18 @@ func transformEnv(key, value string) (string, any) {
 }
 
 // Validate reports all configuration problems at once (joined), rather than
-// failing on the first one.
+// failing on the first one. Field rules run through the validator; the
+// disableHttps rule is M1-specific and checked separately.
 func (c *Config) Validate() error {
 	var errs []error
 
-	if c.Port < minPort || c.Port > maxPort {
-		errs = append(errs, fmt.Errorf("port must be between %d and %d, got %d", minPort, maxPort, c.Port))
-	}
-
-	if !validSeverities[c.LogSeverity] {
-		errs = append(errs, fmt.Errorf("logSeverity must be one of debug, info, warn, error, got %q", c.LogSeverity))
+	var verrs validator.ValidationErrors
+	if err := validate.Struct(c); err != nil && errors.As(err, &verrs) {
+		for _, fe := range verrs {
+			errs = append(errs, fieldError(fe))
+		}
+	} else if err != nil {
+		errs = append(errs, err)
 	}
 
 	if !c.DisableHTTPS {
@@ -175,4 +175,16 @@ func (c *Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// fieldError renders a validator field error as an operator-friendly message.
+func fieldError(fe validator.FieldError) error {
+	switch fe.Field() {
+	case "Port":
+		return fmt.Errorf("port must be between %d and %d, got %v", minPort, maxPort, fe.Value())
+	case "LogSeverity":
+		return fmt.Errorf("logSeverity must be one of debug, info, warn, error, got %q", fe.Value())
+	default:
+		return fmt.Errorf("%s failed %q validation", fe.Field(), fe.Tag())
+	}
 }
