@@ -2,23 +2,26 @@
 // Windows Server DHCP behind the uniform weave-adapters HTTP API.
 //
 // M1 walking skeleton: it serves GET /api/v1/health and nothing else — it does
-// not talk to DHCP in any form. Structured logging, events, metrics, and
-// middleware are layered in during later M1 phases; for now logging uses the
-// stdlib logger.
+// not talk to DHCP in any form. Logging goes through the cataloged events
+// system (see internal/core/events); the HTTP server emits its own lifecycle
+// events, so main only marks startup.
 package main
 
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/config"
+	"github.com/radiantgarden/weave-adapters/internal/core/events"
+	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 	"github.com/radiantgarden/weave-adapters/internal/core/health"
 	"github.com/radiantgarden/weave-adapters/internal/core/httpserver"
+	"github.com/radiantgarden/weave-adapters/internal/core/observability"
 )
 
 // version is the adapter version, overridable via -ldflags at build time.
@@ -26,7 +29,8 @@ var version = "0.0.0-dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		log.Printf("fatal: %v", err)
+		// observability.Setup may not have run yet; slog.Default still logs.
+		slog.Error("startup failed", "error", err)
 		os.Exit(1)
 	}
 }
@@ -37,14 +41,15 @@ func run(args []string) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
+	observability.Setup(cfg.LogSeverity)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	events.Emit(ctx, catalog.SYS001, "version", version)
+
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	srv := httpserver.New(addr, health.NewHandler(version, time.Now()))
-
-	//nolint:gosec // G706: cfg.Port is a validated int (1-65535) rendered with %d and cannot carry a log-injection payload. Temporary stdlib log; replaced by structured events in Phase 2.
-	log.Printf("weave-adapter-dhcp-windows %s listening on port %d (health: /api/v1/health)", version, cfg.Port)
 
 	return srv.Run(ctx)
 }

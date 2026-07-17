@@ -11,6 +11,9 @@ import (
 	"errors"
 	"net/http"
 	"time"
+
+	"github.com/radiantgarden/weave-adapters/internal/core/events"
+	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 )
 
 const (
@@ -39,12 +42,14 @@ func New(addr string, healthHandler http.Handler) *Server {
 }
 
 // Run starts the server and blocks until ctx is cancelled, then drains
-// in-flight requests within the shutdown grace period. It returns nil on a
-// clean shutdown.
+// in-flight requests within the shutdown grace period. It emits SYS lifecycle
+// events and returns nil on a clean shutdown.
 func (s *Server) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 
 	go func() {
+		events.Emit(ctx, catalog.SYS002, "addr", s.httpServer.Addr)
+
 		errCh <- s.httpServer.ListenAndServe()
 	}()
 
@@ -56,9 +61,17 @@ func (s *Server) Run(ctx context.Context) error {
 
 		return err
 	case <-ctx.Done():
+		events.Emit(ctx, catalog.SYS003)
+
+		// Background (not ctx): ctx is already cancelled, so the drain must run
+		// on a fresh deadline or Shutdown would return immediately.
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
 
-		return s.httpServer.Shutdown(shutdownCtx)
+		err := s.httpServer.Shutdown(shutdownCtx)
+
+		events.Emit(shutdownCtx, catalog.SYS004)
+
+		return err
 	}
 }
