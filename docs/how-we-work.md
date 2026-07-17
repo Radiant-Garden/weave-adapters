@@ -153,4 +153,4 @@ Run them with `task test` (race detector + shuffled order).
 Every push and pull request runs the quality gate: build (host + `windows/amd64`),
 `go vet`, tests with the race detector, `golangci-lint`, a generated-artifacts
 check, and `govulncheck`. Pushing a `v*` tag additionally runs the release
-workflow.
+workflow. Pushes that change only `docs/` skip CI (nothing to gate).
