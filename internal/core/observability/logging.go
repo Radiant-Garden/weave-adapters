@@ -26,10 +26,10 @@ func levelFor(severity string) slog.Level {
 	}
 }
 
-// NewLogger builds the process logger at the given severity. It uses a text
+// newLogger builds the process logger at the given severity. It uses a text
 // handler on stdout for now; a JSON handler and a format switch arrive with the
 // production logging config in a later milestone.
-func NewLogger(severity string) *slog.Logger {
+func newLogger(severity string) *slog.Logger {
 	handler := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: levelFor(severity),
 	})
@@ -41,7 +41,7 @@ func NewLogger(severity string) *slog.Logger {
 // system (which logs through slog.Default) writes through it. It returns the
 // logger for callers that want to hold a reference.
 func Setup(severity string) *slog.Logger {
-	logger := NewLogger(severity)
+	logger := newLogger(severity)
 	slog.SetDefault(logger)
 
 	return logger

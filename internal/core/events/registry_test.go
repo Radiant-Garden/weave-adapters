@@ -9,7 +9,7 @@ Tested:
     - TestRegister_ShouldPanicWhenResponseDetailWithoutCode: response-detail invariant.
     - TestRegister_ShouldPanicWhenExternalSourceMissingCallerField: caller-field invariant.
     - TestRegister_ShouldStoreValidEvent: a valid event is retrievable.
-  Get / GetAll / GetByCategory / Count
+  Get / GetAll / getByCategory / count
     - TestRegistry_QueriesReflectRegisteredEvents: lookups and counts.
 
 Tested elsewhere:
@@ -102,8 +102,8 @@ func TestRegistry_QueriesReflectRegisteredEvents(t *testing.T) { //nolint:parall
 	Register(&Event{ID: "SYS-901", Level: slog.LevelInfo})
 	Register(&Event{ID: "API-900", Level: slog.LevelInfo})
 
-	assert.Equal(t, 3, Count())
+	assert.Equal(t, 3, count())
 	assert.Len(t, GetAll(), 3)
-	assert.Len(t, GetByCategory(CategorySystem), 2)
-	assert.Len(t, GetByCategory(CategoryAPI), 1)
+	assert.Len(t, getByCategory(CategorySystem), 2)
+	assert.Len(t, getByCategory(CategoryAPI), 1)
 }

@@ -4,8 +4,9 @@ Testing: logging.go
 Pending:
 
 Tested:
-  NewLogger
-    - TestNewLogger_ShouldEnableLevelFromSeverity: severity string maps to the slog level.
+  newLogger / levelFor
+    - TestNewLogger_ShouldEnableLevelFromSeverity: severity string maps to the slog level,
+      including the unknown-string -> info fallback.
 
 Tested elsewhere:
   Setup: installs the slog default; exercised end-to-end via the events tests
@@ -40,6 +41,7 @@ func TestNewLogger_ShouldEnableLevelFromSeverity(t *testing.T) {
 		{severity: "info", enabled: slog.LevelInfo, notEnabled: slog.LevelDebug, checkNotAbove: true},
 		{severity: "warn", enabled: slog.LevelWarn, notEnabled: slog.LevelInfo, checkNotAbove: true},
 		{severity: "error", enabled: slog.LevelError, notEnabled: slog.LevelWarn, checkNotAbove: true},
+		{severity: "bogus", enabled: slog.LevelInfo, notEnabled: slog.LevelDebug, checkNotAbove: true},
 	}
 
 	for _, tc := range tests {
@@ -47,7 +49,7 @@ func TestNewLogger_ShouldEnableLevelFromSeverity(t *testing.T) {
 			t.Parallel()
 
 			// ARRANGE / ACT
-			logger := NewLogger(tc.severity)
+			logger := newLogger(tc.severity)
 
 			// ASSERT
 			assert.True(t, logger.Enabled(context.Background(), tc.enabled),

@@ -9,6 +9,9 @@ Tested:
     - TestSubscribe_ShouldFilterNonMatchingEvents: a non-matching event is not delivered.
     - TestSubscribe_ShouldDropWhenBufferFull: a slow consumer drops rather than blocking Emit.
     - TestSubscribe_UnsubscribeStopsDelivery: after unsubscribe no more events arrive.
+  kvPairsToMap
+    - TestKvPairsToMap_ShouldConvertAndSkipMalformed: pairs map through; non-string keys
+      and a trailing odd element are skipped.
 
 Tested elsewhere:
 
@@ -79,6 +82,29 @@ func TestSubscribe_ShouldDropWhenBufferFull(t *testing.T) { //nolint:paralleltes
 	})
 
 	assert.Len(t, sub.Ch(), 1)
+}
+
+func TestKvPairsToMap_ShouldConvertAndSkipMalformed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   []any
+		want map[string]any
+	}{
+		{name: "even string keys", in: []any{"a", 1, "b", 2}, want: map[string]any{"a": 1, "b": 2}},
+		{name: "non-string key skipped", in: []any{42, "v", "b", 2}, want: map[string]any{"b": 2}},
+		{name: "trailing odd element skipped", in: []any{"a", 1, "b"}, want: map[string]any{"a": 1}},
+		{name: "empty", in: nil, want: map[string]any{}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, kvPairsToMap(tc.in))
+		})
+	}
 }
 
 func TestSubscribe_UnsubscribeStopsDelivery(t *testing.T) { //nolint:paralleltest // mutates global registry/subscribers

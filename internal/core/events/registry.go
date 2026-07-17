@@ -79,8 +79,8 @@ func GetAll() map[EventID]*Event {
 	return out
 }
 
-// GetByCategory returns all events whose ID begins with the category prefix.
-func GetByCategory(category EventCategory) []*Event {
+// getByCategory returns all events whose ID begins with the category prefix.
+func getByCategory(category EventCategory) []*Event {
 	globalRegistry.mu.RLock()
 	defer globalRegistry.mu.RUnlock()
 
@@ -97,8 +97,8 @@ func GetByCategory(category EventCategory) []*Event {
 	return result
 }
 
-// Count returns the number of registered events.
-func Count() int {
+// count returns the number of registered events.
+func count() int {
 	globalRegistry.mu.RLock()
 	defer globalRegistry.mu.RUnlock()
 

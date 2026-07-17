@@ -5,7 +5,7 @@ Pending:
 
 Tested:
   Impact.String
-    - TestImpact_String_ShouldReturnSnakeCase: each impact and the unknown fallback.
+    - TestImpact_String_ShouldReturnSnakeCase: all seven impacts and the unknown fallback.
   EventCategory.String
     - TestEventCategory_String_ShouldReturnPrefix: category prefix string.
 
@@ -27,10 +27,27 @@ import (
 func TestImpact_String_ShouldReturnSnakeCase(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, "request_rejected", ImpactRequestRejected.String())
-	assert.Equal(t, "state_changed", ImpactStateChanged.String())
-	assert.Equal(t, "resource_deleted", ImpactResourceDeleted.String())
-	assert.Equal(t, "unknown", Impact(999).String())
+	tests := []struct {
+		impact Impact
+		want   string
+	}{
+		{ImpactRequestRejected, "request_rejected"},
+		{ImpactStateChanged, "state_changed"},
+		{ImpactServiceDegraded, "service_degraded"},
+		{ImpactConfigReloaded, "config_reloaded"},
+		{ImpactResourceCreated, "resource_created"},
+		{ImpactResourceUpdated, "resource_updated"},
+		{ImpactResourceDeleted, "resource_deleted"},
+		{Impact(999), "unknown"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.want, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.want, tc.impact.String())
+		})
+	}
 }
 
 func TestEventCategory_String_ShouldReturnPrefix(t *testing.T) {

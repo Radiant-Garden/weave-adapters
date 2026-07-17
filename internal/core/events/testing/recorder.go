@@ -26,6 +26,19 @@ func (e RecordedEvent) group(name, key string) any {
 	return nil
 }
 
+// has reports whether the named group carries the given key, regardless of the
+// value (so a legitimately zero/nil field still counts as present).
+func (e RecordedEvent) has(name, key string) bool {
+	m, ok := e.Groups[name]
+	if !ok {
+		return false
+	}
+
+	_, ok = m[key]
+
+	return ok
+}
+
 // Data returns a value from the event's "data" group (nil if absent).
 func (e RecordedEvent) Data(key string) any { return e.group("data", key) }
 

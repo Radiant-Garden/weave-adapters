@@ -9,14 +9,25 @@ Tested:
     - TestLoad_ShouldApplyPrecedence: flags > env > defaults ordering.
     - TestLoad_ShouldOverrideFileWithEnv: env wins over a TOML file; unset file keys survive.
     - TestLoad_ShouldErrorWhenConfigFileMissing: a missing --config path is an error.
+    - TestLoad_ShouldErrorWhenConfigFileMalformed: an existing but invalid TOML file errors.
+    - TestLoad_ShouldErrorWhenFlagInvalid: a flag-parse failure propagates from parseFlags.
     - TestLoad_ShouldRejectWhenHTTPSEnabled: disableHttps=false fails validation (also covers env string->bool).
 
-  Validate
+  Validate / fieldError
     - TestValidate_ShouldReportProblems: valid and invalid configs, including all errors joined.
 
 Tested elsewhere:
 
 Declined:
+  Non-numeric WEAVE_ADAPTER_PORT coerced to 0: koanf's k.Int swallows the parse
+    error, so Validate reports "got 0" rather than naming the bad input. Left as
+    is — surfacing the raw value means bypassing the typed getter with a manual
+    pre-parse for marginal message quality, and the error still points at the port.
+  Fuzzing Load: the TOML/env parsing is koanf's (pelletier) provider — we don't
+    fuzz what we don't own — and our transform/validation is trivial.
+  Validate's non-ValidationErrors branch and fieldError's default case: defensive
+    and unreachable today (only *Config is validated; only Port/LogSeverity carry
+    tags), so they are documented in-code rather than tested.
 
 Additional Remarks:
   Tests drive the unexported load(args, environ) so environment precedence can be
@@ -128,6 +139,31 @@ func TestLoad_ShouldErrorWhenConfigFileMissing(t *testing.T) {
 
 	// ACT
 	_, err := load([]string{"-config", "/no/such/file.toml"}, environ())
+
+	// ASSERT
+	require.Error(t, err)
+}
+
+func TestLoad_ShouldErrorWhenConfigFileMalformed(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — an existing file whose contents are not valid TOML.
+	path := filepath.Join(t.TempDir(), "bad.toml")
+	require.NoError(t, os.WriteFile(path, []byte("@@@ not toml @@@\n"), 0o600))
+
+	// ACT
+	_, err := load([]string{"-config", path}, environ())
+
+	// ASSERT
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "loading config file")
+}
+
+func TestLoad_ShouldErrorWhenFlagInvalid(t *testing.T) {
+	t.Parallel()
+
+	// ACT — a non-numeric -port makes flag.Parse fail inside parseFlags.
+	_, err := load([]string{"-port", "notanumber"}, environ())
 
 	// ASSERT
 	require.Error(t, err)

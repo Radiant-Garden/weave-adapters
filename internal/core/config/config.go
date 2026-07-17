@@ -167,6 +167,10 @@ func (c *Config) Validate() error {
 			errs = append(errs, fieldError(fe))
 		}
 	} else if err != nil {
+		// Defensive: validate.Struct only returns a non-ValidationErrors error
+		// for a programmer mistake (a nil or non-struct target). Validate always
+		// passes a *Config, so this branch is unreachable today; it is kept so a
+		// future misuse surfaces as an error instead of being silently dropped.
 		errs = append(errs, err)
 	}
 
@@ -185,6 +189,10 @@ func fieldError(fe validator.FieldError) error {
 	case "LogSeverity":
 		return fmt.Errorf("logSeverity must be one of debug, info, warn, error, got %q", fe.Value())
 	default:
+		// Defensive fallback for a tagged field without a bespoke message. Only
+		// Port and LogSeverity carry validate tags today, so this is unreachable
+		// until a third tagged field is added; it then yields a generic message
+		// rather than nothing.
 		return fmt.Errorf("%s failed %q validation", fe.Field(), fe.Tag())
 	}
 }

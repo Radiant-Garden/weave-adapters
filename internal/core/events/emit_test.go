@@ -9,6 +9,8 @@ Tested:
     - TestEmit_ShouldPanicWhenExternalSourceMissingRemoteAddr: guard against background ctx.
     - TestEmit_ShouldAttachCallerAndRequestWhenExternalSource: caller/request groups from ctx.
     - TestEmit_ShouldWarnOnUnknownID: unregistered ID still calls the hook, no panic.
+    - TestEmit_ShouldBeSafeForConcurrentEmitters: N goroutines emit concurrently with a
+      subscriber and hook attached; validates the global locking under -race.
   EmitWithMessage
     - TestEmitWithMessage_ShouldOverrideTemplate: custom message path emits.
 
@@ -27,6 +29,8 @@ package events
 import (
 	"context"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -123,6 +127,44 @@ func TestEmit_ShouldWarnOnUnknownID(t *testing.T) { //nolint:paralleltest // mut
 		Emit(context.Background(), "TEST-404", "k", "v")
 	})
 	assert.True(t, called)
+}
+
+func TestEmit_ShouldBeSafeForConcurrentEmitters(t *testing.T) { //nolint:paralleltest // mutates global registry/hook/subscribers
+	withCleanRegistry(t)
+	Register(&Event{ID: "TEST-014", Level: slog.LevelInfo, MessageTemplate: "x"})
+
+	// A subscriber exercises fanOutToSubscribers (subsMu, globalSeq) on the
+	// emit path; a hook exercises hookMu. Both are process-global.
+	_, unsub := Subscribe(256, func(id EventID) bool { return id == "TEST-014" })
+	t.Cleanup(unsub)
+
+	var count atomic.Int64
+
+	prev := SetEmitterHook(func(id EventID, _ ...any) {
+		if id == "TEST-014" {
+			count.Add(1)
+		}
+	})
+
+	t.Cleanup(func() { SetEmitterHook(prev) })
+
+	const goroutines = 50
+
+	var wg sync.WaitGroup
+
+	wg.Add(goroutines)
+
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+
+			Emit(context.Background(), "TEST-014", "k", "v")
+		}()
+	}
+
+	wg.Wait()
+
+	assert.Equal(t, int64(goroutines), count.Load())
 }
 
 func TestEmitWithMessage_ShouldOverrideTemplate(t *testing.T) { //nolint:paralleltest // mutates global registry/hook
