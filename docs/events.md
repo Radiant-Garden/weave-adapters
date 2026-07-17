@@ -1,5 +1,47 @@
 # Event Catalog
 
+## API-010 — request completed
+
+- **Level:** INFO
+- **Category / Topic:** API / Request
+- **External source:** yes
+- **Description:** Emitted once per HTTP request after the handler returns; the audit line for every request.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| subject | string | false | Authenticated caller (empty until auth lands in M2). |
+| role | string | false | Caller role (empty until auth). |
+| remoteAddr | string | true | Client address. |
+| requestId | string | true | Correlation ID (X-Request-Id). |
+| method | string | true | HTTP method. |
+| path | string | true | Request path. |
+| status | int | true | Response status code. |
+| durationMs | int | true | Handler duration in milliseconds. |
+| bytesWritten | int | true | Response body bytes written. |
+
+**Example:** `{"eventId":"API-010","caller":{"remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"…","method":"GET","path":"/api/v1/health"},"data":{"status":200,"durationMs":1,"bytesWritten":147}}`
+
+**Troubleshooting:** Informational request audit line. For error spikes, filter status>=500 and correlate related events by requestId.
+
+## API-011 — request panic recovered
+
+- **Level:** ERROR
+- **Category / Topic:** API / Request
+- **Description:** A handler panicked; the recovery middleware logged it and returned 500.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| method | string | true | HTTP method. |
+| path | string | true | Request path. |
+| remoteAddr | string | true | Client address. |
+| requestId | string | false | Correlation ID, if the request-ID middleware already ran. |
+| panic | string | true | The recovered panic value. |
+| stack | string | false | Stack trace captured at the panic. |
+
+**Example:** `{"eventId":"API-011","data":{"method":"GET","path":"/x","remoteAddr":"192.0.2.1:1234","requestId":"…","panic":"runtime error: invalid memory address"}}`
+
+**Troubleshooting:** A handler bug caused a panic. Read the stack field, reproduce via method+path, and fix the root cause (often a nil dereference or out-of-range index). Correlate other events by requestId.
+
 ## SYS-001 — adapter starting
 
 - **Level:** INFO

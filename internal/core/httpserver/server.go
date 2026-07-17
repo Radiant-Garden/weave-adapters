@@ -2,8 +2,8 @@
 // standard endpoints around adapter-provided routes and handles graceful
 // shutdown.
 //
-// This is the M1 walking-skeleton form — it mounts only /api/v1/health. Later
-// phases add /metrics, middleware, and configurable timeouts.
+// This is the M1 form — it mounts /api/v1/health behind the standard middleware
+// chain. Later phases add /metrics, /openapi.yaml, and configurable timeouts.
 package httpserver
 
 import (
@@ -14,6 +14,7 @@ import (
 
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
+	"github.com/radiantgarden/weave-adapters/internal/core/middleware"
 )
 
 const (
@@ -27,15 +28,22 @@ type Server struct {
 }
 
 // New builds a Server listening on addr with the given health handler mounted
-// at GET /api/v1/health.
+// at GET /api/v1/health, wrapped in the standard middleware chain (recovery →
+// request-ID → logging).
 func New(addr string, healthHandler http.Handler) *Server {
 	mux := http.NewServeMux()
 	mux.Handle("GET /api/v1/health", healthHandler)
 
+	handler := middleware.Chain(mux,
+		middleware.Recovery,
+		middleware.RequestID,
+		middleware.Logging,
+	)
+
 	return &Server{
 		httpServer: &http.Server{
 			Addr:              addr,
-			Handler:           mux,
+			Handler:           handler,
 			ReadHeaderTimeout: readHeaderTimeout,
 		},
 	}
