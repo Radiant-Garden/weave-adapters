@@ -1,0 +1,41 @@
+# Build output
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test & coverage artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+profile.cov
+*.prof
+
+# Go workspace (not used yet; keep local if introduced)
+go.work
+go.work.sum
+
+# Dependency vendoring (we use the module cache, not vendor/)
+/vendor/
+
+# Editor / IDE
+/.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Local env / secrets (config precedence supports *_FILE mounts; never commit)
+.env
+.env.local
+*.local.yaml
+*.pem
+*.key
