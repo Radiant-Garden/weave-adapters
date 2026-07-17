@@ -1,0 +1,146 @@
+version: '3'
+
+vars:
+  BINARY: weave-adapter-dhcp-windows
+  CMD_PATH: ./cmd/weave-adapter-dhcp-windows
+  BIN_DIR: bin
+  # Linux artifact COPYed into the Docker image (host-built, like weave).
+  DOCKER_ARTIFACT: weave-adapter-dhcp-windows-linux-arm64
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo "dev"
+  LDFLAGS: -ldflags "-X main.version={{.VERSION}}"
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: Build the host binary into bin/
+    cmds:
+      - go build {{.LDFLAGS}} -o {{.BIN_DIR}}/{{.BINARY}} {{.CMD_PATH}}
+
+  build-windows:
+    desc: Cross-compile the windows/amd64 binary (primary release artifact)
+    env:
+      GOOS: windows
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+    cmds:
+      - go build {{.LDFLAGS}} -o {{.BIN_DIR}}/{{.BINARY}}.exe {{.CMD_PATH}}
+
+  build:docker:
+    desc: Cross-compile the static linux/arm64 binary for the Docker image
+    env:
+      GOOS: linux
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+    cmds:
+      - go build {{.LDFLAGS}} -o {{.DOCKER_ARTIFACT}} {{.CMD_PATH}}
+
+  run:
+    desc: Run the binary from source
+    cmds:
+      - go run {{.LDFLAGS}} {{.CMD_PATH}}
+
+  test:
+    desc: Run tests with the race detector and shuffled order
+    cmds:
+      - go test -race -shuffle=on ./...
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run ./...
+
+  lint-fix:
+    desc: Run golangci-lint with autofix
+    cmds:
+      - golangci-lint run --fix ./...
+
+  fmt:
+    desc: Format code (gofmt + gofumpt via golangci-lint)
+    cmds:
+      - golangci-lint fmt ./...
+
+  check:
+    desc: Format, vet and lint (fixes formatting, then fails on remaining issues)
+    cmds:
+      - task: fmt
+      - task: vet
+      - task: lint
+
+  vulncheck:
+    desc: Scan for known vulnerabilities (govulncheck)
+    cmds:
+      - go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  tidy:
+    desc: Tidy go.mod / go.sum
+    cmds:
+      - go mod tidy
+
+  generate:
+    desc: Run code/doc generators (event-catalog docs arrive in Phase 3)
+    cmds:
+      - go generate ./...
+
+  generate-check:
+    desc: Regenerate and fail if generated artifacts are out of date
+    cmds:
+      - task: generate
+      # Scope the diff to generated outputs only, so an otherwise-dirty working
+      # tree doesn't fail the check. Add paths here as generators land:
+      # docs/ (event catalog, Phase 3), api/**/generated (oapi-codegen, M2).
+      - git diff --exit-code -- docs
+
+  up:
+    desc: Build the linux binary and start the adapter in Docker
+    deps: [build:docker]
+    vars:
+      HASH:
+        sh: shasum -a 256 {{.DOCKER_ARTIFACT}} | cut -c1-12
+    cmds:
+      - BINARY_HASH={{.HASH}} docker compose up -d --build
+      - echo "adapter up — health at http://localhost:8444/api/v1/health"
+
+  down:
+    desc: Stop the adapter container
+    cmds:
+      - docker compose down
+
+  logs:
+    desc: Follow the adapter container logs
+    cmds:
+      - docker compose logs -f
+
+  restart:
+    desc: Rebuild and restart the adapter container
+    cmds:
+      - task: down
+      - task: up
+
+  rebuild:
+    desc: Force a no-cache rebuild (use when the image is not updating)
+    deps: [build:docker]
+    cmds:
+      - docker compose down
+      - docker compose build --no-cache
+      - docker compose up -d
+
+  ci:
+    desc: Full local CI gate — mirrors the GitHub Actions pipeline
+    cmds:
+      - task: check
+      - task: generate-check
+      - task: build
+      - task: build-windows
+      - task: test
+      - task: vulncheck

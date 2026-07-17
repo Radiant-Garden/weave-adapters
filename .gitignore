@@ -7,6 +7,9 @@
 *.so
 *.dylib
 
+# Host-built Docker artifact (COPYed into the image)
+weave-adapter-dhcp-windows-linux-arm64
+
 # Test & coverage artifacts
 *.test
 *.out
@@ -21,6 +24,10 @@ go.work.sum
 
 # Dependency vendoring (we use the module cache, not vendor/)
 /vendor/
+
+#LLM
+/.claude
+CLAUDE.md
 
 # Editor / IDE
 /.idea/
