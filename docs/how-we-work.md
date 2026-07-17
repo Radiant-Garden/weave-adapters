@@ -115,6 +115,39 @@ into an `ubuntu` image (the same pattern weave uses), then starts it via
 `docker-compose` on `:8444` with a health check. Docker is a local-dev
 convenience; the production artifact is the Windows `.exe`.
 
+## Tests
+
+We follow a shared set of testing conventions (adopted from the sibling `weave`
+project):
+
+- **Doc block** — every `_test.go` opens with a `/* */` block scoped to its
+  production file, listing what's tested and what isn't:
+
+  ```go
+  /*
+  Testing: config.go
+
+  Pending:            // functions with no coverage yet
+  Tested:             // prodFunc -> - TestFunc: description
+  Tested elsewhere:   // covered in integration/E2E or another package
+  Declined:           // deliberately not tested, with reason
+  Additional Remarks: // free-form; always present
+  */
+  ```
+
+  All five sections are always present, even when empty.
+
+- **Library:** [`testify`](https://github.com/stretchr/testify) — `require` for
+  preconditions (stops the test), `assert` for verifications (continues).
+- **Naming:** `TestUnit_ShouldBehaviorWhenCondition` (the `When` clause is
+  optional). Table-test cases use the same "should … when …" phrasing.
+- **Structure:** Arrange-Act-Assert.
+- **One `_test.go` per `.go` file**, even when there are no tests yet (the doc
+  block records what's still pending). Prefer table-driven tests; every subtest
+  calls `t.Parallel()`.
+
+Run them with `task test` (race detector + shuffled order).
+
 ## CI
 
 Every push and pull request runs the quality gate: build (host + `windows/amd64`),
