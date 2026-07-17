@@ -1,0 +1,16 @@
+# weave-adapter-dhcp-windows — example configuration
+#
+# Every key is optional; unset keys fall back to the built-in defaults shown.
+# Precedence (highest first): flags > env (WEAVE_ADAPTER_*) > this file > defaults.
+# Point the binary at a file with:  --config /path/to/config.toml
+
+# TCP port the HTTP server listens on.
+port = 8444
+
+# HTTPS/TLS is not implemented in M1, so this must be true.
+# Setting it to false fails startup on purpose (so the flag can't silently
+# do nothing).
+disableHttps = true
+
+# Log level: debug | info | warn | error
+logSeverity = "info"
