@@ -1,0 +1,44 @@
+# .dockerignore — keep the build context tiny; the image only needs the
+# host-built weave-adapter-dhcp-windows-linux-arm64 binary.
+
+# VCS / IDE / OS
+.git
+.gitignore
+.github
+.idea
+.vscode
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Go sources & module cache (binary is built on the host, not in-image)
+cmd/
+internal/
+*.go
+go.mod
+go.sum
+
+# Build artifacts (except the linux binary COPYed by the Dockerfile)
+bin/
+dist/
+*.exe
+*.test
+*.out
+coverage.*
+
+# Tooling & docs
+Taskfile.yml
+.golangci.yml
+Dockerfile
+.dockerignore
+docker-compose.yml
+bruno/
+docs/
+*.md
+
+# Local config / secrets
+*.toml
+.env
+*.pem
+*.key

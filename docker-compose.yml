@@ -1,0 +1,20 @@
+services:
+  adapter:
+    image: weave-adapter-dhcp-windows:latest
+    container_name: weave-adapter-dhcp-windows
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        - BINARY_HASH=${BINARY_HASH:-unknown}
+    ports:
+      - "8444:8444"
+    environment:
+      - TZ=Europe/Berlin
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8444/api/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
