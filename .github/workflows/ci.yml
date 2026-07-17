@@ -3,7 +3,12 @@ name: CI
 on:
   push:
     branches: [main]
+    # Skip CI when a push touches only docs (no code to gate).
+    paths-ignore:
+      - "docs/**"
   pull_request:
+    paths-ignore:
+      - "docs/**"
 
 permissions:
   contents: read
