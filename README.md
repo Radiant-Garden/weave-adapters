@@ -7,7 +7,6 @@
 [![CI](https://github.com/Radiant-Garden/weave-adapters/actions/workflows/ci.yml/badge.svg)](https://github.com/Radiant-Garden/weave-adapters/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/gh/Radiant-Garden/weave-adapters/branch/main/graph/badge.svg)](https://codecov.io/gh/Radiant-Garden/weave-adapters)
 [![Go Reference](https://pkg.go.dev/badge/github.com/radiantgarden/weave-adapters.svg)](https://pkg.go.dev/github.com/radiantgarden/weave-adapters)
-[![Go Report Card](https://goreportcard.com/badge/github.com/radiantgarden/weave-adapters)](https://goreportcard.com/report/github.com/radiantgarden/weave-adapters)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
 `weave-adapter-dhcp-windows` exposes Windows Server DHCP as a predictable,
@@ -25,44 +24,19 @@ scopes, reservations, and leases the same way.
 🟡 **Work toward `1.0.0` is in progress.** APIs may still change before the
 1.0.0 tag.
 
-## Quick start
-
-```bash
-# Build
-task build            # or: go build ./cmd/weave-adapter-dhcp-windows
-
-# Configure (all keys optional; flags > env WEAVE_ADAPTER_* > file > defaults)
-cp config.example.toml config.toml
-
-# Run
-./weave-adapter-dhcp-windows --config config.toml
-```
-
-Or with Docker:
-
-```bash
-docker compose up
-```
-
-Check it's alive:
-
-```bash
-curl http://localhost:8444/api/v1/health
-```
-
 ## Documentation
 
+🚧 **Work in progress.**
+
 - [`docs/`](docs/) — how the project works, event catalog, and more.
-- [`.claude/plans/`](.claude/plans/) — architecture, API conventions, and roadmap.
 - API is spec-first OpenAPI (`api/<adapter>/openapi.yaml`).
 
-## Maintainer & usage
+## Maintainer
 
-Maintained by **[Radiant Garden](https://radiantgarden.io)**.
-
-Built for **[weave](https://weave.radiantgarden.io)** — but **free for
-individual use** under the [Apache 2.0 license](LICENSE).
+Maintained by **[Radiant Garden](https://radiantgarden.io)**, built for
+**[weave](https://weave.radiantgarden.io)**.
 
 ## License
 
-[Apache License 2.0](LICENSE) © Radiant Garden
+Licensed under the [Apache License 2.0](LICENSE) — free to use, modify, and
+distribute, including commercially.
