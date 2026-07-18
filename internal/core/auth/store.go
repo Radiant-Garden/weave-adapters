@@ -176,8 +176,15 @@ func (s *Store) validate() error {
 }
 
 // Save writes the store atomically: a temp file in the destination directory is
-// written, permissioned, and renamed over the target, so an interrupted write
-// can never leave a half-written token file that locks every caller out.
+// written, flushed to disk, permissioned, and renamed over the target, so an
+// interrupted write can never leave a half-written token file that locks every
+// caller out.
+//
+// The fsyncs are what make that true of a power loss and not merely of a killed
+// process. Without the file sync the rename can reach disk before the bytes,
+// leaving a zero-length tokens.toml and no way in; without the directory sync
+// the rename itself can be lost, which for a revoke means a token the operator
+// was told is dead comes back live.
 func (s *Store) Save(path string) error {
 	data, err := toml.Marshal(s)
 	if err != nil {
@@ -209,17 +216,49 @@ func (s *Store) Save(path string) error {
 		return fmt.Errorf("replacing token file %q: %w", path, err)
 	}
 
+	return syncDir(dir)
+}
+
+// syncDir flushes a directory entry so a completed rename survives a power loss.
+//
+// A failure to open the directory is not reported: on Windows a directory
+// handle cannot be opened for sync this way at all, and the rename has already
+// succeeded, so the only thing lost is the durability upgrade. A failed Sync on
+// a handle we did open is reported, except where the platform rejects the
+// operation outright.
+func syncDir(dir string) error {
+	f, err := os.Open(dir) //nolint:gosec // the destination directory, derived from the caller's own path
+	if err != nil {
+		// The rename already succeeded; only the durability upgrade is lost.
+		return nil
+	}
+
+	defer func() { _ = f.Close() }()
+
+	if err := f.Sync(); err != nil && !errors.Is(err, os.ErrInvalid) {
+		return fmt.Errorf("syncing directory %q: %w", dir, err)
+	}
+
 	return nil
 }
 
-// writeAndClose writes data to f and closes it, reporting whichever step fails.
-// The close error matters: a deferred close would discard a failed flush, and
-// the rename would then publish a truncated file.
+// writeAndClose writes data to f, flushes it to disk, and closes it, reporting
+// whichever step fails. The close error matters: a deferred close would discard
+// a failed flush, and the rename would then publish a truncated file.
 func writeAndClose(f *os.File, data []byte) error {
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 
 		return fmt.Errorf("writing %q: %w", f.Name(), err)
+	}
+
+	// Before the close, and before the rename that follows it: a rename that
+	// reaches disk ahead of the bytes publishes a zero-length token file, which
+	// locks every caller out until the credentials are re-minted.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+
+		return fmt.Errorf("syncing %q: %w", f.Name(), err)
 	}
 
 	if err := f.Close(); err != nil {
