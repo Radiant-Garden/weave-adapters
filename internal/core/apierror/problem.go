@@ -1,0 +1,122 @@
+// Package apierror is the adapter's uniform error model: every client-facing
+// failure is an RFC 9457 application/problem+json response backed by a
+// cataloged event.
+//
+// The pairing is the point. WriteError emits the event and renders the body
+// from the same catalog entry, so the operator log line and the error weave
+// receives cannot drift apart, and every error a client sees is also a
+// documented, ID'd log line with caller context.
+//
+// Handlers return errors; they never log and respond. WriteError is the single
+// place that does both.
+package apierror
+
+import (
+	"fmt"
+
+	"github.com/radiantgarden/weave-adapters/internal/core/events"
+)
+
+// contentType is the RFC 9457 media type for problem responses.
+const contentType = "application/problem+json"
+
+// Problem is an RFC 9457 problem detail. Fields beyond the standard set
+// (requestId, backendError, errors) are the extensions this API defines.
+type Problem struct {
+	// Type is a stable slug identifying the error class, e.g.
+	// "weave-adapters:not-found". Clients may switch on it.
+	Type string `json:"type"`
+	// Title is a short, human-readable summary of the error class.
+	Title string `json:"title"`
+	// Status is the HTTP status code.
+	Status int `json:"status"`
+	// Detail explains this specific occurrence. It is curated for clients — it
+	// never carries an internal error message.
+	Detail string `json:"detail,omitempty"`
+	// Instance is the request path the error occurred on.
+	Instance string `json:"instance,omitempty"`
+	// RequestID correlates the response with the adapter's logs.
+	RequestID string `json:"requestId,omitempty"`
+	// BackendError is a sanitized message from the backend service, when the
+	// failure originated there.
+	BackendError string `json:"backendError,omitempty"`
+	// Errors lists every field that failed validation, so a client can fix all
+	// of them in one round trip rather than one per attempt.
+	Errors []FieldError `json:"errors,omitempty"`
+}
+
+// FieldError is one field-level validation failure.
+type FieldError struct {
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
+
+// Error is a client-facing error bound to a cataloged event. Construct one with
+// a taxonomy constructor (NotFound, BackendTimeout, …) rather than directly, so
+// the event binding cannot be forgotten.
+type Error struct {
+	// eventID is the catalog entry that supplies the detail template, response
+	// code, and log level.
+	eventID events.EventID
+	// fields fill the {{key}} placeholders in the event's ResponseDetail and
+	// become the event's data group.
+	fields map[string]any
+	// cause is the internal error. It reaches the operator log and never the
+	// client.
+	cause error
+	// fieldErrors are validation failures rendered into the errors[] extension.
+	fieldErrors []FieldError
+	// backendError is a sanitized backend message, safe to return.
+	backendError string
+}
+
+// newError builds an Error for the given catalog event.
+func newError(eventID events.EventID, fields map[string]any) *Error {
+	return &Error{eventID: eventID, fields: fields}
+}
+
+// Error implements error. It renders the operator-facing form — including the
+// cause — and is never what a client sees.
+func (e *Error) Error() string {
+	spec, ok := events.Get(e.eventID)
+	if !ok {
+		return fmt.Sprintf("unregistered event %s", e.eventID)
+	}
+
+	msg := render(spec.ResponseDetail, e.fields)
+	if e.cause != nil {
+		return msg + ": " + e.cause.Error()
+	}
+
+	return msg
+}
+
+// Unwrap exposes the internal cause to errors.Is / errors.As.
+func (e *Error) Unwrap() error { return e.cause }
+
+// EventID returns the catalog event backing this error.
+func (e *Error) EventID() events.EventID { return e.eventID }
+
+// WithCause attaches the internal error that led here. The cause is logged with
+// the event and never appears in the response body.
+func (e *Error) WithCause(cause error) *Error {
+	e.cause = cause
+
+	return e
+}
+
+// WithBackendError attaches a sanitized backend message, surfaced to the client
+// in the backendError extension. Only pass text that is safe to return —
+// callers are responsible for stripping credentials and internal hostnames.
+func (e *Error) WithBackendError(message string) *Error {
+	e.backendError = message
+
+	return e
+}
+
+// WithFieldErrors attaches field-level validation failures.
+func (e *Error) WithFieldErrors(fieldErrors ...FieldError) *Error {
+	e.fieldErrors = append(e.fieldErrors, fieldErrors...)
+
+	return e
+}

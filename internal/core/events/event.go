@@ -53,6 +53,37 @@ func (i Impact) String() string {
 	}
 }
 
+// ResponseCode names a client-facing error class. It lives here rather than in
+// apierror because Event carries it: the catalog declares a code, and apierror
+// maps it to an HTTP status, title, and problem+json type. Putting the constants
+// in apierror would make the catalog import it, and apierror already imports the
+// catalog for event IDs.
+type ResponseCode string
+
+// The core error taxonomy. Adapters map their backend failures onto these codes;
+// they may add their own, but never a second error shape. Codes gain HTTP
+// meaning in internal/core/apierror.
+const (
+	// CodeValidationFailed — the request was malformed or failed validation (400).
+	CodeValidationFailed ResponseCode = "validation-failed"
+	// CodeUnauthorized — authentication was missing or invalid (401).
+	CodeUnauthorized ResponseCode = "unauthorized"
+	// CodeNotFound — the addressed resource does not exist (404).
+	CodeNotFound ResponseCode = "not-found"
+	// CodeConflict — the request conflicts with current state (409).
+	CodeConflict ResponseCode = "conflict"
+	// CodePreconditionFailed — a conditional request precondition failed (412).
+	CodePreconditionFailed ResponseCode = "precondition-failed"
+	// CodeBackendUnreachable — the backend could not be contacted (502).
+	CodeBackendUnreachable ResponseCode = "backend-unreachable"
+	// CodeBackendError — the backend answered with a failure (502).
+	CodeBackendError ResponseCode = "backend-error"
+	// CodeBackendTimeout — the backend did not answer in time (504).
+	CodeBackendTimeout ResponseCode = "backend-timeout"
+	// CodeInternal — an unexpected adapter fault (500).
+	CodeInternal ResponseCode = "internal"
+)
+
 // FieldDef documents an expected field carried by an event.
 type FieldDef struct {
 	Name        string // Field name
@@ -82,11 +113,12 @@ type Event struct {
 	// context for a request-scoped event.
 	ExternalSource bool
 
-	// Event-derived API error fields (consumed in a later milestone). If
-	// ResponseDetail is set, ResponseCode must be too (enforced at Register).
-	ResponseDetail string   // Curated consumer message with {{key}} placeholders
-	ResponseCode   string   // Maps to the problem+json error taxonomy
-	Impacts        []Impact // Static consequences
+	// Event-derived API error fields. If ResponseDetail is set, ResponseCode
+	// must be too (enforced at Register). apierror renders the problem+json
+	// body from these, so the operator log line and the client error agree.
+	ResponseDetail string       // Curated consumer message with {{key}} placeholders
+	ResponseCode   ResponseCode // Maps to the problem+json error taxonomy
+	Impacts        []Impact     // Static consequences
 }
 
 // EventCategory is a category prefix within the catalog.

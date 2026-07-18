@@ -5,7 +5,7 @@ Pending:
 
 Tested:
   Recovery
-    - TestRecovery_ShouldReturn500AndEmitOnPanic: a panic yields 500, API-011, and catalog conformance.
+    - TestRecovery_ShouldReturn500AndEmitOnPanic: a panic yields a 500 problem+json, API-011 only, and no leaked panic text.
     - TestRecovery_ShouldPassThroughWhenNoPanic: normal responses are untouched.
     - TestRecovery_ShouldRepanicAbortHandler: http.ErrAbortHandler is re-panicked, not logged.
     - TestRecovery_ShouldNotOverwriteWrittenResponse: a panic after a write does not clobber the response.
@@ -22,10 +22,12 @@ Additional Remarks:
 package middleware
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
+	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 	eventstest "github.com/radiantgarden/weave-adapters/internal/core/events/testing"
 	"github.com/stretchr/testify/assert"
@@ -47,11 +49,26 @@ func TestRecovery_ShouldReturn500AndEmitOnPanic(t *testing.T) { //nolint:paralle
 		Recovery(panicky).ServeHTTP(rw, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/x", nil))
 	})
 
-	// ASSERT
+	// ASSERT — the body is problem+json like every other error the API returns.
 	assert.Equal(t, http.StatusInternalServerError, rw.Code)
+	assert.Equal(t, "application/problem+json", rw.Header().Get("Content-Type"))
+
+	var problem apierror.Problem
+	require.NoError(t, json.Unmarshal(rw.Body.Bytes(), &problem))
+	assert.Equal(t, "weave-adapters:internal", problem.Type)
+	assert.Equal(t, http.StatusInternalServerError, problem.Status)
+	assert.Equal(t, "/x", problem.Instance)
+
+	// The panic detail belongs in the log, never in the response.
+	assert.NotContains(t, rw.Body.String(), "boom")
+
 	rec.AssertEmitted(t, catalog.API011)
 	rec.AssertData(t, catalog.API011, "panic", "boom")
 	rec.AssertMatchesCatalog(t)
+
+	// One panic, one event: Recovery renders the body itself rather than going
+	// through WriteError, which would emit API-908 on top of API-011.
+	rec.AssertNotEmitted(t, catalog.API908)
 }
 
 func TestRecovery_ShouldPassThroughWhenNoPanic(t *testing.T) { //nolint:paralleltest // installs the global emitter hook

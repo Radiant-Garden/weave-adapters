@@ -1,19 +1,20 @@
 package middleware
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"runtime/debug"
 
+	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 )
 
 // Recovery is the outermost middleware: it recovers a panic from any inner
-// handler, emits API-011, and returns 500 — unless the response was already
-// (partly) written, in which case it leaves it alone. http.ErrAbortHandler is
+// handler, emits API-011, and returns a 500 problem+json — unless the response
+// was already (partly) written, in which case it leaves it alone.
+// http.ErrAbortHandler is
 // re-panicked so net/http performs its silent connection abort. Because
 // Recovery wraps RequestID, the caller context is not on its request when a
 // panic unwinds, so it reads the request ID from the response header and passes
@@ -45,10 +46,17 @@ func Recovery(next http.Handler) http.Handler {
 				return // response already committed; a 500 now would corrupt it.
 			}
 
-			rw.Header().Set("Content-Type", "application/json")
-			rw.WriteHeader(http.StatusInternalServerError)
-			// problem+json arrives with apierror in M2.
-			_ = json.NewEncoder(rw).Encode(map[string]string{"error": "internal server error"})
+			// WriteProblem, not WriteError: API-011 above is already this
+			// panic's log line, and WriteError would emit API-908 as well,
+			// making one panic look like two failures.
+			apierror.WriteProblem(rw, apierror.Problem{
+				Type:      apierror.TypeFor(events.CodeInternal),
+				Title:     apierror.TitleFor(events.CodeInternal),
+				Status:    http.StatusInternalServerError,
+				Detail:    "An unexpected error occurred.",
+				Instance:  r.URL.Path,
+				RequestID: rw.Header().Get(requestIDHeader),
+			})
 		}()
 
 		next.ServeHTTP(rw, r)
