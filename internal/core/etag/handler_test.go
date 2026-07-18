@@ -7,6 +7,7 @@ Tested:
   Conditional
     - TestConditional_ShouldTagASuccessfulResponse: 200 carries an ETag and the body.
     - TestConditional_ShouldAnswer304WhenTagMatches: the polling case, with no body.
+    - TestConditional_ShouldNotWriteABodyOnTheWireFor304: a real listener, where a recorder would mask it.
     - TestConditional_ShouldSendTheBodyWhenTagDiffers: a changed representation is not a 304.
     - TestConditional_ShouldMatchWeakAndListedTags: weak forms and multi-value headers hit.
     - TestConditional_ShouldNotTagErrorResponses: a 404 is passed through untagged.
