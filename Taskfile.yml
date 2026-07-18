@@ -40,6 +40,35 @@ tasks:
     cmds:
       - go build {{.LDFLAGS}} -o {{.DOCKER_ARTIFACT}} {{.CMD_PATH}}
 
+  ci:windows:
+    desc: The gate the self-hosted WS2022 runner executes (build + test + smoke)
+    cmds:
+      # Deliberately NOT `task ci`. That gate is for a developer machine and a
+      # cloud runner; this one runs on an infra-managed host as an unprivileged
+      # service account, so it carries only the checks that Windows can answer
+      # and Linux cannot:
+      #
+      #   omitted: check (fmt/vet/lint) — golangci-lint is not on the runner by
+      #     design, and lint results are platform-independent, so ci.yml already
+      #     covers them on ubuntu. Adding it here would mean asking infra to pin
+      #     a second toolchain for a duplicate signal.
+      #   omitted: generate-check — docgen output diffed against git, which is
+      #     line-ending sensitive; a CRLF checkout would fail it spuriously.
+      #   omitted: vulncheck — fetches govulncheck@latest at run time. Unpinned
+      #     remote code should not execute on an internal host, and ci.yml
+      #     already scans on ubuntu.
+      - task: build-windows
+      - task: test
+      - task: smoke:windows
+
+  smoke:windows:
+    desc: Run the built .exe on this Windows host and verify it serves (WS2022 only)
+    deps: [build-windows]
+    cmds:
+      # Deliberately not part of `task ci`: ci runs on macOS and Linux too,
+      # where there is no .exe to drive. The Windows runner calls this after ci.
+      - pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-windows.ps1
+
   run:
     desc: Run the binary from source
     cmds:
