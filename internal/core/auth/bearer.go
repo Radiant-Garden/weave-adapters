@@ -80,7 +80,21 @@ func Bearer(v *Verifier, skip func(*http.Request) bool) func(http.Handler) http.
 // authenticate resolves the request's credential, returning an *apierror.Error
 // bound to the event describing the failure.
 func authenticate(v *Verifier, r *http.Request) (Entry, error) {
-	header := r.Header.Get(authorizationHeader)
+	// Values, not Get: RFC 9110 §11.6.2 allows exactly one Authorization field,
+	// and Get would silently authenticate the first. If a fronting proxy honors
+	// the last instead, the two layers would be authenticating different
+	// credentials — the proxy admitting one caller while the adapter logs
+	// another. Rejecting keeps them from ever disagreeing.
+	presented := r.Header.Values(authorizationHeader)
+
+	switch {
+	case len(presented) == 0:
+		return Entry{}, apierror.New(catalog.API020)
+	case len(presented) > 1:
+		return Entry{}, apierror.New(catalog.API021, "scheme", "(multiple)")
+	}
+
+	header := presented[0]
 	if header == "" {
 		return Entry{}, apierror.New(catalog.API020)
 	}
@@ -134,10 +148,23 @@ func bearerToken(header string) (token string, ok bool) {
 // weave's credential store sends apiToken verbatim — so echoing the "scheme"
 // would write a live token into the log. "(none)" is also the more useful
 // diagnostic: it says the header had no scheme at all, which is the fix.
+//
+// Everything before the first space is only a scheme if it looks like one. A
+// value of "wadapt_… x" would otherwise log the credential's leading characters:
+// far too few to brute-force, but the catalog promises API-021 carries "never
+// the credential", and a partial credential is still part of one. Anything
+// carrying our token prefix, or that is not an RFC 9110 token, is reported as
+// "(unrecognized)" — which is also the truer diagnostic, since a value that
+// cannot be a scheme name tells the operator the header is malformed rather
+// than merely using the wrong scheme.
 func loggedScheme(header string) string {
 	scheme, _, found := strings.Cut(header, " ")
 	if !found {
 		return "(none)"
+	}
+
+	if strings.HasPrefix(scheme, TokenPrefix) || !isSchemeToken(scheme) {
+		return "(unrecognized)"
 	}
 
 	if len(scheme) > maxLoggedSchemeLen {
@@ -145,4 +172,27 @@ func loggedScheme(header string) string {
 	}
 
 	return scheme
+}
+
+// isSchemeToken reports whether s is a non-empty RFC 9110 token, the production
+// an auth scheme name has to satisfy.
+func isSchemeToken(s string) bool {
+	if s == "" {
+		return false
+	}
+
+	// Named for the scheme, not the token: gosec.G101 reads any const whose name
+	// contains "token" as a possible credential.
+	const schemeSpecials = "!#$%&'*+-.^_`|~"
+
+	for i := range len(s) {
+		c := s[i]
+
+		isAlphanumeric := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		if !isAlphanumeric && !strings.ContainsRune(schemeSpecials, rune(c)) {
+			return false
+		}
+	}
+
+	return true
 }

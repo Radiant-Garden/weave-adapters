@@ -9,6 +9,7 @@ Tested:
     - TestBearer_ShouldPopulateCallerSubjectFromLabel: events answer "who did this".
     - TestBearer_ShouldExposeSubjectToOuterMiddleware: the request-audit line sees the identity too.
     - TestBearer_ShouldRejectEachFailureModeWithItsOwnEvent: four modes, four events, all 401.
+    - TestBearer_ShouldRejectSeveralAuthorizationHeaders: RFC 9110 allows one; two layers must not read different ones.
     - TestBearer_ShouldNotDistinguishExpiredFromUnknown: no validity oracle.
     - TestBearer_ShouldSkipUnauthenticatedPaths: health stays open.
     - TestBearer_ShouldAcceptSchemeCaseInsensitively: RFC 9110 says the scheme is case-insensitive.
@@ -208,6 +209,36 @@ func TestBearer_ShouldRejectEachFailureModeWithItsOwnEvent(t *testing.T) {
 }
 
 //nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestBearer_ShouldRejectSeveralAuthorizationHeaders(t *testing.T) {
+	// ARRANGE — two Authorization fields, the second one valid. RFC 9110 allows
+	// exactly one, so this request is malformed however it is read.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	handler := Bearer(newVerifier(entryFor("weave-prod", fixtureValue, nil)), nil)(
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("handler must not be reached") }),
+	)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/leases", nil)
+	req = req.WithContext(events.WithCaller(req.Context(), events.Caller{RemoteAddr: "192.0.2.1:1234"}))
+	req.Header.Add(authorizationHeader, "Bearer wadapt_nope")
+	req.Header.Add(authorizationHeader, "Bearer "+fixtureValue)
+
+	resp := httptest.NewRecorder()
+
+	// ACT
+	handler.ServeHTTP(resp, req)
+
+	// ASSERT — taking the first would authenticate a different credential than a
+	// fronting proxy honoring the last, letting the two layers admit one caller
+	// and attribute the request to another.
+	assert.Equal(t, http.StatusUnauthorized, resp.Code)
+	rec.AssertEmittedN(t, catalog.API021, 1)
+	rec.AssertData(t, catalog.API021, "scheme", "(multiple)")
+	rec.AssertMatchesCatalog(t)
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
 func TestBearer_ShouldNotDistinguishExpiredFromUnknown(t *testing.T) {
 	// ARRANGE — an expired token and a token that was never configured.
 	rec := eventstest.NewRecorder()
@@ -345,6 +376,16 @@ func TestLoggedScheme_ShouldNotEchoABareCredential(t *testing.T) {
 	// A real scheme is safe to log, and long ones are truncated.
 	assert.Equal(t, "Basic", loggedScheme("Basic dXNlcjpwYXNz"))
 	assert.LessOrEqual(t, len(loggedScheme(strings.Repeat("A", 200)+" x")), maxLoggedSchemeLen+len("…"))
+
+	// A credential with anything appended has a "scheme" that is really its
+	// first 16 characters. Length-bounding it is not enough — the catalog says
+	// API-021 never carries the credential, and part of one still is one.
+	appended := loggedScheme(bare + " trailing")
+	assert.Equal(t, "(unrecognized)", appended)
+	assert.NotContains(t, appended, "wadapt")
+
+	// Nor is anything that could not be a scheme name in the first place.
+	assert.Equal(t, "(unrecognized)", loggedScheme(`{"token":"x"} y`))
 }
 
 // FuzzBearerToken drives the parser with arbitrary header bytes: the value is
