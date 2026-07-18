@@ -1,10 +1,10 @@
 name: Windows verify
 
 # Runs the full gate *natively* on the Windows Server 2022 host, then proves the
-# built .exe actually serves. This is what closes M1's last open item — the
+# built .exe actually serves. This is what closes M1's last open item -- the
 # "runs on WS2022" claim that cross-compilation cannot establish.
 #
-# SECURITY — this repository is PUBLIC and this job runs on a self-hosted
+# SECURITY -- this repository is PUBLIC and this job runs on a self-hosted
 # runner inside the on-prem network, on a host that will hold DHCP
 # administrative rights. Code that reaches this runner is code executing on
 # internal infrastructure. Three layers keep untrusted code away from it:
@@ -12,11 +12,11 @@ name: Windows verify
 #   1. NO pull_request TRIGGER. This is the load-bearing one. Only push-to-main
 #      and manual dispatch start this workflow, and both require write access
 #      to the repository. A fork cannot trigger either, so an outside
-#      contributor has no path to this runner at all — not a guarded path, no
+#      contributor has no path to this runner at all -- not a guarded path, no
 #      path. Trunk-based development (docs/how-we-work.md) makes this cheap:
 #      work lands on main, so push coverage is effectively full coverage.
 #   2. The same-repo condition on the job below. Inert while there is no
-#      pull_request trigger — it exists as a tripwire, so that re-adding one
+#      pull_request trigger -- it exists as a tripwire, so that re-adding one
 #      does not silently open the runner.
 #   3. Third-party actions pinned to commit SHAs, not tags. A tag is mutable:
 #      whoever controls actions/checkout can repoint v6 and run arbitrary code
@@ -28,7 +28,7 @@ name: Windows verify
 #
 # Do not add pull_request or pull_request_target here. If PR-time Windows
 # coverage is ever genuinely needed, the answer is a merge queue or a
-# maintainer-triggered dispatch — not opening this trigger up.
+# maintainer-triggered dispatch -- not opening this trigger up.
 on:
   push:
     branches: [main]
@@ -48,7 +48,7 @@ concurrency:
 jobs:
   verify:
     name: Build, test & smoke on WS2022
-    # Tripwire — see layer 2 in the SECURITY note above. Inert today, since
+    # Tripwire -- see layer 2 in the SECURITY note above. Inert today, since
     # nothing here fires on pull_request; it is here so that adding one does
     # not silently expose the runner.
     if: >-
@@ -58,13 +58,21 @@ jobs:
     timeout-minutes: 25
     defaults:
       run:
-        # Windows PowerShell 5.1, which WS2022 ships. Not `pwsh` — PowerShell 7
+        # Windows PowerShell 5.1, which WS2022 ships. Not `pwsh` -- PowerShell 7
         # is a separate install the runner does not have, and asking infra to
         # add one would buy nothing this gate needs.
+        #
+        # KEEP THIS FILE ASCII-ONLY. GitHub writes each run: block to a .ps1
+        # temp file, and 5.1 decodes a .ps1 with no BOM using the host's ANSI
+        # codepage. On the German-locale runner that is CP1252, where the third
+        # byte of a UTF-8 em dash lands on U+201D -- which PowerShell honours as
+        # a closing double quote. One em dash inside a string silently ends it
+        # and the file fails to parse. An en/em dash, arrow or curly quote in a
+        # comment is enough; the whole file is decoded, not just the strings.
         shell: powershell
 
     steps:
-      # SHA-pinned, not tag-pinned — see layer 3 in the SECURITY note above.
+      # SHA-pinned, not tag-pinned -- see layer 3 in the SECURITY note above.
       # Comments record the tag each SHA corresponded to when pinned.
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -72,7 +80,7 @@ jobs:
 
       # No actions/setup-go here, deliberately. The toolchain on this host is
       # pinned and owned by infra's Ansible role; setup-go would download a
-      # second Go into the tool cache and shadow it — exactly the version skew
+      # second Go into the tool cache and shadow it -- exactly the version skew
       # infra warned about. Jobs also run as NT AUTHORITY\NetworkService, so
       # write access to the tool cache is not a given.
       #
@@ -95,11 +103,11 @@ jobs:
           if ([version]$actual -lt [version]$required) {
             # Explicit exit rather than `throw`: under shell: powershell a
             # terminating error does not reliably set a non-zero exit code.
-            Write-Host "::error::Host Go $actual is older than go.mod requires ($required). The runner's Go is pinned in infra's Ansible role and does not follow go.mod — ask the infrastructure team to bump it before merging a go.mod change."
+            Write-Host "::error::Host Go $actual is older than go.mod requires ($required). The runner's Go is pinned in infra's Ansible role and does not follow go.mod -- ask the infrastructure team to bump it before merging a go.mod change."
             exit 1
           }
 
-      # Scoped to what only Windows can answer — build, test, and drive the real
+      # Scoped to what only Windows can answer -- build, test, and drive the real
       # .exe. See the ci:windows task for what is omitted and why.
       - name: Windows gate (build, test, smoke)
         run: task ci:windows

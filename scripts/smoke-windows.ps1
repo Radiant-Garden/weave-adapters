@@ -16,7 +16,7 @@
   Step 5 sends a real console Ctrl+C, because "a console exe receives
   os.Interrupt on Windows Server 2022" is an assumption main.go states but
   nothing has ever verified. If the console attach fails the check downgrades
-  to a warning rather than failing the run — a flaky signal-delivery trick
+  to a warning rather than failing the run -- a flaky signal-delivery trick
   must not be able to redden an otherwise-good build.
 
 .PARAMETER Exe
@@ -45,7 +45,7 @@ function Write-Step { param([string]$Message) Write-Host "==> $Message" }
 
 # Invoke-WebRequest's -SkipHttpErrorCheck is PowerShell 7 only. WS2022 ships
 # Windows PowerShell 5.1, where any non-2xx raises a terminating error instead
-# of returning a response — and this script needs to assert on a 401, so the
+# of returning a response -- and this script needs to assert on a 401, so the
 # error path is a normal outcome here, not a failure.
 #
 # -UseBasicParsing matters for the same reason the rest of this script is
@@ -64,7 +64,7 @@ function Invoke-Endpoint {
     } catch {
         $response = $_.Exception.Response
         if ($null -eq $response) {
-            # No response at all — refused, reset or timed out. That is a real
+            # No response at all -- refused, reset or timed out. That is a real
             # failure, not an HTTP status, so let it propagate.
             throw
         }
@@ -92,7 +92,7 @@ function Stop-Adapter {
 
 try {
     if (-not (Test-Path $Exe)) {
-        throw "adapter binary not found at '$Exe' — run 'task build-windows' first"
+        throw "adapter binary not found at '$Exe' -- run 'task build-windows' first"
     }
 
     New-Item -ItemType Directory -Path $workDir -Force | Out-Null
@@ -113,7 +113,7 @@ try {
 
     $holder = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
     if ($null -ne $holder) {
-        throw "port $Port is already bound by PID $($holder.OwningProcess) — leaked state from an earlier run, or something else on the host uses it"
+        throw "port $Port is already bound by PID $($holder.OwningProcess) -- leaked state from an earlier run, or something else on the host uses it"
     }
 
     # --- 1. mint a token ------------------------------------------------------
@@ -185,7 +185,7 @@ try {
         throw "expected a 'core' component in the payload: $($resp.Content)"
     }
     if ($null -eq $body.version -or $body.version -eq "") {
-        throw "expected a non-empty version — check that -ldflags reached the build: $($resp.Content)"
+        throw "expected a non-empty version -- check that -ldflags reached the build: $($resp.Content)"
     }
 
     Write-Host "    status=$($body.status) version=$($body.version) uptime=$($body.uptimeSeconds)s"
@@ -223,7 +223,7 @@ try {
 
     if ($gracefulChecked) {
         if (-not $proc.WaitForExit(10000)) {
-            throw "adapter did not exit within 10s of Ctrl+C — graceful shutdown is hung"
+            throw "adapter did not exit within 10s of Ctrl+C -- graceful shutdown is hung"
         }
         if ($proc.ExitCode -ne 0) {
             throw "adapter exited with code $($proc.ExitCode) after Ctrl+C, expected 0:`n$(Get-Content $stderr -Raw)"
