@@ -10,6 +10,8 @@ Tested:
     - TestLookup_ShouldFallBackToInternalForUnknownCode: an unknown code answers 500, never status 0.
   TypeFor / TitleFor
     - TestTypeFor_ShouldNamespaceTheCode: types are prefixed so clients can tell them apart.
+  New
+    - TestNew_ShouldPanicWhenTheEventDeclaresNoResponse: a non-response event is a wiring bug, not a body.
   constructors
     - TestConstructors_ShouldBindTheCatalogEventAndStatus: every constructor lands on its event and status.
     - TestValidation_ShouldCarryEveryFailureAndNameThemForTheOperator: all field failures reach the client; the event names them.
@@ -111,6 +113,31 @@ func TestTypeFor_ShouldNamespaceTheCode(t *testing.T) {
 	// ACT / ASSERT
 	assert.Equal(t, "weave-adapters:not-found", TypeFor(events.CodeNotFound))
 	assert.Equal(t, "Not found", TitleFor(events.CodeNotFound))
+}
+
+func TestNew_ShouldPanicWhenTheEventDeclaresNoResponse(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		id   events.EventID
+	}{
+		{name: "should panic when the event is a lifecycle event", id: catalog.SYS001},
+		{name: "should panic when the event is not registered at all", id: events.EventID("API-999")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT / ASSERT — better a loud panic on the first request down the
+			// path than a problem+json with a bare type and an empty detail.
+			assert.PanicsWithValue(t,
+				"apierror: event "+string(tt.id)+" declares no ResponseCode/ResponseDetail, so it cannot be an API error",
+				func() { _ = New(tt.id) },
+			)
+		})
+	}
 }
 
 func TestConstructors_ShouldBindTheCatalogEventAndStatus(t *testing.T) {

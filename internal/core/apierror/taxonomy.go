@@ -1,6 +1,7 @@
 package apierror
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -69,7 +70,18 @@ func TitleFor(code events.ResponseCode) string {
 // This is the seam that keeps one rejection to one event: the owning package
 // binds its own diagnostic rather than emitting its event and then asking a core
 // constructor to emit a second one.
+//
+// It panics when the event declares no response, because the alternative is
+// serving a problem+json whose type is a bare "weave-adapters:" and whose detail
+// is empty — a malformed body that looks like a backend quirk to whoever
+// receives it. The id is always a catalog constant, so this is a wiring mistake,
+// and the first request down the path is where it should surface.
 func New(id events.EventID, fields ...any) *Error {
+	spec, ok := events.Get(id)
+	if !ok || spec.ResponseCode == "" || spec.ResponseDetail == "" {
+		panic(fmt.Sprintf("apierror: event %s declares no ResponseCode/ResponseDetail, so it cannot be an API error", id))
+	}
+
 	return newError(id, pairsToMap(fields))
 }
 
