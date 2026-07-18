@@ -19,6 +19,12 @@ Tested:
     - TestNextToken_ShouldMintATokenThisPaginatorCanParse: the encode/parse pair closes.
     - TestNextToken_ShouldMintNoTokenForAnEmptyKey: the exhausted-listing case composes into a last-page envelope.
     - TestNextToken_ShouldNotBeParseableByAnotherCollection: scopes do not cross.
+  Next
+    - TestNext_ShouldMintBothCursorForms: token and link carry the same cursor, and neither appears alone.
+    - TestNext_ShouldProduceARelativeLink: no scheme or host, so nothing is derived from Host / X-Forwarded-*.
+    - TestNext_ShouldPreserveEveryOtherQueryParameter: a dropped filter would leave later pages unfiltered.
+    - TestNext_ShouldReplaceAnExistingPageToken: one token per link, or the client loops on page 2.
+    - TestNext_ShouldBeEmptyWhenThereIsNoNextPage: exhausted listing and missing URL both yield a last page.
   NewPage / Page.MarshalJSON
     - TestNewPage_ShouldOmitNextPageTokenOnTheLastPage: absence is the end-of-listing signal.
     - TestNewPage_ShouldRenderAnEmptyCollectionAsAnArray: never "items": null.
@@ -49,6 +55,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -294,13 +301,128 @@ func TestNextToken_ShouldMintNoTokenForAnEmptyKey(t *testing.T) {
 
 	// ARRANGE / ACT — what a handler passes when the page it just built is
 	// empty, or when the listing is exhausted.
-	page := NewPage([]string{}, leasePages.NextToken(""))
+	page := NewPage([]string{}, leasePages.Next(listURL(t), ""))
 
 	// ASSERT — the degenerate case composes into a correct last-page envelope
 	// instead of a poison token that the next request would 400 on.
 	encoded, err := json.Marshal(page)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"items":[]}`, string(encoded))
+}
+
+// listURL is the request URL of a plain first-page listing.
+func listURL(t *testing.T) *url.URL {
+	t.Helper()
+
+	parsed, err := url.Parse("/api/v1/leases?pageSize=50")
+	require.NoError(t, err)
+
+	return parsed
+}
+
+func TestNext_ShouldMintBothCursorForms(t *testing.T) {
+	t.Parallel()
+
+	// ACT
+	next := leasePages.Next(listURL(t), "lease-0042")
+
+	// ASSERT — a link-following client and a token-echoing client must both be
+	// able to reach page 2, so neither form may appear without the other.
+	require.NotEmpty(t, next.Token)
+	require.NotEmpty(t, next.URL)
+
+	// The link carries the same cursor, so it parses back to the same key.
+	parsed, err := url.Parse(next.URL)
+	require.NoError(t, err)
+
+	params, err := leasePages.Parse(parsed.Query())
+	require.NoError(t, err)
+	assert.Equal(t, "lease-0042", params.After)
+}
+
+func TestNext_ShouldProduceARelativeLink(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a request as it arrives behind a proxy, where the adapter has
+	// no trustworthy view of its own external address.
+	requestURL, err := url.Parse("https://adapter.internal:8443/api/v1/leases?pageSize=50")
+	require.NoError(t, err)
+
+	// ACT
+	next := leasePages.Next(requestURL, "lease-0042")
+
+	// ASSERT — no scheme and no host, so nothing is derived from Host or
+	// X-Forwarded-* and the client resolves the link against its own base.
+	parsed, parseErr := url.Parse(next.URL)
+	require.NoError(t, parseErr)
+	assert.Empty(t, parsed.Scheme)
+	assert.Empty(t, parsed.Host)
+	assert.True(t, strings.HasPrefix(next.URL, "/api/v1/leases?"), "got %q", next.URL)
+}
+
+func TestNext_ShouldPreserveEveryOtherQueryParameter(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a filtered listing. A link-following client sends nothing but
+	// the link, so anything dropped here is dropped for every later page.
+	requestURL, err := url.Parse("/api/v1/leases?scopeId=10.0.0.0&pageSize=50&state=active")
+	require.NoError(t, err)
+
+	// ACT
+	next := leasePages.Next(requestURL, "lease-0042")
+
+	// ASSERT — losing scopeId would serve a filtered first page and an
+	// unfiltered second one, which reads as data appearing from nowhere.
+	parsed, parseErr := url.Parse(next.URL)
+	require.NoError(t, parseErr)
+
+	query := parsed.Query()
+	assert.Equal(t, "10.0.0.0", query.Get("scopeId"))
+	assert.Equal(t, "active", query.Get("state"))
+	assert.Equal(t, "50", query.Get(ParamPageSize))
+}
+
+func TestNext_ShouldReplaceAnExistingPageToken(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the request that produced page 2 already carries a token.
+	requestURL, err := url.Parse("/api/v1/leases?pageToken=" + leasePages.NextToken("lease-0042"))
+	require.NoError(t, err)
+
+	// ACT
+	next := leasePages.Next(requestURL, "lease-0099")
+
+	// ASSERT — one token, the new one. Appending would leave the stale value
+	// first, and first-wins would loop the client on page 2 forever.
+	parsed, parseErr := url.Parse(next.URL)
+	require.NoError(t, parseErr)
+	require.Len(t, parsed.Query()[ParamPageToken], 1)
+
+	params, parseErr := leasePages.Parse(parsed.Query())
+	require.NoError(t, parseErr)
+	assert.Equal(t, "lease-0099", params.After)
+}
+
+func TestNext_ShouldBeEmptyWhenThereIsNoNextPage(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		requestURL *url.URL
+		key        string
+	}{
+		{name: "should be empty for an exhausted listing", requestURL: listURL(t), key: ""},
+		{name: "should be empty without a request URL", requestURL: nil, key: "lease-0042"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT / ASSERT
+			assert.Equal(t, NextPage{}, leasePages.Next(tt.requestURL, tt.key))
+		})
+	}
 }
 
 func TestNextToken_ShouldNotBeParseableByAnotherCollection(t *testing.T) {
@@ -321,11 +443,15 @@ func TestNewPage_ShouldOmitNextPageTokenOnTheLastPage(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		next          string
+		next          NextPage
 		wantSerialize bool
 	}{
-		{name: "should omit the token when the listing is exhausted", next: "", wantSerialize: false},
-		{name: "should carry the token when more pages remain", next: "abc", wantSerialize: true},
+		{name: "should omit the token when the listing is exhausted", next: NextPage{}, wantSerialize: false},
+		{
+			name:          "should carry the token when more pages remain",
+			next:          NextPage{Token: "abc", URL: "/api/v1/leases?pageToken=abc"},
+			wantSerialize: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -336,9 +462,11 @@ func TestNewPage_ShouldOmitNextPageTokenOnTheLastPage(t *testing.T) {
 			encoded, err := json.Marshal(NewPage([]string{"a", "b"}, tt.next))
 			require.NoError(t, err)
 
-			// ASSERT — presence of the field, not a full page of items, is what
-			// tells a client to ask again.
+			// ASSERT — presence of the fields, not a full page of items, is what
+			// tells a client to ask again. Both cursor forms appear together or
+			// not at all.
 			assert.Equal(t, tt.wantSerialize, containsKey(t, encoded, "nextPageToken"))
+			assert.Equal(t, tt.wantSerialize, containsKey(t, encoded, "nextPageUrl"))
 		})
 	}
 }
@@ -350,7 +478,7 @@ func TestNewPage_ShouldRenderAnEmptyCollectionAsAnArray(t *testing.T) {
 	var none []string
 
 	// ACT
-	encoded, err := json.Marshal(NewPage(none, ""))
+	encoded, err := json.Marshal(NewPage(none, NextPage{}))
 	require.NoError(t, err)
 
 	// ASSERT — a client iterates items directly; null there is a crash, not an
@@ -391,7 +519,7 @@ func TestPage_ShouldMarshalThroughAPointer(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE — handlers often encode &page rather than the value.
-	page := NewPage([]string{"a"}, "next")
+	page := NewPage([]string{"a"}, NextPage{Token: "next", URL: "/api/v1/leases?pageToken=next"})
 
 	// ACT
 	encoded, err := json.Marshal(&page)
@@ -399,7 +527,11 @@ func TestPage_ShouldMarshalThroughAPointer(t *testing.T) {
 
 	// ASSERT — a value receiver keeps the method in the pointer's method set,
 	// so both forms render identically.
-	assert.JSONEq(t, `{"items":["a"],"nextPageToken":"next"}`, string(encoded))
+	assert.JSONEq(
+		t,
+		`{"items":["a"],"nextPageToken":"next","nextPageUrl":"/api/v1/leases?pageToken=next"}`,
+		string(encoded),
+	)
 }
 
 // renderProblem writes err through apierror and decodes the response body, so

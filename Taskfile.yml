@@ -118,7 +118,7 @@ tasks:
       - go mod tidy
 
   generate:
-    desc: Run code/doc generators (event-catalog docs arrive in Phase 3)
+    desc: Run code/doc generators (event-catalog docs, api/common OpenAPI types)
     cmds:
       - go generate ./...
 
@@ -127,9 +127,9 @@ tasks:
     cmds:
       - task: generate
       # Scope the diff to generated outputs only, so an otherwise-dirty working
-      # tree doesn't fail the check. Add paths here as generators land:
-      # docs/ (event catalog, Phase 3), api/**/generated (oapi-codegen, M2).
-      - git diff --exit-code -- docs
+      # tree doesn't fail the check. docs/ is the event catalog; api/ is
+      # oapi-codegen's *.gen.go, which must not drift from the specs beside them.
+      - git diff --exit-code -- docs api
 
   up:
     desc: Build the linux binary and start the adapter in Docker

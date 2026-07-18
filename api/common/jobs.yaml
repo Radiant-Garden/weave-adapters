@@ -1,0 +1,89 @@
+openapi: 3.0.3
+
+# The shared async-job resource. SCHEMA ONLY — the jobs package is M3.
+#
+# ⚠️ Not yet consumable by weave: its response classifier treats every 2xx as a
+# completed operation (syncMgr/responseClassifier.go:130), so a 202 handing back
+# a job URL is recorded as a finished write and the job is never polled. Async
+# needs weave-side work, not just this contract. See M2-execution.md Phase 6.
+info:
+  title: weave-adapters common — jobs
+  version: 1.0.0
+  description: >-
+    Shared job-resource components for slow mutations. An adapter that cannot
+    complete a mutation within a request answers 202 with a Location header
+    pointing at /api/v1/jobs/{id}, and the client polls that resource.
+
+paths: {}
+
+components:
+  schemas:
+    Job:
+      type: object
+      description: >-
+        An asynchronous operation, pollable with ETag support so a client
+        watching a long mutation pays for a 304 rather than a body per poll.
+      required:
+        - id
+        - status
+        - createdAt
+      properties:
+        id:
+          type: string
+          description: >-
+            Identifier, unique within the adapter. Also the trailing segment of
+            the Location header that created the job.
+          example: 01J9Z6X2QK7N4V8TA3B5C6D7E8
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        operation:
+          type: string
+          description: >-
+            What the job is doing, for an operator reading a job list. Free-form
+            and adapter-defined; clients must not switch on it.
+          example: createScope
+        resource:
+          type: string
+          format: uri-reference
+          description: >-
+            Relative link to the resource the job acts on, once one exists. On a
+            successful create this is where the new resource lives.
+          example: /api/v1/scopes/10.0.0.0
+        createdAt:
+          type: string
+          format: date-time
+          description: When the job was accepted, RFC 3339 UTC.
+          example: '2026-07-18T09:02:36Z'
+        completedAt:
+          type: string
+          format: date-time
+          # Struct-typed optional: omitempty does nothing for time.Time, so a
+          # pending job would emit a zero timestamp. Keep the pointer.
+          x-go-type-skip-optional-pointer: false
+          description: >-
+            When the job reached a terminal state. Absent while it is still
+            pending or running.
+          example: '2026-07-18T09:02:41Z'
+        error:
+          # Same as completedAt: omitempty does nothing for a struct, so without
+          # the pointer every non-failed job would carry an empty error object.
+          x-go-type-skip-optional-pointer: false
+          allOf:
+            - $ref: './errors.yaml#/components/schemas/Problem'
+          description: >-
+            Why the job failed, present only in the failed state. The same
+            problem+json a synchronous failure would have returned, so a client
+            has one error shape either way.
+
+    JobStatus:
+      type: string
+      description: >-
+        Job lifecycle. Only pending and running are non-terminal; a client stops
+        polling on anything else. Finer-grained progress belongs in the
+        operator's event log, not in this contract.
+      enum:
+        - pending
+        - running
+        - succeeded
+        - failed
+      example: running

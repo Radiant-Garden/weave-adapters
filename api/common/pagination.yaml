@@ -1,0 +1,86 @@
+openapi: 3.0.3
+
+# The one pagination scheme every adapter offers: opaque cursors, returned both
+# as a token and as a link. Offset pagination is not offered.
+#
+# Go counterpart: internal/core/pagination.
+info:
+  title: weave-adapters common — pagination
+  version: 1.0.0
+  description: >-
+    Shared collection-envelope and page-parameter components. Adapters mirror
+    PageEnvelope with their own concrete item type and reuse the parameters
+    verbatim.
+
+paths: {}
+
+components:
+  parameters:
+    PageSize:
+      name: pageSize
+      in: query
+      required: false
+      description: >-
+        Maximum items to return. A value above the endpoint's documented maximum
+        is clamped to it rather than rejected, so a client must always treat
+        nextPageToken — not the item count — as the authority on whether more
+        items exist. A value that is not a positive integer is a 400.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        default: 100
+
+    PageToken:
+      name: pageToken
+      in: query
+      required: false
+      description: >-
+        Resumes a listing where the previous page ended. Opaque: clients must
+        echo back a nextPageToken this endpoint returned and never construct or
+        interpret one. A token that was not minted by this collection is a 400,
+        never a silent restart from the first page.
+      schema:
+        type: string
+      example: eyJ2IjoxLCJzIjoibGVhc2VzIiwiayI6ImJHVmhjMlV0TURBME1nIn0
+
+  schemas:
+    PageEnvelope:
+      type: object
+      description: >-
+        The collection envelope every list endpoint returns. Adapters define
+        their own list schema with the same two fields and a concrete item type;
+        this component fixes the field names and their optionality, which is
+        what a generic client depends on.
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          description: >-
+            The page's items. Always present and always an array — an empty
+            collection is [], never null, because clients iterate it directly.
+          items:
+            type: object
+        nextPageToken:
+          type: string
+          description: >-
+            The cursor as an opaque token, echoed back as ?pageToken=. Absent on
+            the last page; its presence — not a full page of items — is what
+            tells a client to request the next one.
+          example: eyJ2IjoxLCJzIjoibGVhc2VzIiwiayI6ImJHVmhjMlV0TURBME1nIn0
+        nextPageUrl:
+          type: string
+          format: uri-reference
+          description: >-
+            The same cursor as a ready-to-fetch link, for clients that follow
+            links rather than echo tokens. Present exactly when nextPageToken
+            is, and never instead of it.
+
+            Always a relative reference, so an adapter never has to derive its
+            own external base URL from Host or X-Forwarded-* headers.
+
+            Carries every query parameter of the request that produced it, with
+            only pageToken replaced — a link-following client sends nothing but
+            this link, so a dropped filter would yield unfiltered later pages.
+          example: /api/v1/leases?pageSize=50&pageToken=eyJ2IjoxLCJzIjoibGVhc2VzIn0

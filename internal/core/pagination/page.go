@@ -20,23 +20,15 @@ const (
 	ParamPageToken = "pageToken"
 )
 
-// Client-facing validation messages. Both are returned verbatim in the
-// errors[] extension, so they describe the expectation and never internal
-// state.
+// Client-facing validation messages, returned verbatim in the errors[]
+// extension. Shared so the paths that produce each cannot drift into several
+// phrasings of one complaint.
+//
+// invalidCursorMessage is named for the cursor, not the token, because gosec's
+// G101 reads any const whose name contains "token" as a possible credential.
 const (
-	// invalidCursorMessage covers every way a pageToken can be unreadable. It
-	// names the only recovery there is — drop the token and list from the start
-	// — because no other action differs between those ways.
-	//
-	// Named for the cursor rather than the token because gosec's G101 reads any
-	// const whose name contains "token" as a possible hardcoded credential.
-	// The string really is about the cursor, so an accurate name beats a nolint.
 	invalidCursorMessage = "must be a nextPageToken returned by this endpoint; omit it to start from the first page"
-
-	// atLeastOneMessage covers a pageSize that is a number but not a usable
-	// one. Shared so the zero, negative, and negative-overflow paths cannot
-	// drift into three phrasings of the same complaint.
-	atLeastOneMessage = "must be at least 1"
+	atLeastOneMessage    = "must be at least 1"
 )
 
 // Paginator holds one collection's pagination rules. Declare one beside the
@@ -44,24 +36,19 @@ const (
 //
 //	var leasePages = pagination.New("leases", 100, 500)
 //
-// Binding the scope to the paginator rather than passing it per call is what
-// makes a token minted for one collection un-parseable by another: there is no
-// call site where the two can be given different values by mistake.
+// Binding the scope here rather than passing it per call is what makes a token
+// minted for one collection un-parseable by another.
 type Paginator struct {
 	scope       string
 	defaultSize int
 	maxSize     int
 }
 
-// New returns a Paginator for a collection. scope is a stable name for that
-// collection — it travels inside every token, so renaming it invalidates
-// outstanding tokens, which is the intended effect when a listing's shape or
-// order changes.
+// New returns a Paginator for a collection. scope is a stable name for it and
+// travels inside every token, so renaming it invalidates outstanding tokens.
 //
-// It panics on a nonsensical configuration (empty scope, non-positive sizes, a
-// default above the max). Like the event registry, these are wiring mistakes
-// that should surface the first time the process starts rather than as a
-// mis-clamped page in production.
+// It panics on an unusable configuration (empty scope, non-positive sizes, a
+// default above the max) so wiring mistakes surface at process start.
 func New(scope string, defaultSize, maxSize int) Paginator {
 	switch {
 	case scope == "":
@@ -88,26 +75,14 @@ type Params struct {
 	After string
 }
 
-// Parse resolves the pagination query parameters, returning an
-// *apierror.Error (a 400 problem+json) if the client sent something invalid.
+// Parse resolves the pagination query parameters, returning an *apierror.Error
+// (a 400 problem+json) if the client sent something invalid. Both parameters
+// are checked before returning, so a request that gets both wrong is told about
+// both at once.
 //
-// Both parameters are checked before returning, so a request that gets both
-// wrong is told about both at once — the convention that a client fixes every
-// field in one round trip rather than one per attempt.
-//
-// The two failure modes are treated asymmetrically on purpose. An out-of-range
-// pageSize is *clamped*: the client asked for more than this endpoint serves,
-// and returning fewer items than requested is already something every caller
-// must handle, since nextPageToken is the authority on whether more exist. A
-// pageSize that is not a positive integer is *rejected*: there is no honest
-// reading of "abc" or "-5" to clamp toward, and guessing would turn a client
-// bug into a silently different query.
-//
-// A repeated parameter takes its first value, as net/http and every OpenAPI
-// default do. Rejecting the repeat would be more consistent with the paragraph
-// above, but a client that harmlessly appends a parameter twice is not making
-// the kind of mistake worth a 400, and "first wins" is the behaviour every
-// intermediary already assumes.
+// A pageSize above the maximum is clamped; one that is not a positive integer
+// is rejected, since there is no honest value to clamp "abc" or "-5" toward.
+// A repeated parameter takes its first value, as net/http does.
 func (p Paginator) Parse(query url.Values) (Params, error) {
 	var fieldErrors []apierror.FieldError
 
@@ -137,11 +112,8 @@ func (p Paginator) parseSize(raw string) (int, string) {
 
 	size, err := strconv.Atoi(raw)
 
-	// A number too large for an int is still an unambiguous "more than you can
-	// have", so it clamps like any other oversized request. Letting it fall
-	// through to the syntax error below would make the 400/clamp boundary the
-	// platform's int width — 5000 clamped while 1e20 was rejected, for the same
-	// client intent.
+	// Clamp rather than reject, so the 400/clamp boundary is not the platform's
+	// int width: 5000 and 1e20 are the same client intent.
 	if errors.Is(err, strconv.ErrRange) {
 		if strings.HasPrefix(raw, "-") {
 			return 0, atLeastOneMessage
@@ -171,18 +143,11 @@ func (p Paginator) parseToken(raw string) (after string, ok bool) {
 	return decodeToken(raw, p.scope)
 }
 
-// NextToken mints the token that resumes after key. Pass the key of the last
-// item on the page just built.
-//
-// An empty key returns an empty token, which NewPage renders as an absent
-// nextPageToken — "there is no next page". That makes the degenerate case
-// compose: a handler can write
-//
-//	pagination.NewPage(items, pages.NextToken(lastKey))
-//
-// and an empty listing yields a correct last-page envelope without a special
-// case. It also means a token carrying no key is never minted, which is why
+// NextToken mints the token that resumes after key. An empty key returns an
+// empty token, so a token carrying no key is never minted — which is why
 // decoding one is a rejection rather than a silent restart.
+//
+// Most handlers want Next, which mints this token and its link together.
 func (p Paginator) NextToken(key string) string {
 	if key == "" {
 		return ""
@@ -191,27 +156,67 @@ func (p Paginator) NextToken(key string) string {
 	return encodeToken(p.scope, key)
 }
 
+// NextPage is the cursor in both the forms a list response carries. One type
+// rather than two strings, so the pair cannot be transposed or half-set.
+type NextPage struct {
+	// Token is the opaque cursor, echoed back as ?pageToken=.
+	Token string
+	// URL is the same cursor as a relative reference, for link-following
+	// clients.
+	URL string
+}
+
+// Next mints the next-page cursor from the current request URL and the key of
+// the last item on the page just built. An empty key yields a zero NextPage,
+// which renders as a last page.
+//
+// The link is always relative, so the adapter never has to derive its own
+// external base URL from Host or X-Forwarded-* headers.
+//
+// It preserves every query parameter and replaces only pageToken. A
+// link-following client sends nothing but the link, so dropping a filter here
+// would serve a filtered first page and unfiltered later ones.
+func (p Paginator) Next(requestURL *url.URL, key string) NextPage {
+	token := p.NextToken(key)
+	if token == "" || requestURL == nil {
+		return NextPage{}
+	}
+
+	query := requestURL.Query()
+	query.Set(ParamPageToken, token)
+
+	// Path and RawQuery only: url.URL renders a relative reference when Scheme
+	// and Host are empty.
+	next := url.URL{Path: requestURL.Path, RawQuery: query.Encode()}
+
+	return NextPage{Token: token, URL: next.String()}
+}
+
 // Page is the collection envelope every list endpoint returns.
 type Page[T any] struct {
 	Items []T `json:"items"`
 	// NextPageToken is absent on the last page. Its presence — not a full page
 	// of items — is what tells a client to ask again.
 	NextPageToken string `json:"nextPageToken,omitempty"`
+	// NextPageURL is the same cursor as a relative link, for clients that
+	// follow links rather than echo tokens. Absent on the last page, always
+	// alongside NextPageToken and never instead of it.
+	NextPageURL string `json:"nextPageUrl,omitempty"`
 }
 
-// NewPage builds the envelope. Pass "" as nextPageToken for the last page.
-func NewPage[T any](items []T, nextPageToken string) Page[T] {
-	return Page[T]{Items: items, NextPageToken: nextPageToken}
-}
-
-// MarshalJSON renders the envelope, normalizing a nil Items to an empty array.
+// NewPage builds the envelope. Pass a zero NextPage for the last page:
 //
-// The normalization lives here rather than in NewPage because Page and its
-// fields are exported: a handler that builds the struct literally, or that
-// returns a zero Page on an early exit, would otherwise emit `"items": null`.
-// Clients iterate that field directly, so a null there is the difference
-// between "no leases" and a null-dereference in the caller — too sharp an edge
-// to leave guarded by one constructor nobody is forced to use.
+//	pagination.NewPage(items, pages.Next(r.URL, lastKey))
+func NewPage[T any](items []T, next NextPage) Page[T] {
+	return Page[T]{Items: items, NextPageToken: next.Token, NextPageURL: next.URL}
+}
+
+// MarshalJSON renders the envelope, normalizing a nil Items to an empty array
+// so the response never carries "items": null.
+//
+// It lives here rather than in NewPage because Page and its fields are
+// exported: a struct literal or a zero Page returned on an early exit would
+// otherwise bypass the guarantee.
 func (p Page[T]) MarshalJSON() ([]byte, error) {
 	if p.Items == nil {
 		p.Items = []T{}

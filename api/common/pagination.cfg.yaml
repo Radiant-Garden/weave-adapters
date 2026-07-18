@@ -1,0 +1,13 @@
+# oapi-codegen config for pagination.yaml. See common.go for why these options.
+package: common
+output: pagination.gen.go
+generate:
+  models: true
+output-options:
+  # The component files carry no paths, so every schema is "unreferenced" and
+  # would otherwise be pruned away to an empty file.
+  skip-prune: true
+  # Render optional fields as T with omitempty rather than *T, so the generated
+  # Problem is byte-identical in shape to the hand-written apierror.Problem and
+  # the conformance test can compare them directly.
+  prefer-skip-optional-pointer: true
