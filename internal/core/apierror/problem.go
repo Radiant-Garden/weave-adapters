@@ -82,6 +82,13 @@ func newError(eventID events.EventID, fields map[string]any) *Error {
 func (e *Error) Error() string {
 	spec, ok := events.Get(e.eventID)
 	if !ok {
+		// Still carry the cause: an unregistered ID is already a puzzle for
+		// whoever reads this line, and dropping the cause removes the one part
+		// of it that says what actually went wrong.
+		if e.cause != nil {
+			return fmt.Sprintf("unregistered event %s: %s", e.eventID, e.cause)
+		}
+
 		return fmt.Sprintf("unregistered event %s", e.eventID)
 	}
 
