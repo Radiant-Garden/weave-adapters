@@ -15,7 +15,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"strings"
 )
 
 const (
@@ -54,16 +53,4 @@ func Hash(token string) string {
 	sum := sha256.Sum256([]byte(token))
 
 	return hashAlgorithm + ":" + hex.EncodeToString(sum[:])
-}
-
-// Mask renders a token for display, keeping only enough tail to recognise it.
-// Used wherever a token would otherwise be echoed in full.
-func Mask(token string) string {
-	const visible = 4
-
-	if len(token) <= visible {
-		return strings.Repeat("*", len(token))
-	}
-
-	return "****" + token[len(token)-visible:]
 }
