@@ -48,6 +48,12 @@ type Paginator struct {
 // New returns a Paginator for a collection. scope is a stable name for it and
 // travels inside every token, so renaming it invalidates outstanding tokens.
 //
+// Scopes must be unique across the process, and nothing enforces that: two
+// Paginators sharing a scope will honor each other's tokens, so a cursor from
+// one collection resumes a listing of the other at a key that means nothing
+// there. Copying a New call and forgetting to change its first argument is the
+// way that happens.
+//
 // It panics on an unusable configuration (empty scope, non-positive sizes, a
 // default above the max) so wiring mistakes surface at process start.
 func New(scope string, defaultSize, maxSize int) Paginator {

@@ -62,4 +62,16 @@ func (r *Recorder) Wrote() bool { return r.wrote }
 
 // Unwrap exposes the underlying writer so http.ResponseController can reach
 // optional capabilities (Flusher, Hijacker) that this wrapper hides.
+//
+// This is a known blind spot, not an oversight, and it is why nothing in the
+// adapter streams or hijacks yet. A Flush or Hijack reached this way bypasses
+// the bookkeeping entirely: Wrote stays false for a response that is already on
+// the wire, so Recovery appends problem+json to a committed 200, and Logging
+// audits a hijacked connection as status=200 bytes=0.
+//
+// Whichever milestone first needs SSE, long-polling, or a websocket has to
+// decide the flush story for every wrapper at once — this one, and the
+// buffering captureWriter in internal/core/etag, which refuses to flush rather
+// than silently mislead a handler. Adding a Flusher here for no consumer would
+// be guessing at that decision.
 func (r *Recorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
