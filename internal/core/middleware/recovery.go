@@ -48,7 +48,7 @@ func Recovery(next http.Handler) http.Handler {
 			}
 
 			// WriteProblem, not WriteError: API-011 above is already this
-			// panic's log line, and WriteError would emit API-908 as well,
+			// panic's log line, and WriteError would emit API-901 as well,
 			// making one panic look like two failures.
 			apierror.WriteProblem(rw, apierror.Problem{
 				Type:      apierror.TypeFor(events.CodeInternal),

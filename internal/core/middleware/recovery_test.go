@@ -67,7 +67,7 @@ func TestRecovery_ShouldReturn500AndEmitOnPanic(t *testing.T) { //nolint:paralle
 	rec.AssertMatchesCatalog(t)
 
 	// One panic, one event: Recovery renders the body itself rather than going
-	// through WriteError, which would emit API-908 on top of API-011.
+	// through WriteError, which would emit API-901 on top of API-011.
 	rec.AssertNotEmitted(t, catalog.API901)
 }
 
