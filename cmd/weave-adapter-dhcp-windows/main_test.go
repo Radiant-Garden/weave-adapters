@@ -8,7 +8,8 @@ Tested:
     - TestRun_ShouldServeHealthUntilContextCancelled: the wired binary serves health and shuts down cleanly.
     - TestRun_ShouldReturnErrorWhenConfigInvalid: a bad flag value fails startup before anything binds.
     - TestRun_ShouldReturnErrorWhenPortUnavailable: a port conflict fails startup rather than serving.
-    - TestRun_ShouldRefuseToStartWithoutTokens: a missing or empty token store fails startup with a fix.
+    - TestRun_ShouldRefuseToStartWithoutTokens: a missing, empty, or wholly expired store fails startup with a fix.
+    - TestRun_ShouldWarnLoudlyWhenAuthIsDisabled: starting wide open emits SYS-006.
 
   isTokenCommand
     - TestIsTokenCommand_ShouldRecogniseOnlyTheTokenVerb: server args never route to the CLI.
@@ -212,6 +213,90 @@ func TestRun_ShouldServeHealthUntilContextCancelled(t *testing.T) {
 	rec.AssertEmitted(t, catalog.SYS001)
 	rec.AssertData(t, catalog.SYS001, "version", version)
 	rec.AssertEmitted(t, catalog.SYS004)
+	rec.AssertMatchesCatalog(t)
+}
+
+//nolint:paralleltest // observability.Setup replaces the global slog logger
+func TestRun_ShouldRefuseToStartWithoutTokens(t *testing.T) {
+	// ARRANGE — each case is a store the operator believes is serviceable and
+	// that would in fact 401 every request.
+	expired := filepath.Join(t.TempDir(), "expired.toml")
+	expiredStore := &auth.Store{Tokens: []auth.Entry{{
+		Label:     "long-gone",
+		Hash:      auth.Hash("wadapt_whatever"),
+		CreatedAt: time.Now().UTC().AddDate(0, 0, -91),
+		ExpiresAt: auth.NewExpiry(time.Now().UTC().AddDate(0, 0, -1)),
+	}}}
+	require.NoError(t, expiredStore.Save(expired))
+
+	empty := filepath.Join(t.TempDir(), "empty.toml")
+	require.NoError(t, (&auth.Store{}).Save(empty))
+
+	tests := []struct {
+		name       string
+		tokensFile string
+		wantErr    string
+	}{
+		{
+			name:       "should fail when the token file does not exist",
+			tokensFile: filepath.Join(t.TempDir(), "absent.toml"),
+			wantErr:    "token gen --label",
+		},
+		{
+			name:       "should fail when the store holds no tokens",
+			tokensFile: empty,
+			wantErr:    "no tokens configured",
+		},
+		{
+			name:       "should fail when every token in the store has expired",
+			tokensFile: expired,
+			wantErr:    "have expired",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) { //nolint:paralleltest // observability.Setup is global
+			// ARRANGE
+			rec := eventstest.NewRecorder()
+			t.Cleanup(rec.Install())
+
+			// ACT
+			err := run(t.Context(), []string{
+				"--port", strconv.Itoa(freePort(t)),
+				"--auth-tokens-file", tt.tokensFile,
+			})
+
+			// ASSERT — the message has to tell an operator what to do, and the
+			// server must never reach the point of announcing itself.
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+			rec.AssertNotEmitted(t, catalog.SYS002)
+		})
+	}
+}
+
+//nolint:paralleltest // observability.Setup replaces the global slog logger
+func TestRun_ShouldWarnLoudlyWhenAuthIsDisabled(t *testing.T) {
+	// ARRANGE — no token file at all, which is only survivable with disableAuth.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- run(ctx, []string{"--port", strconv.Itoa(freePort(t)), "--disable-auth"})
+	}()
+
+	waitForListening(t, rec)
+
+	// ACT
+	cancel()
+
+	// ASSERT — a wide-open server is exactly the state an operator must be able
+	// to find in the log afterwards.
+	require.NoError(t, <-errCh)
+	rec.AssertEmitted(t, catalog.SYS006)
 	rec.AssertMatchesCatalog(t)
 }
 
