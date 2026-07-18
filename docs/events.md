@@ -310,7 +310,7 @@
 
 - **Level:** INFO
 - **Category / Topic:** SYS / Lifecycle
-- **Description:** The server drained and shut down cleanly.
+- **Description:** The server drained and shut down cleanly. SYS-007 is emitted instead when it did not.
 
 **Example:** `{"eventId":"SYS-004","data":{}}`
 
@@ -339,3 +339,18 @@
 **Example:** `{"eventId":"SYS-006","data":{}}`
 
 **Troubleshooting:** Development-only setting. Unset disableAuth and configure a token (`token gen --label <name>`) before this host is reachable by anything but you.
+
+## SYS-007 — shutdown incomplete
+
+- **Level:** ERROR
+- **Category / Topic:** SYS / Lifecycle
+- **Description:** The drain grace period expired with requests still in flight; they were cut off.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| error | string | true | The shutdown error. |
+| graceSeconds | int | true | The drain grace period that expired. |
+
+**Example:** `{"eventId":"SYS-007","data":{"error":"context deadline exceeded","graceSeconds":15}}`
+
+**Troubleshooting:** Clients of the cut-off requests saw a dropped connection and may retry a non-idempotent call. Check for a handler that outlives the grace period — a slow backend call with no timeout of its own is the usual cause. If the drain is legitimately long, raise the grace period; otherwise bound the handler.

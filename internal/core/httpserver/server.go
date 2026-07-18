@@ -24,11 +24,21 @@ import (
 
 const (
 	readHeaderTimeout = 10 * time.Second
-	shutdownGrace     = 15 * time.Second
 
 	healthPath  = "/api/v1/health"
 	openAPIPath = "/openapi.yaml"
 )
+
+// shutdownGrace bounds the drain. A var rather than a const so the drain-overran
+// path can be tested without a test that sleeps for the real grace period; no
+// production code assigns it.
+var shutdownGrace = 15 * time.Second
+
+// ErrShutdownIncomplete reports that the drain grace period expired with
+// requests still in flight. It exists so a caller can tell a failed shutdown
+// after hours of serving from a failure to start at all — the two want opposite
+// operator responses, and both arrive as a non-nil error from Run.
+var ErrShutdownIncomplete = errors.New("shutdown did not complete within the grace period")
 
 // Server wraps net/http.Server with the adapter's standard routes.
 type Server struct {
@@ -158,10 +168,31 @@ func (s *Server) Run(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
 
-		err = s.httpServer.Shutdown(shutdownCtx)
+		shutdownErr := s.httpServer.Shutdown(shutdownCtx)
+
+		// Shutdown closes the listeners, so Serve has returned or is about to
+		// and this cannot block. Reading it is what keeps a genuine Serve
+		// failure that raced the cancel from being reported as a clean exit:
+		// this branch would otherwise leave the error in the buffered channel
+		// and return whatever Shutdown said about an already-dead server.
+		serveErr := <-errCh
+		if errors.Is(serveErr, http.ErrServerClosed) {
+			serveErr = nil
+		}
+
+		if shutdownErr != nil {
+			// Not SYS-004: the drain did not complete, and claiming it did is
+			// the version of this line an operator would act on wrongly.
+			events.Emit(shutdownCtx, catalog.SYS007,
+				"error", shutdownErr.Error(),
+				"graceSeconds", int(shutdownGrace.Seconds()),
+			)
+
+			return fmt.Errorf("%w: %w", ErrShutdownIncomplete, shutdownErr)
+		}
 
 		events.Emit(shutdownCtx, catalog.SYS004)
 
-		return err
+		return serveErr
 	}
 }

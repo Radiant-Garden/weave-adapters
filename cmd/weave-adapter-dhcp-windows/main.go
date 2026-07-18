@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -73,10 +74,15 @@ func runServer(args []string) error {
 	// below, rather than staying installed across shutdown reporting.
 	stop()
 
-	if err != nil {
+	if err != nil && !errors.Is(err, httpserver.ErrShutdownIncomplete) {
 		// Startup failures are operational outcomes, not stray slog calls.
 		// observability.Setup may not have run yet; the events system writes to
 		// slog.Default either way.
+		//
+		// A drain that overran its grace period is excluded: it is not a startup
+		// failure, it may follow days of healthy serving, and httpserver owns
+		// SYS-007 for it already. Re-reporting it here would put "startup
+		// failed" in the log for a process that started fine.
 		events.Emit(context.Background(), catalog.SYS005, "error", err.Error())
 	}
 

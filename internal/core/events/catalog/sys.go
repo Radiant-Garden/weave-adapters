@@ -23,6 +23,9 @@ const (
 	SYS005 events.EventID = "SYS-005"
 	// SYS006 is emitted at startup when authentication is disabled.
 	SYS006 events.EventID = "SYS-006"
+	// SYS007 is emitted when the drain grace period expired before shutdown
+	// finished.
+	SYS007 events.EventID = "SYS-007"
 )
 
 func init() {
@@ -72,11 +75,29 @@ func init() {
 		ID:              SYS004,
 		Level:           slog.LevelInfo,
 		MessageTemplate: "shutdown complete",
-		Description:     "The server drained and shut down cleanly.",
+		Description:     "The server drained and shut down cleanly. SYS-007 is emitted instead when it did not.",
 		Category:        events.CategorySystem.String(),
 		Topic:           "Lifecycle",
 		Example:         `{"eventId":"SYS-004","data":{}}`,
 		Troubleshooting: "Informational. Marks a clean end to a process lifecycle.",
+	})
+
+	events.Register(&events.Event{
+		ID:              SYS007,
+		Level:           slog.LevelError,
+		MessageTemplate: "shutdown incomplete",
+		Description:     "The drain grace period expired with requests still in flight; they were cut off.",
+		Category:        events.CategorySystem.String(),
+		Topic:           "Lifecycle",
+		Fields: []events.FieldDef{
+			{Name: "error", Type: "string", Required: true, Description: "The shutdown error."},
+			{Name: "graceSeconds", Type: "int", Required: true, Description: "The drain grace period that expired."},
+		},
+		Example: `{"eventId":"SYS-007","data":{"error":"context deadline exceeded","graceSeconds":15}}`,
+		Troubleshooting: "Clients of the cut-off requests saw a dropped connection and may retry a " +
+			"non-idempotent call. Check for a handler that outlives the grace period — a slow backend " +
+			"call with no timeout of its own is the usual cause. If the drain is legitimately long, " +
+			"raise the grace period; otherwise bound the handler.",
 	})
 
 	events.Register(&events.Event{

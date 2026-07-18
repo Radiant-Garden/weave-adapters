@@ -7,7 +7,7 @@ Tested:
   init (SYS registrations)
     - TestSYSCatalog_ShouldRegisterAllLifecycleEvents: the five SYS events register
       without panic, carry the SYS category, and are not ExternalSource.
-    - TestSYSCatalog_ShouldFixSeverityPerEvent: SYS-005 is ERROR; SYS-001..004 are INFO.
+    - TestSYSCatalog_ShouldFixSeverityPerEvent: SYS-005/007 are ERROR, SYS-006 WARN, SYS-001..004 INFO.
 
 Tested elsewhere:
 
@@ -34,7 +34,7 @@ import (
 func TestSYSCatalog_ShouldRegisterAllLifecycleEvents(t *testing.T) {
 	t.Parallel()
 
-	for _, id := range []events.EventID{SYS001, SYS002, SYS003, SYS004, SYS005} {
+	for _, id := range []events.EventID{SYS001, SYS002, SYS003, SYS004, SYS005, SYS006, SYS007} {
 		e, ok := events.Get(id)
 		require.Truef(t, ok, "event %s should be registered", id)
 		assert.Equal(t, events.CategorySystem.String(), e.Category)
@@ -51,6 +51,8 @@ func TestSYSCatalog_ShouldFixSeverityPerEvent(t *testing.T) {
 		SYS003: slog.LevelInfo,
 		SYS004: slog.LevelInfo,
 		SYS005: slog.LevelError,
+		SYS006: slog.LevelWarn,
+		SYS007: slog.LevelError,
 	}
 
 	for id, want := range wantLevel {

@@ -22,6 +22,7 @@ Tested:
     - TestRun_ShouldShutDownGracefullyWhenContextCancelled: returns nil and emits SYS-002/003/004.
     - TestRun_ShouldServeUntilContextCancelled: requests are served while Run blocks.
     - TestRun_ShouldReturnErrorWhenAddressUnavailable: a bind conflict errors without emitting SYS-002.
+    - TestRun_ShouldReportAnIncompleteShutdownRatherThanClaimItDrained: an overrun drain is SYS-007, never SYS-004.
 
 Tested elsewhere:
   serveOpenAPI, skipHealthPolls — exercised through New's routing tests rather
@@ -32,11 +33,20 @@ Tested elsewhere:
   always builds its own mux.
 
 Declined:
+  The Serve-error-racing-a-context-cancel path. Run now drains errCh after
+  Shutdown so the error cannot be swallowed, but provoking that race
+  deterministically means failing Serve at the instant of cancellation, which no
+  seam here exposes. The read is unconditional, so the ordinary cancel tests
+  above prove it does not deadlock; the raced error itself is unasserted.
 
 Additional Remarks:
   Run tests bind 127.0.0.1:0 so they never collide with a developer's ports or
   with each other, and drive shutdown via context cancel (not a real signal) so
   they behave identically on Windows and Unix.
+
+  TestRun_ShouldReportAnIncompleteShutdownRatherThanClaimItDrained overrides the
+  package-level shutdownGrace so it costs 50ms rather than the real 15s. That is
+  why the var exists; nothing in production assigns it.
 
   Tests that install the event recorder mutate the process-global emitter hook
   and therefore cannot run in parallel.
@@ -432,6 +442,70 @@ func TestRun_ShouldReturnErrorWhenAddressUnavailable(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "listening on "+held.Addr().String())
 	rec.AssertNotEmitted(t, catalog.SYS002)
+}
+
+//nolint:paralleltest // installs the recorder and overrides shutdownGrace, both global
+func TestRun_ShouldReportAnIncompleteShutdownRatherThanClaimItDrained(t *testing.T) {
+	// ARRANGE — a handler that outlives the grace period, which is what a drain
+	// timeout means in production: a request still in flight when time runs out.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	original := shutdownGrace
+	shutdownGrace = 50 * time.Millisecond
+
+	t.Cleanup(func() { shutdownGrace = original })
+
+	inFlight := make(chan struct{})
+	release := make(chan struct{})
+
+	t.Cleanup(func() { close(release) })
+
+	blocking := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			close(inFlight)
+			<-release
+			next.ServeHTTP(w, r)
+		})
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	srv := New("127.0.0.1:0", health.NewHandler("1.2.3", time.Now()), blocking)
+	errCh := make(chan error, 1)
+
+	go func() { errCh <- srv.Run(ctx) }()
+
+	addr := waitForListenAddr(t, rec)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+addr+healthPath, nil)
+	require.NoError(t, err)
+
+	go func() {
+		resp, reqErr := http.DefaultClient.Do(req)
+		if reqErr == nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	<-inFlight
+
+	// ACT — the drain starts with that request still running and cannot finish.
+	cancel()
+
+	// ASSERT
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, ErrShutdownIncomplete)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return within 5s of context cancellation")
+	}
+
+	// The whole point: an operator filtering for SYS-004 must not see this
+	// process report that it "drained cleanly" when it cut a request off.
+	rec.AssertEmitted(t, catalog.SYS003)
+	rec.AssertEmitted(t, catalog.SYS007)
+	rec.AssertNotEmitted(t, catalog.SYS004)
+	rec.AssertMatchesCatalog(t)
 }
 
 // waitForListenAddr blocks until Run has emitted SYS-002 and returns the
