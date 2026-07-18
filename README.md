@@ -34,7 +34,10 @@ scopes, reservations, and leases the same way.
   authenticates, and how tokens are generated, stored, and rotated.
 - [`docs/events.md`](docs/events.md) — the generated event catalog.
 - [`docs/how-we-work.md`](docs/how-we-work.md) — branching, commits, local dev.
-- API is spec-first OpenAPI (`api/<adapter>/openapi.yaml`).
+- API is spec-first OpenAPI. The shared components every adapter builds on —
+  problem+json errors, the pagination envelope, the job resource — live in
+  [`api/common/`](api/common); a per-adapter `api/<adapter>/openapi.yaml`
+  follows with the first backend.
 
 ## Maintainer
 
