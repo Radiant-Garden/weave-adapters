@@ -42,6 +42,21 @@
 
 **Troubleshooting:** A handler bug caused a panic. Read the stack field, reproduce via method+path, and fix the root cause (often a nil dereference or out-of-range index). Correlate other events by requestId.
 
+## HLT-001 — health status changed
+
+- **Level:** WARN
+- **Category / Topic:** HLT / Status
+- **Description:** Emitted when the overall health status transitions between healthy, unhealthy, and unavailable. Emitted only on a change, never on an unchanged poll.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| from | string | true | Previous overall status. |
+| to | string | true | New overall status. |
+
+**Example:** `{"eventId":"HLT-001","data":{"from":"healthy","to":"unavailable"}}`
+
+**Troubleshooting:** The adapter's overall health changed. If 'to' is unavailable, the adapter returns 503 and weave stops routing to it — inspect the degraded component via GET /api/v1/health. If 'to' is healthy, a prior problem recovered.
+
 ## SYS-001 — adapter starting
 
 - **Level:** INFO

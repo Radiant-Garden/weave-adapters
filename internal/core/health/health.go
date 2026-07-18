@@ -2,36 +2,25 @@
 //
 // The response mirrors weave's DaemonHealthResponse so weave's generic health
 // client works against adapters unchanged: an overall status, the adapter
-// version, uptime, and a list of component entries. In M1 the only component is
-// the adapter core itself — a backend readiness probe is added in M3.
+// version, uptime, and per-component detail. The adapter core registers a
+// self-component; each adapter adds a probe that cheaply pings its backend (M3).
+// Probe results are cached briefly so aggressive polling can't hammer backends,
+// and overall-status transitions emit HLT-001 (only on change).
 package health
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"time"
+
+	"github.com/radiantgarden/weave-adapters/internal/core/events"
+	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 )
 
-// Status is the health status vocabulary shared with weave, ordered
-// healthy < unhealthy < unavailable (worst-of wins for the overall status).
-type Status string
-
-const (
-	// StatusHealthy means the component is fully operational.
-	StatusHealthy Status = "healthy"
-	// StatusUnhealthy means the component is degraded but reachable.
-	StatusUnhealthy Status = "unhealthy"
-	// StatusUnavailable means the component is not ready to serve.
-	StatusUnavailable Status = "unavailable"
-)
-
-// Component is a single entry in the health response.
-type Component struct {
-	Name   string            `json:"name"`
-	Status Status            `json:"status"`
-	Detail string            `json:"detail,omitempty"`
-	Fields map[string]string `json:"fields,omitempty"`
-}
+// probeCacheTTL bounds how often probes actually run, regardless of poll rate.
+const probeCacheTTL = 5 * time.Second
 
 // Response mirrors weave's DaemonHealthResponse shape.
 type Response struct {
@@ -45,27 +34,42 @@ type Response struct {
 type Handler struct {
 	version string
 	started time.Time
+	probes  []Probe
+	ttl     time.Duration
+	now     func() time.Time // injectable clock for tests
+
+	mu         sync.Mutex
+	components []Component
+	checkedAt  time.Time
+	last       Status // last overall status, for transition detection
 }
 
-// NewHandler returns a health handler that reports the given version and
-// computes uptime from started.
-func NewHandler(version string, started time.Time) *Handler {
-	return &Handler{version: version, started: started}
+// NewHandler returns a health handler reporting the given version, computing
+// uptime from started. The core self-component is always present; adapters pass
+// additional backend probes.
+func NewHandler(version string, started time.Time, probes ...Probe) *Handler {
+	all := make([]Probe, 0, len(probes)+1)
+	all = append(all, coreProbe{})
+	all = append(all, probes...)
+
+	return &Handler{
+		version: version,
+		started: started,
+		probes:  all,
+		ttl:     probeCacheTTL,
+		now:     time.Now,
+	}
 }
 
 // ServeHTTP writes the health response. The status code is 200 for
-// healthy/unhealthy and 503 for unavailable, so an orchestrator readiness probe
-// can key on the code alone.
-func (h *Handler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
-	components := []Component{
-		{Name: "core", Status: StatusHealthy, Detail: "adapter core running"},
-	}
-	overall := overallStatus(components)
+// healthy/unhealthy and 503 for unavailable.
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	components, overall := h.evaluate(r.Context())
 
 	resp := Response{
 		Status:        overall,
 		Version:       h.version,
-		UptimeSeconds: int64(time.Since(h.started).Seconds()),
+		UptimeSeconds: int64(h.now().Sub(h.started).Seconds()),
 		Components:    components,
 	}
 
@@ -73,42 +77,59 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.WriteHeader(httpStatus(overall))
 
-	// The response is already committed; a write failure is not actionable here
-	// and will surface via the (future) request-logging middleware.
+	// The response is already committed; a write failure is not actionable here.
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// overallStatus returns the worst status across all components.
-func overallStatus(components []Component) Status {
-	worst := StatusHealthy
-	for _, c := range components {
-		if rank(c.Status) > rank(worst) {
-			worst = c.Status
-		}
+// evaluate returns the component results and overall status, re-running the
+// probes at most once per ttl. It emits HLT-001 when the overall status changes
+// — never on the first evaluation, never on an unchanged poll.
+func (h *Handler) evaluate(ctx context.Context) ([]Component, Status) {
+	components, overall, from, changed := h.refresh(ctx)
+
+	// Emit outside the lock: a transition is a system event, and slog/fan-out
+	// must not run while the health mutex is held.
+	if changed {
+		events.Emit(ctx, catalog.HLT001, "from", string(from), "to", string(overall))
 	}
 
-	return worst
+	return components, overall
 }
 
-// rank orders the status vocabulary; higher is worse.
-func rank(s Status) int {
-	switch s {
-	case StatusHealthy:
-		return 0
-	case StatusUnhealthy:
-		return 1
-	case StatusUnavailable:
-		return 2
-	default:
-		return 3
+// refresh re-runs the probes at most once per ttl, records the overall status,
+// and reports whether it changed. It holds the mutex for the whole check, so
+// backend probes (M3) must keep Check fast (or the ttl short) — concurrent
+// health requests serialize behind a re-run.
+func (h *Handler) refresh(ctx context.Context) (components []Component, overall, from Status, changed bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.components == nil || h.now().Sub(h.checkedAt) >= h.ttl {
+		h.components = h.runProbes(ctx)
+		h.checkedAt = h.now()
 	}
+
+	overall = overallStatus(h.components)
+	from = h.last
+	changed = h.last != "" && overall != h.last
+	h.last = overall
+
+	return h.components, overall, from, changed
 }
 
-// httpStatus maps an overall status to its HTTP response code.
-func httpStatus(s Status) int {
-	if s == StatusUnavailable {
-		return http.StatusServiceUnavailable
+// runProbes checks every probe and maps the results to response components.
+func (h *Handler) runProbes(ctx context.Context) []Component {
+	out := make([]Component, 0, len(h.probes))
+
+	for _, p := range h.probes {
+		res := p.Check(ctx)
+		out = append(out, Component{
+			Name:   p.Name(),
+			Status: res.Status,
+			Detail: res.Detail,
+			Fields: res.Fields,
+		})
 	}
 
-	return http.StatusOK
+	return out
 }
