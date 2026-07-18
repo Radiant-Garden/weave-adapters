@@ -38,6 +38,10 @@ Additional Remarks:
 
   Permission assertions are skipped on Windows, where Unix mode bits are not
   meaningful and the directory ACL is the real protection.
+
+  Save's directory fsync is a no-op on Windows, which has no equivalent
+  operation. The Save tests cover it only in the sense that they would fail if
+  it returned an error there, which is how the omission was found.
 */
 
 package auth

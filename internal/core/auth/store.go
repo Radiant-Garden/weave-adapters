@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
@@ -221,12 +222,19 @@ func (s *Store) Save(path string) error {
 
 // syncDir flushes a directory entry so a completed rename survives a power loss.
 //
-// A failure to open the directory is not reported: on Windows a directory
-// handle cannot be opened for sync this way at all, and the rename has already
-// succeeded, so the only thing lost is the durability upgrade. A failed Sync on
-// a handle we did open is reported, except where the platform rejects the
-// operation outright.
+// Windows has no equivalent operation: opening the directory succeeds, but
+// Sync on that handle fails with ERROR_ACCESS_DENIED, so there is nothing to
+// attempt there. The rename has already succeeded by this point, so what
+// Windows loses is the durability upgrade, not the write.
+//
+// A failure to open the directory is not reported for the same reason. A failed
+// Sync on a handle we did open is reported, except where the platform rejects
+// the operation outright.
 func syncDir(dir string) error {
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+
 	f, err := os.Open(dir) //nolint:gosec // the destination directory, derived from the caller's own path
 	if err != nil {
 		// The rename already succeeded; only the durability upgrade is lost.
