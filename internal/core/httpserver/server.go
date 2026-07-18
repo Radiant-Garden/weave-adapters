@@ -48,6 +48,22 @@ func New(addr string, healthHandler http.Handler, inner ...middleware.Middleware
 	mux.Handle("GET "+healthPath, healthHandler)
 	mux.HandleFunc("GET "+openAPIPath, serveOpenAPI)
 
+	return &Server{
+		httpServer: &http.Server{
+			Addr:              addr,
+			Handler:           NewHandler(mux, inner...),
+			ReadHeaderTimeout: readHeaderTimeout,
+		},
+	}
+}
+
+// NewHandler wraps router in the adapter's standard middleware chain. See New
+// for the ordering and why inner sits where it does.
+//
+// It is exported so a caller mounting its own routes runs the same chain the
+// server does rather than assembling a copy — M2's demo resource is the first,
+// and a lookalike chain would prove nothing about the real one.
+func NewHandler(router http.Handler, inner ...middleware.Middleware) http.Handler {
 	standard := []middleware.Middleware{
 		middleware.Recovery,
 		middleware.RequestID,
@@ -56,19 +72,11 @@ func New(addr string, healthHandler http.Handler, inner ...middleware.Middleware
 		middleware.Logging(skipHealthPolls),
 	}
 
-	// ProblemErrors is innermost so it wraps the mux itself: the router
+	// ProblemErrors is innermost so it wraps the router itself: the router
 	// generates its own 404/405 responses, which no route-level code can reach.
 	chain := slices.Concat(standard, inner, []middleware.Middleware{middleware.ProblemErrors})
 
-	handler := middleware.Chain(mux, chain...)
-
-	return &Server{
-		httpServer: &http.Server{
-			Addr:              addr,
-			Handler:           handler,
-			ReadHeaderTimeout: readHeaderTimeout,
-		},
-	}
+	return middleware.Chain(router, chain...)
 }
 
 // skipHealthPolls reports whether request logging should skip this request.

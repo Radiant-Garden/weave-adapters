@@ -12,6 +12,10 @@ Tested:
     - TestNew_ShouldSkipRequestLoggingForHealthPolls: successful health polls emit no API-010; other routes and failures do.
     - TestNew_ShouldRenderRouterErrorsAsProblemJSON: mux 404/405 share the one error shape.
     - TestNew_ShouldLogRejectedRequests: inner middleware runs inside logging, so rejections are audited.
+  NewHandler
+    - Every New test above exercises it: New builds its handler by calling it,
+      so the chain order, recovery, request-ID, logging-skip and problem+json
+      assertions all run through NewHandler rather than around it.
   skipHealthPolls
     - TestSkipHealthPolls_ShouldSuppressOnlyRoutineAnswers: routine polls are quiet; failures on that path are not.
   Run
@@ -22,6 +26,10 @@ Tested:
 Tested elsewhere:
   serveOpenAPI, skipHealthPolls — exercised through New's routing tests rather
   than called directly; they only exist as part of the mounted chain.
+
+  NewHandler with a caller-supplied router: internal/core/httptest mounts the
+  demo resource through it, which is the case New itself cannot cover since it
+  always builds its own mux.
 
 Declined:
 
