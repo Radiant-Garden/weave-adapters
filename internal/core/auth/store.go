@@ -21,6 +21,11 @@ const storeFileMode = 0o600
 // event field, and a TOML key.
 var labelPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
 
+// hashPattern is the stored form Hash produces. Checked on load because an entry
+// whose hash is not this shape can never match a presented token: it is a token
+// the operator believes is live and that every request will reject.
+var hashPattern = regexp.MustCompile(`^` + hashAlgorithm + `:[0-9a-f]{64}$`)
+
 // Errors returned by Store operations. They are typed so a CLI can tell an
 // operator mistake (duplicate, unknown) from an I/O failure.
 var (
@@ -32,6 +37,9 @@ var (
 	ErrUnknownLabel = errors.New("no token with that label")
 	// ErrInvalidLabel means the label is empty or uses disallowed characters.
 	ErrInvalidLabel = errors.New("label must be 1-64 chars of letters, digits, '-' or '_', starting alphanumeric")
+	// ErrInvalidHash means a stored hash is not in the form Hash produces, so it
+	// could never match a presented token.
+	ErrInvalidHash = errors.New("hash must be " + hashAlgorithm + ": followed by 64 lowercase hex digits")
 )
 
 // Expiry is an optional timestamp that survives a TOML round-trip.
@@ -58,8 +66,20 @@ func NewExpiry(t time.Time) *Expiry {
 func (e Expiry) Time() time.Time { return time.Time(e) }
 
 // MarshalText renders the expiry as RFC 3339.
+//
+// It refuses a year outside RFC 3339's four digits rather than writing one.
+// Format widens the year field past four digits, but the strict Parse in
+// UnmarshalText will not read it back — so writing it would produce a token file
+// that every later Load rejects: list, gen, revoke, and server startup alike,
+// until someone hand-edits the file. Failing the Save that would have created it
+// keeps the damage to the one command that asked for it.
 func (e Expiry) MarshalText() ([]byte, error) {
-	return []byte(time.Time(e).Format(time.RFC3339)), nil
+	t := time.Time(e)
+	if year := t.Year(); year < 0 || year > 9999 {
+		return nil, fmt.Errorf("expiry year %d is outside RFC 3339's four-digit range", year)
+	}
+
+	return []byte(t.Format(time.RFC3339)), nil
 }
 
 // UnmarshalText parses an RFC 3339 expiry, so a hand-edited garbage value fails
@@ -103,6 +123,11 @@ type Store struct {
 
 // Load reads the token file. A missing file is reported as fs.ErrNotExist so
 // callers can distinguish "no tokens yet" from an unreadable file.
+//
+// The file is hand-editable, so its contents get the same invariants Add
+// enforces rather than being trusted for having parsed. Failing the whole load
+// is deliberate: a token file nobody can vouch for is not one to start serving
+// against, and the error names the entry to fix.
 func Load(path string) (*Store, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // operator-supplied path, by design
 	if err != nil {
@@ -114,7 +139,40 @@ func Load(path string) (*Store, error) {
 		return nil, fmt.Errorf("parsing token file %q: %w", path, err)
 	}
 
+	if err := store.validate(); err != nil {
+		return nil, fmt.Errorf("validating token file %q: %w", path, err)
+	}
+
 	return &store, nil
+}
+
+// validate checks every entry against the invariants Add would have applied.
+//
+// Duplicate labels are the reason this is not merely tidiness: Revoke removes
+// the first match and returns, so the CLI would report success while the second
+// entry — and its live hash — stayed in the store. An unvalidated label also
+// flows straight into the caller subject on every event the token's requests
+// emit, which is exactly what labelPattern exists to keep safe.
+func (s *Store) validate() error {
+	seen := make(map[string]struct{}, len(s.Tokens))
+
+	for i, entry := range s.Tokens {
+		if !labelPattern.MatchString(entry.Label) {
+			return fmt.Errorf("entry %d: %w: %q", i, ErrInvalidLabel, entry.Label)
+		}
+
+		if _, duplicate := seen[entry.Label]; duplicate {
+			return fmt.Errorf("entry %d: %w: %q", i, ErrDuplicateLabel, entry.Label)
+		}
+
+		seen[entry.Label] = struct{}{}
+
+		if !hashPattern.MatchString(entry.Hash) {
+			return fmt.Errorf("entry %d (label %q): %w", i, entry.Label, ErrInvalidHash)
+		}
+	}
+
+	return nil
 }
 
 // Save writes the store atomically: a temp file in the destination directory is

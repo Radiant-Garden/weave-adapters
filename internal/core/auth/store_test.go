@@ -8,10 +8,14 @@ Tested:
     - TestLoad_ShouldRoundTripASavedStore: what Save writes, Load reads back.
     - TestLoad_ShouldReportMissingFileAsNotExist: absent file is distinguishable from unreadable.
     - TestLoad_ShouldReturnErrorWhenFileMalformed: garbage is an error, not an empty store.
+    - TestLoad_ShouldEnforceTheInvariantsAddApplies: a hand-edited file gets label, duplicate and hash checks.
+  Expiry.MarshalText
+    - TestMarshalText_ShouldRefuseAYearItCouldNotParseBack: a 5-digit year is refused, not written.
   Save
     - TestSave_ShouldWriteOwnerOnlyPermissions: the file is not world-readable.
     - TestSave_ShouldReplaceExistingFileAtomically: no temp files left behind.
     - TestSave_ShouldNeverPersistTheTokenItself: only the hash reaches disk.
+    - TestSave_ShouldRefuseToWriteAnUnreadableStore: an unrenderable expiry fails the Save, leaving no file.
   Add
     - TestAdd_ShouldRejectDuplicateLabel: adding never silently revokes a live token.
     - TestAdd_ShouldRejectInvalidLabel: label charset is enforced.
@@ -127,6 +131,92 @@ func TestLoad_ShouldReturnErrorWhenExpiryMalformed(t *testing.T) {
 	// ASSERT — must fail loudly, never read as "never expires".
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "expiresAt")
+}
+
+func TestLoad_ShouldEnforceTheInvariantsAddApplies(t *testing.T) {
+	t.Parallel()
+
+	const (
+		validHash = "sha256:" +
+			"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+		createdAt = "createdAt = 2026-07-18T12:00:00Z\n"
+	)
+
+	tests := []struct {
+		name    string
+		content string
+		wantErr error
+	}{
+		{
+			name: "should reject a label that could not be added",
+			content: "[[tokens]]\nlabel = 'weave prod; rm -rf'\nhash = '" + validHash + "'\n" + createdAt,
+			wantErr: ErrInvalidLabel,
+		},
+		{
+			name: "should reject duplicate labels",
+			content: "[[tokens]]\nlabel = 'weave-prod'\nhash = '" + validHash + "'\n" + createdAt +
+				"[[tokens]]\nlabel = 'weave-prod'\nhash = '" + validHash + "'\n" + createdAt,
+			wantErr: ErrDuplicateLabel,
+		},
+		{
+			name:    "should reject a hash no presented token could ever match",
+			content: "[[tokens]]\nlabel = 'weave-prod'\nhash = 'sha256:abc'\n" + createdAt,
+			wantErr: ErrInvalidHash,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ARRANGE — the file is hand-editable, so this is a shape an
+			// operator can produce without going through Add at all.
+			path := filepath.Join(t.TempDir(), "tokens.toml")
+			require.NoError(t, os.WriteFile(path, []byte(tt.content), storeFileMode))
+
+			// ACT
+			_, err := Load(path)
+
+			// ASSERT
+			require.Error(t, err)
+			assert.ErrorIs(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestMarshalText_ShouldRefuseAYearItCouldNotParseBack(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — past year 9999, Format widens the year field and the strict
+	// Parse in UnmarshalText will not read it back.
+	expiry := NewExpiry(time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC))
+
+	// ACT
+	_, err := expiry.MarshalText()
+
+	// ASSERT — refusing to write it is what keeps every later Load working;
+	// writing it would lock the operator out of their own token file.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outside RFC 3339")
+}
+
+func TestSave_ShouldRefuseToWriteAnUnreadableStore(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	path := filepath.Join(t.TempDir(), "tokens.toml")
+	entry := newEntry("weave-prod")
+	entry.ExpiresAt = NewExpiry(time.Date(10000, time.January, 1, 0, 0, 0, 0, time.UTC))
+
+	store := &Store{Tokens: []Entry{entry}}
+
+	// ACT
+	err := store.Save(path)
+
+	// ASSERT — the failure lands on the command that asked for it, not on every
+	// later Load. Nothing is left on disk to reject.
+	require.Error(t, err)
+	assert.NoFileExists(t, path)
 }
 
 func TestSave_ShouldWriteOwnerOnlyPermissions(t *testing.T) {
