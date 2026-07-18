@@ -297,8 +297,14 @@ func TestWriteProblem_ShouldDefaultMissingStatus(t *testing.T) {
 		WriteProblem(recorder, Problem{Type: TypeFor(events.CodeInternal), Title: TitleFor(events.CodeInternal)})
 	})
 
-	// ASSERT
+	// ASSERT — the body must mirror the wire status, or the response is not a
+	// conforming problem+json: RFC 9457 requires the status member to match.
 	assert.Equal(t, http.StatusInternalServerError, recorder.Code)
+
+	var problem Problem
+
+	require.NoError(t, json.NewDecoder(recorder.Body).Decode(&problem))
+	assert.Equal(t, http.StatusInternalServerError, problem.Status)
 }
 
 //nolint:paralleltest // installs the recorder, which mutates the global emitter hook

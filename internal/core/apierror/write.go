@@ -44,17 +44,21 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 // only where the event was already emitted by the caller — the recovery
 // middleware, which owns API-011 — so a panic yields one log line, not two.
 func WriteProblem(w http.ResponseWriter, problem Problem) {
-	status := problem.Status
-	if status < http.StatusContinue {
+	if problem.Status < http.StatusContinue {
 		// net/http panics on a status below 100, so a Problem built without one
 		// would crash the handler instead of answering. 500 is the honest
 		// reading of "the caller did not say", and it keeps the response
 		// serveable.
-		status = http.StatusInternalServerError
+		//
+		// Assigned back into the struct, not just used for WriteHeader: RFC 9457
+		// requires the body's status member to mirror the wire status, and
+		// Status has no omitempty, so encoding the original would ship
+		// "status":0 alongside a 500.
+		problem.Status = http.StatusInternalServerError
 	}
 
 	w.Header().Set("Content-Type", ContentType)
-	w.WriteHeader(status)
+	w.WriteHeader(problem.Status)
 
 	// The status is already committed, so a write failure here is not
 	// actionable; the request-completed event records what was sent.
