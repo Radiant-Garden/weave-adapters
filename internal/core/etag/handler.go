@@ -155,9 +155,21 @@ func (w *captureWriter) Write(b []byte) (int, error) {
 	return w.ResponseWriter.Write(b)
 }
 
-// Unwrap exposes the underlying writer to http.ResponseController. Note that a
-// handler cannot usefully flush through this wrapper — the response is buffered
-// by design — which is the reason streaming handlers must not be wrapped.
+// Unwrap exposes the underlying writer to http.ResponseController, so
+// capabilities this wrapper does not intercept — SetWriteDeadline, and Hijack
+// for a handler that means to take the connection over entirely — stay
+// reachable.
 func (w *captureWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
+}
+
+// FlushError refuses to flush rather than letting http.ResponseController reach
+// the real writer through Unwrap. A flush there would commit a 200 and the
+// headers on the wire while the body still sat in this buffer: the ETag set
+// afterwards would be dropped, and the 304 branch would return a committed 200
+// with no body at all. Refusing is what tells a streaming handler it is wrapped
+// in something it must not be wrapped in — silently doing nothing would leave
+// it believing the flush had happened.
+func (w *captureWriter) FlushError() error {
+	return http.ErrNotSupported
 }

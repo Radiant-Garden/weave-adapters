@@ -8,6 +8,7 @@ Tested:
     - TestConditional_ShouldTagASuccessfulResponse: 200 carries an ETag and the body.
     - TestConditional_ShouldAnswer304WhenTagMatches: the polling case, with no body.
     - TestConditional_ShouldNotWriteABodyOnTheWireFor304: a real listener, where a recorder would mask it.
+    - TestConditional_ShouldRefuseToFlushThroughTheBuffer: a flush cannot commit a 200 past the buffer.
     - TestConditional_ShouldSendTheBodyWhenTagDiffers: a changed representation is not a 304.
     - TestConditional_ShouldMatchWeakAndListedTags: weak forms and multi-value headers hit.
     - TestConditional_ShouldNotTagErrorResponses: a 404 is passed through untagged.
@@ -136,6 +137,50 @@ func TestConditional_ShouldNotWriteABodyOnTheWireFor304(t *testing.T) {
 	require.Equal(t, http.StatusNotModified, resp.StatusCode)
 	assert.Empty(t, body)
 	assert.Empty(t, resp.Header.Get("Content-Length"), "net/http omits the length for a 304")
+}
+
+func TestConditional_ShouldRefuseToFlushThroughTheBuffer(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a handler that flushes mid-response, the keepalive pattern any
+	// long-running read might reach for. Over a listener, because a recorder
+	// cannot show a prematurely committed status.
+	tag := Compute([]byte(representation))
+
+	// Buffered so the handler never blocks, and read only after the body is
+	// drained: the channel is what orders the handler's write against the
+	// assertion below.
+	flushErrs := make(chan error, 1)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		flushErrs <- http.NewResponseController(w).Flush()
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(representation))
+	})
+
+	ts := httptest.NewServer(Conditional(handler))
+	t.Cleanup(ts.Close)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL, nil)
+	require.NoError(t, err)
+	req.Header.Set("If-None-Match", tag)
+
+	// ACT
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	// ASSERT — the flush is refused rather than reaching the real writer through
+	// Unwrap. Were it to land, the 200 would be committed before the tag was
+	// computed and this would be a 200 with an empty body.
+	require.ErrorIs(t, <-flushErrs, http.ErrNotSupported)
+	assert.Equal(t, http.StatusNotModified, resp.StatusCode)
+	assert.Empty(t, body)
 }
 
 func TestConditional_ShouldSendTheBodyWhenTagDiffers(t *testing.T) {
