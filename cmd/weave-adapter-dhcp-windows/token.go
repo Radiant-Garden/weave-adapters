@@ -129,8 +129,21 @@ func runTokenGen(args []string, p *printer, now func() time.Time) error {
 	}
 
 	entry := auth.Entry{Label: *label, Hash: auth.Hash(token), CreatedAt: now().UTC()}
+
 	if *expiresInDays > 0 {
-		entry.ExpiresAt = auth.NewExpiry(entry.CreatedAt.AddDate(0, 0, *expiresInDays))
+		expiry := auth.NewExpiry(entry.CreatedAt.AddDate(0, 0, *expiresInDays))
+
+		// Asking the expiry to render is the bound on the flag: a value large
+		// enough to push the year past four digits — or far enough to wrap it
+		// negative — cannot be written and read back. Checking here rather than
+		// against a made-up ceiling means the limit can never drift from the one
+		// the store actually enforces, and the operator hears about the flag
+		// they typed instead of a marshalling failure three steps later.
+		if _, err := expiry.MarshalText(); err != nil {
+			return fmt.Errorf("--expires-in-days %d is too large: %w", *expiresInDays, err)
+		}
+
+		entry.ExpiresAt = expiry
 	}
 
 	// Add before Save so a duplicate label fails without touching the file.

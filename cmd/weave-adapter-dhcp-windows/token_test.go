@@ -209,6 +209,14 @@ func TestRunTokenGen_ShouldRejectInvalidInput(t *testing.T) {
 			args:    []string{"gen", "--label", "weave prod"},
 			wantErr: "label must be",
 		},
+		{
+			// Left unchecked this mints an expiry past year 9999, which writes
+			// a token file that every later Load rejects -- list, gen, revoke
+			// and server startup alike -- until someone hand-edits it.
+			name:    "should reject an expiry too far out to be read back",
+			args:    []string{"gen", "--label", "weave-prod", "--expires-in-days", "9999999"},
+			wantErr: "--expires-in-days 9999999 is too large",
+		},
 	}
 
 	for _, tt := range tests {
