@@ -6,6 +6,7 @@ Pending:
 Tested:
   runToken
     - TestRunToken_ShouldReportUsageWhenCommandMissingOrUnknown: no silent no-op.
+    - TestRunToken_ShouldTreatHelpAsSuccess: help/-h/--help exit 0 at both levels.
   runTokenGen
     - TestRunTokenGen_ShouldMintStoreAndPrintTokenOnce: the token is shown but only its hash is stored.
     - TestRunTokenGen_ShouldSetExpiryWhenRequested: --expires-in-days lands on the entry.
@@ -27,8 +28,8 @@ Tested elsewhere:
   these tests cover only the CLI behavior layered on top.
 
 Declined:
-  printGenerated / describeExpiry / formatDays — pure formatters, asserted
-  through their commands' output rather than called directly.
+  printGenerated / describeExpiry / formatDays / isHelpVerb / skipHelp — pure
+  helpers, asserted through their commands' output rather than called directly.
 
 Additional Remarks:
   Every test uses t.TempDir() and an explicit clock, so no test touches the
@@ -102,6 +103,35 @@ func TestRunToken_ShouldReportUsageWhenCommandMissingOrUnknown(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, out, "gen")
 			assert.Contains(t, out, "revoke")
+		})
+	}
+}
+
+func TestRunToken_ShouldTreatHelpAsSuccess(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "should print the command list for the help verb", args: []string{"help"}},
+		{name: "should print the command list for -h", args: []string{"-h"}},
+		{name: "should print the command list for --help", args: []string{"--help"}},
+		{name: "should print subcommand flags for gen --help", args: []string{"gen", "--help"}},
+		{name: "should print subcommand flags for list -h", args: []string{"list", "-h"}},
+		{name: "should print subcommand flags for revoke --help", args: []string{"revoke", "--help"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT
+			out, err := runTokenCLI(t, tt.args...)
+
+			// ASSERT — asking for help is not a failure; exiting 1 here would be.
+			require.NoError(t, err)
+			assert.NotEmpty(t, out)
 		})
 	}
 }

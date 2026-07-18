@@ -50,6 +50,22 @@ func (p *printer) printf(format string, args ...any) {
 	_, p.err = fmt.Fprintf(p.w, format, args...)
 }
 
+// isHelpVerb reports whether arg is a request for the command list.
+func isHelpVerb(arg string) bool {
+	return arg == "help" || arg == "-h" || arg == "--help"
+}
+
+// skipHelp maps an explicit help request to success. The flag package prints
+// the usage itself and returns ErrHelp; surfacing that as an error would make
+// `token gen --help` exit 1, which is wrong — asking for help is not a failure.
+func skipHelp(err error) error {
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
+
+	return err
+}
+
 // runToken dispatches a token subcommand. now is injected so expiry handling is
 // testable; out receives all human-facing output.
 func runToken(args []string, out io.Writer, now func() time.Time) error {
@@ -59,6 +75,12 @@ func runToken(args []string, out io.Writer, now func() time.Time) error {
 		p.printf("%s", commandUsage)
 
 		return errors.New("token: a command is required")
+	}
+
+	if isHelpVerb(args[0]) {
+		p.printf("%s", commandUsage)
+
+		return p.err
 	}
 
 	switch args[0] {
@@ -85,7 +107,7 @@ func runTokenGen(args []string, p *printer, now func() time.Time) error {
 	expiresInDays := flags.Int("expires-in-days", 0, "days until the token stops being accepted (0 = never expires)")
 
 	if err := flags.Parse(args); err != nil {
-		return err
+		return skipHelp(err)
 	}
 
 	if *label == "" {
@@ -153,7 +175,7 @@ func runTokenList(args []string, p *printer, now func() time.Time) error {
 	path := flags.String("file", defaultStorePath, "path to the token store")
 
 	if err := flags.Parse(args); err != nil {
-		return err
+		return skipHelp(err)
 	}
 
 	store, err := loadOrEmpty(*path)
@@ -223,7 +245,7 @@ func runTokenRevoke(args []string, p *printer) error {
 	path := flags.String("file", defaultStorePath, "path to the token store")
 
 	if err := flags.Parse(args); err != nil {
-		return err
+		return skipHelp(err)
 	}
 
 	if *label == "" {

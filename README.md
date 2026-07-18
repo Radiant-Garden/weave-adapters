@@ -29,7 +29,11 @@ scopes, reservations, and leases the same way.
 
 🚧 **Work in progress.**
 
-- [`docs/`](docs/) — how the project works, event catalog, and more.
+- [`docs/cli.md`](docs/cli.md) — command and flag reference.
+- [`docs/token-management.md`](docs/token-management.md) — how weave
+  authenticates, and how tokens are generated, stored, and rotated.
+- [`docs/events.md`](docs/events.md) — the generated event catalog.
+- [`docs/how-we-work.md`](docs/how-we-work.md) — branching, commits, local dev.
 - API is spec-first OpenAPI (`api/<adapter>/openapi.yaml`).
 
 ## Maintainer
