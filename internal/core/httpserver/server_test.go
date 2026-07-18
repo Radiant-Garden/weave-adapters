@@ -9,7 +9,9 @@ Tested:
     - TestNew_ShouldReturnNotFoundForOpenAPIDocument: the reserved spec route answers a problem+json 404.
     - TestNew_ShouldEchoRequestIDHeader: the middleware chain is wired around the mux.
     - TestNew_ShouldRecoverFromHandlerPanic: a panicking handler yields 500, not a dead connection.
-    - TestNew_ShouldSkipRequestLoggingForHealthPolls: health polls emit no API-010; other routes do.
+    - TestNew_ShouldSkipRequestLoggingForHealthPolls: successful health polls emit no API-010; other routes and failures do.
+    - TestNew_ShouldRenderRouterErrorsAsProblemJSON: mux 404/405 share the one error shape.
+    - TestNew_ShouldLogRejectedRequests: inner middleware runs inside logging, so rejections are audited.
   Run
     - TestRun_ShouldShutDownGracefullyWhenContextCancelled: returns nil and emits SYS-002/003/004.
     - TestRun_ShouldServeUntilContextCancelled: requests are served while Run blocks.
@@ -47,6 +49,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
+	"github.com/radiantgarden/weave-adapters/internal/core/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 	eventstest "github.com/radiantgarden/weave-adapters/internal/core/events/testing"
 	"github.com/radiantgarden/weave-adapters/internal/core/health"
@@ -187,12 +190,109 @@ func TestNew_ShouldSkipRequestLoggingForHealthPolls(t *testing.T) {
 
 	get(t, ts, "/openapi.yaml", nil)
 
-	// ASSERT — the skip is scoped to health, not a blanket disable. The openapi
-	// 404 also emits its own API-900; only the request-audit line is counted.
-	rec.AssertEmittedN(t, catalog.API010, 1)
+	// A non-GET on the health path is not a poll, and must still be audited.
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+"/api/v1/health", nil)
+	require.NoError(t, err)
+
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
+
+	// ASSERT — the skip is scoped to successful health polls, not the path.
+	// The openapi 404 and the health 405 each emit their own error event too;
+	// only the request-audit lines are counted here.
+	rec.AssertEmittedN(t, catalog.API010, 2)
 	// slog widens ints, so the recorded value comes back as int64.
 	rec.AssertData(t, catalog.API010, "status", int64(http.StatusNotFound))
 	rec.AssertMatchesCatalog(t)
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestNew_ShouldRenderRouterErrorsAsProblemJSON(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		wantStatus int
+		wantType   string
+		wantEvent  events.EventID
+	}{
+		{
+			name: "should render an unmatched route as problem+json", method: http.MethodGet, path: "/api/v1/nope",
+			wantStatus: http.StatusNotFound, wantType: "weave-adapters:not-found", wantEvent: catalog.API900,
+		},
+		{
+			name: "should render a wrong method as problem+json", method: http.MethodPost, path: "/api/v1/health",
+			wantStatus: http.StatusMethodNotAllowed, wantType: "weave-adapters:method-not-allowed", wantEvent: catalog.API902,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) { //nolint:paralleltest // shares the global emitter hook
+			// ARRANGE
+			rec := eventstest.NewRecorder()
+			t.Cleanup(rec.Install())
+
+			ts := newTestServer(t)
+
+			// ACT
+			req, err := http.NewRequestWithContext(t.Context(), tt.method, ts.URL+tt.path, nil)
+			require.NoError(t, err)
+
+			resp, err := ts.Client().Do(req)
+			require.NoError(t, err)
+
+			defer func() { _ = resp.Body.Close() }()
+
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+
+			// ASSERT — through the real chain, not just the middleware alone.
+			require.Equal(t, tt.wantStatus, resp.StatusCode)
+			assert.Equal(t, apierror.ContentType, resp.Header.Get("Content-Type"))
+
+			var problem apierror.Problem
+			require.NoError(t, json.Unmarshal(body, &problem))
+			assert.Equal(t, tt.wantType, problem.Type)
+			assert.NotEmpty(t, problem.RequestID)
+
+			rec.AssertEmitted(t, tt.wantEvent)
+			rec.AssertMatchesCatalog(t)
+
+			// The audit line is still emitted for a rejected request.
+			rec.AssertEmittedN(t, catalog.API010, 1)
+		})
+	}
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestNew_ShouldLogRejectedRequests(t *testing.T) {
+	// ARRANGE — an inner middleware standing in for auth, which rejects before
+	// the mux is reached.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	reject := func(_ http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			apierror.WriteError(w, r, apierror.NotFound("stand-in for auth"))
+		})
+	}
+
+	srv := New(":0", health.NewHandler("1.2.3", time.Now()), reject)
+
+	ts := httptest.NewServer(srv.httpServer.Handler)
+	t.Cleanup(ts.Close)
+
+	// ACT
+	get(t, ts, "/api/v1/leases", nil)
+
+	// ASSERT — inner middleware runs inside logging, so a rejection is still
+	// audited. Ordering this the other way would lose every rejected request
+	// from the audit trail.
+	rec.AssertEmittedN(t, catalog.API010, 1)
+	rec.AssertData(t, catalog.API010, "status", int64(http.StatusNotFound))
+	rec.AssertEmitted(t, catalog.API900)
 }
 
 //nolint:paralleltest // installs the recorder, which mutates the global emitter hook

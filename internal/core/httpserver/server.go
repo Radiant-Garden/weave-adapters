@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
@@ -36,7 +37,7 @@ type Server struct {
 
 // New builds a Server listening on addr with the given health handler mounted
 // at GET /api/v1/health, wrapped in the standard middleware chain (recovery →
-// request-ID → logging → inner).
+// request-ID → logging → inner → problem-errors).
 //
 // inner are middlewares applied inside the standard chain — authentication in
 // practice. They run after logging so a rejected request still produces its
@@ -55,7 +56,11 @@ func New(addr string, healthHandler http.Handler, inner ...middleware.Middleware
 		middleware.Logging(skipHealthPolls),
 	}
 
-	handler := middleware.Chain(mux, append(standard, inner...)...)
+	// ProblemErrors is innermost so it wraps the mux itself: the router
+	// generates its own 404/405 responses, which no route-level code can reach.
+	chain := slices.Concat(standard, inner, []middleware.Middleware{middleware.ProblemErrors})
+
+	handler := middleware.Chain(mux, chain...)
 
 	return &Server{
 		httpServer: &http.Server{
@@ -66,10 +71,13 @@ func New(addr string, healthHandler http.Handler, inner ...middleware.Middleware
 	}
 }
 
-// skipHealthPolls reports whether request logging should skip r (the health
-// endpoint).
-func skipHealthPolls(r *http.Request) bool {
-	return r.URL.Path == healthPath
+// skipHealthPolls reports whether request logging should skip this request.
+//
+// Only a *successful* health GET is skipped. Suppressing the whole path would
+// also hide a 405 from a misconfigured client or a 503 from a failing probe —
+// the requests on that path most worth auditing.
+func skipHealthPolls(r *http.Request, status int) bool {
+	return r.URL.Path == healthPath && r.Method == http.MethodGet && status == http.StatusOK
 }
 
 // Unauthenticated reports whether r addresses a route that must stay open:

@@ -74,6 +74,8 @@ const (
 	CodeUnauthorized ResponseCode = "unauthorized"
 	// CodeNotFound — the addressed resource does not exist (404).
 	CodeNotFound ResponseCode = "not-found"
+	// CodeMethodNotAllowed — the route exists but not for this method (405).
+	CodeMethodNotAllowed ResponseCode = "method-not-allowed"
 	// CodeInternal — an unexpected adapter fault (500).
 	CodeInternal ResponseCode = "internal"
 )

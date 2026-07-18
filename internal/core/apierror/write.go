@@ -53,7 +53,7 @@ func WriteProblem(w http.ResponseWriter, problem Problem) {
 		status = http.StatusInternalServerError
 	}
 
-	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Type", ContentType)
 	w.WriteHeader(status)
 
 	// The status is already committed, so a write failure here is not

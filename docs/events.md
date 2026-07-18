@@ -185,6 +185,31 @@
 
 **Troubleshooting:** An adapter bug: some path returns an error that is not an apierror. Read the error field, then map that failure onto a taxonomy entry at its source.
 
+## API-902 — request rejected: method not allowed
+
+- **Level:** DEBUG
+- **Category / Topic:** API / Errors
+- **External source:** yes
+- **Description:** A request used a method the route does not accept. The response carries an Allow header.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| subject | string | false | Authenticated caller (empty until auth lands). |
+| role | string | false | Caller role (empty until auth). |
+| remoteAddr | string | true | Client address. |
+| method | string | true | The method the caller used. |
+| allow | string | false | The methods the route does accept. |
+
+**Client response**
+
+- **Problem type:** `weave-adapters:method-not-allowed`
+- **Detail:** The {{method}} method is not allowed on this resource.
+- **Impacts:** `request_rejected`
+
+**Example:** `{"eventId":"API-902","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"POST","path":"/api/v1/health"},"data":{"method":"POST","allow":"GET, HEAD"}}`
+
+**Troubleshooting:** Client-side fault. The Allow header and the allow field list the accepted methods for that path.
+
 ## HLT-001 — health status changed
 
 - **Level:** WARN

@@ -33,6 +33,8 @@ const (
 
 	// API900 backs a 404 not-found response.
 	API900 events.EventID = "API-900"
+	// API902 backs a 405 method-not-allowed response.
+	API902 events.EventID = "API-902"
 	// API901 backs a 500 internal response — the catch-all for an error that
 	// reached the HTTP boundary without a taxonomy entry.
 	API901 events.EventID = "API-901"
@@ -121,6 +123,17 @@ var clientErrors = []clientError{
 		example:  `{"eventId":"API-900","caller":{"subject":"","role":"","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/openapi.yaml"},"data":{"resource":"openapi document"}}`,
 		describe: "A request addressed a resource that does not exist.",
 		fix:      "Usually a stale client cache or a deleted resource. Confirm the identifier against a list call.",
+	},
+	{
+		id: API902, topic: "Errors", level: slog.LevelDebug, message: "request rejected: method not allowed",
+		detail: "The {{method}} method is not allowed on this resource.", code: events.CodeMethodNotAllowed,
+		fields: []events.FieldDef{
+			{Name: "method", Type: "string", Required: true, Description: "The method the caller used."},
+			{Name: "allow", Type: "string", Required: false, Description: "The methods the route does accept."},
+		},
+		example:  `{"eventId":"API-902","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"POST","path":"/api/v1/health"},"data":{"method":"POST","allow":"GET, HEAD"}}`,
+		describe: "A request used a method the route does not accept. The response carries an Allow header.",
+		fix:      "Client-side fault. The Allow header and the allow field list the accepted methods for that path.",
 	},
 	{
 		id: API901, topic: "Errors", level: slog.LevelError, message: "internal error",

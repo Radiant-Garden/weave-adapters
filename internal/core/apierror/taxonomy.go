@@ -27,9 +27,10 @@ type entry struct {
 // first backend client, 405/413/428 with the middleware and ETag write side
 // that produce them.
 var taxonomy = map[events.ResponseCode]entry{
-	events.CodeUnauthorized: {status: http.StatusUnauthorized, title: "Unauthorized"},
-	events.CodeNotFound:     {status: http.StatusNotFound, title: "Not found"},
-	events.CodeInternal:     {status: http.StatusInternalServerError, title: "Internal server error"},
+	events.CodeUnauthorized:     {status: http.StatusUnauthorized, title: "Unauthorized"},
+	events.CodeNotFound:         {status: http.StatusNotFound, title: "Not found"},
+	events.CodeMethodNotAllowed: {status: http.StatusMethodNotAllowed, title: "Method not allowed"},
+	events.CodeInternal:         {status: http.StatusInternalServerError, title: "Internal server error"},
 }
 
 // lookup returns the HTTP meaning of a response code. An unknown code resolves

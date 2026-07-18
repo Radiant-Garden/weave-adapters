@@ -18,8 +18,9 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 )
 
-// contentType is the RFC 9457 media type for problem responses.
-const contentType = "application/problem+json"
+// ContentType is the RFC 9457 media type for problem responses. It is exported
+// so middleware can recognise a response this package already rendered.
+const ContentType = "application/problem+json"
 
 // Problem is an RFC 9457 problem detail. Fields beyond the standard set
 // (requestId, backendError, errors) are the extensions this API defines.
