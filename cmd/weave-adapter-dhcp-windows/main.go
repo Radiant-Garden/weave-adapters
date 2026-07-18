@@ -139,10 +139,21 @@ func buildAuth(ctx context.Context, cfg *config.Config) ([]middleware.Middleware
 	}
 
 	verifier := auth.NewVerifier(store.Tokens)
-	if verifier.Len() == 0 {
-		// An empty allow-list would reject every request, which looks like a
-		// bug to whoever is on call. Fail at startup, where the message can say
-		// what to do.
+	if verifier.Usable() == 0 {
+		// An allow-list nothing can match would reject every request, which
+		// looks like a bug to whoever is on call. Fail at startup, where the
+		// message can say what to do.
+		//
+		// Usable, not Len: a store whose every token has expired counts as
+		// non-empty but accepts nothing, and it is the worse of the two to be
+		// paged for — the file visibly contains tokens, so the 401s read as an
+		// auth bug rather than as expiry.
+		if verifier.Len() > 0 {
+			return nil, fmt.Errorf(
+				"all %d tokens in %q have expired: run `token gen --label <name>` to mint a replacement",
+				verifier.Len(), cfg.AuthTokensFile)
+		}
+
 		return nil, fmt.Errorf("no tokens configured in %q: run `token gen --label <name>` or set disableAuth",
 			cfg.AuthTokensFile)
 	}

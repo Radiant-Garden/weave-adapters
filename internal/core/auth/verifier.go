@@ -31,9 +31,28 @@ func NewVerifier(entries []Entry) *Verifier {
 	}
 }
 
-// Len reports how many tokens are configured. Startup uses it to refuse an
-// empty allow-list, which would reject every request.
+// Len reports how many tokens are configured, expired ones included.
 func (v *Verifier) Len() int { return len(v.entries) }
+
+// Usable reports how many configured tokens are not yet expired — the count
+// that decides whether this Verifier can accept anything at all.
+//
+// Startup checks this rather than Len: a store holding only expired entries is
+// not an empty allow-list, but it rejects every request just the same, and it is
+// the harder of the two to diagnose because the file plainly contains tokens.
+func (v *Verifier) Usable() int {
+	now := v.now()
+
+	var usable int
+
+	for _, entry := range v.entries {
+		if !entry.Expired(now) {
+			usable++
+		}
+	}
+
+	return usable
+}
 
 // Verify resolves a presented token to its entry.
 //

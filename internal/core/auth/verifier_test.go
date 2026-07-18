@@ -5,7 +5,9 @@ Pending:
 
 Tested:
   NewVerifier / Len
-    - TestLen_ShouldCountConfiguredTokens: startup uses it to refuse an empty allow-list.
+    - TestLen_ShouldCountConfiguredTokens: counts every entry, expired ones included.
+  Usable
+    - TestUsable_ShouldCountOnlyTokensThatCanStillAuthenticate: startup uses it to refuse a store that accepts nothing.
   Verify
     - TestVerify_ShouldResolveAConfiguredToken: the happy path returns the entry.
     - TestVerify_ShouldRejectUnknownToken: an unconfigured token resolves to ErrUnknownToken.
@@ -58,6 +60,23 @@ func TestLen_ShouldCountConfiguredTokens(t *testing.T) {
 	// ARRANGE / ACT / ASSERT
 	assert.Equal(t, 0, newVerifier().Len())
 	assert.Equal(t, 2, newVerifier(entryFor("a", "t1", nil), entryFor("b", "t2", nil)).Len())
+}
+
+func TestUsable_ShouldCountOnlyTokensThatCanStillAuthenticate(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the store that motivates the method: entries are present, and
+	// none of them can match anything.
+	expired := NewExpiry(testClock.Add(-time.Hour))
+	live := NewExpiry(testClock.Add(time.Hour))
+
+	// ACT / ASSERT
+	allExpired := newVerifier(entryFor("a", "t1", expired), entryFor("b", "t2", expired))
+	assert.Equal(t, 2, allExpired.Len(), "the entries are there")
+	assert.Equal(t, 0, allExpired.Usable(), "and not one of them can authenticate")
+
+	mixed := newVerifier(entryFor("a", "t1", expired), entryFor("b", "t2", live), entryFor("c", "t3", nil))
+	assert.Equal(t, 2, mixed.Usable(), "a never-expiring token counts, an expired one does not")
 }
 
 func TestVerify_ShouldResolveAConfiguredToken(t *testing.T) {
