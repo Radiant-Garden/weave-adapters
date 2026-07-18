@@ -29,6 +29,7 @@ const (
 const (
 	invalidCursorMessage = "must be a nextPageToken returned by this endpoint; omit it to start from the first page"
 	atLeastOneMessage    = "must be at least 1"
+	mustBeIntegerMessage = "must be an integer"
 )
 
 // Paginator holds one collection's pagination rules. Declare one beside the
@@ -123,7 +124,7 @@ func (p Paginator) parseSize(raw string) (int, string) {
 	}
 
 	if err != nil {
-		return 0, "must be an integer"
+		return 0, mustBeIntegerMessage
 	}
 
 	if size < 1 {
