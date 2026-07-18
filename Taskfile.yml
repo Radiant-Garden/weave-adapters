@@ -67,7 +67,10 @@ tasks:
     cmds:
       # Deliberately not part of `task ci`: ci runs on macOS and Linux too,
       # where there is no .exe to drive. The Windows runner calls this after ci.
-      - pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-windows.ps1
+      # `powershell`, not `pwsh`: WS2022 ships Windows PowerShell 5.1, and
+      # PowerShell 7 is a separate install the runner does not have. The script
+      # is written to 5.1 so this needs nothing added to the infra role.
+      - powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-windows.ps1
 
   run:
     desc: Run the binary from source

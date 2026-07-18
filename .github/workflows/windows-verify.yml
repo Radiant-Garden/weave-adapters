@@ -58,7 +58,10 @@ jobs:
     timeout-minutes: 25
     defaults:
       run:
-        shell: pwsh
+        # Windows PowerShell 5.1, which WS2022 ships. Not `pwsh` — PowerShell 7
+        # is a separate install the runner does not have, and asking infra to
+        # add one would buy nothing this gate needs.
+        shell: powershell
 
     steps:
       # SHA-pinned, not tag-pinned — see layer 3 in the SECURITY note above.
@@ -78,6 +81,7 @@ jobs:
       # naming the team that has to act.
       - name: Assert the host toolchain satisfies go.mod
         run: |
+          $ErrorActionPreference = 'Stop'
           Write-Host "host : $env:COMPUTERNAME"
           Write-Host "os   : $((Get-CimInstance Win32_OperatingSystem).Caption)"
           Write-Host "user : $([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
@@ -89,7 +93,10 @@ jobs:
           Write-Host "go.mod requires $required; host has $actual"
 
           if ([version]$actual -lt [version]$required) {
-            throw "Host Go $actual is older than go.mod requires ($required). The runner's Go is pinned in infra's Ansible role and does not follow go.mod — ask the infrastructure team to bump it before merging a go.mod change."
+            # Explicit exit rather than `throw`: under shell: powershell a
+            # terminating error does not reliably set a non-zero exit code.
+            Write-Host "::error::Host Go $actual is older than go.mod requires ($required). The runner's Go is pinned in infra's Ansible role and does not follow go.mod — ask the infrastructure team to bump it before merging a go.mod change."
+            exit 1
           }
 
       # Scoped to what only Windows can answer — build, test, and drive the real

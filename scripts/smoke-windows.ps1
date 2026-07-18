@@ -43,6 +43,47 @@ $proc    = $null
 
 function Write-Step { param([string]$Message) Write-Host "==> $Message" }
 
+# Invoke-WebRequest's -SkipHttpErrorCheck is PowerShell 7 only. WS2022 ships
+# Windows PowerShell 5.1, where any non-2xx raises a terminating error instead
+# of returning a response — and this script needs to assert on a 401, so the
+# error path is a normal outcome here, not a failure.
+#
+# -UseBasicParsing matters for the same reason the rest of this script is
+# careful: 5.1 otherwise reaches for the Internet Explorer DOM parser, which is
+# unavailable to a service account with no user profile.
+function Invoke-Endpoint {
+    param(
+        [string]   $Uri,
+        [hashtable]$Headers = @{},
+        [int]      $TimeoutSec = 5
+    )
+
+    try {
+        $r = Invoke-WebRequest -Uri $Uri -Headers $Headers -TimeoutSec $TimeoutSec -UseBasicParsing
+        return [pscustomobject]@{ StatusCode = [int]$r.StatusCode; Content = $r.Content }
+    } catch {
+        $response = $_.Exception.Response
+        if ($null -eq $response) {
+            # No response at all — refused, reset or timed out. That is a real
+            # failure, not an HTTP status, so let it propagate.
+            throw
+        }
+
+        $status = [int]$response.StatusCode
+        $body   = ""
+        try {
+            $stream = $response.GetResponseStream()
+            $reader = New-Object IO.StreamReader($stream)
+            $body   = $reader.ReadToEnd()
+            $reader.Close()
+        } catch {
+            # A status with an unreadable body is still a usable assertion.
+        }
+
+        return [pscustomobject]@{ StatusCode = $status; Content = $body }
+    }
+}
+
 function Stop-Adapter {
     if ($null -ne $proc -and -not $proc.HasExited) {
         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
@@ -108,7 +149,7 @@ try {
             throw "adapter exited during startup (code $($proc.ExitCode)):`n$(Get-Content $stderr -Raw)"
         }
         try {
-            Invoke-WebRequest -Uri $health -TimeoutSec 2 -SkipHttpErrorCheck | Out-Null
+            Invoke-Endpoint -Uri $health -TimeoutSec 2 | Out-Null
             $ready = $true
             break
         } catch {
@@ -121,14 +162,14 @@ try {
 
     # --- 3. auth is enforced --------------------------------------------------
     Write-Step "asserting an unauthenticated request is rejected"
-    $anon = Invoke-WebRequest -Uri $health -SkipHttpErrorCheck -TimeoutSec 5
+    $anon = Invoke-Endpoint -Uri $health -TimeoutSec 5
     if ($anon.StatusCode -ne 401) {
         throw "expected 401 without a token, got $($anon.StatusCode): $($anon.Content)"
     }
 
     # --- 4. the health endpoint answers --------------------------------------
     Write-Step "asserting an authenticated request returns a healthy payload"
-    $resp = Invoke-WebRequest -Uri $health -TimeoutSec 5 -SkipHttpErrorCheck `
+    $resp = Invoke-Endpoint -Uri $health -TimeoutSec 5 `
         -Headers @{ Authorization = "Bearer $token" }
 
     if ($resp.StatusCode -ne 200) {
