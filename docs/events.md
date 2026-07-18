@@ -298,11 +298,7 @@
 - **Category / Topic:** SYS / Lifecycle
 - **Description:** A termination signal was received; the server is draining.
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| signal | string | false | The signal that triggered shutdown. |
-
-**Example:** `{"eventId":"SYS-003","data":{"signal":"terminated"}}`
+**Example:** `{"eventId":"SYS-003","data":{}}`
 
 **Troubleshooting:** Informational. Follows SIGINT/SIGTERM or a cancelled run context.
 

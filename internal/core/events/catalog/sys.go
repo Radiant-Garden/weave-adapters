@@ -62,12 +62,13 @@ func init() {
 		Level:           slog.LevelInfo,
 		MessageTemplate: "shutdown initiated",
 		Description:     "A termination signal was received; the server is draining.",
-		Category:        events.CategorySystem.String(),
-		Topic:           "Lifecycle",
-		Fields: []events.FieldDef{
-			{Name: "signal", Type: "string", Required: false, Description: "The signal that triggered shutdown."},
-		},
-		Example:         `{"eventId":"SYS-003","data":{"signal":"terminated"}}`,
+		Category: events.CategorySystem.String(),
+		Topic:    "Lifecycle",
+		// No "signal" field: signal.NotifyContext absorbs the signal's identity
+		// into a plain context, so by the time httpserver sees ctx.Done() there
+		// is nothing left to name. Documenting a field nothing can populate is
+		// the no-ghost-events rule one level down.
+		Example:         `{"eventId":"SYS-003","data":{}}`,
 		Troubleshooting: "Informational. Follows SIGINT/SIGTERM or a cancelled run context.",
 	})
 
