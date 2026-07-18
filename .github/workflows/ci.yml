@@ -15,19 +15,21 @@ permissions:
 
 jobs:
   build-test:
-    name: Build & Test (Go ${{ matrix.go }})
+    name: Build & Test
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        go: ["1.26", "stable"]
     steps:
       - uses: actions/checkout@v6
 
+      # Was a ["1.26", "stable"] matrix. Both resolved to the same release
+      # while 1.26 is the newest minor, so it ran one job twice. Reinstate a
+      # matrix when testing a second Go line actually means something -- 1.27
+      # shipping, or a floor older than go.mod's.
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: ${{ matrix.go }}
+          # go.mod is the single source of truth for the version, the same way
+          # the Windows gate asserts against it.
+          go-version-file: go.mod
 
       - name: Verify dependencies
         run: |
@@ -55,12 +57,9 @@ jobs:
       - name: Test
         run: go test -race -shuffle=on -coverprofile=coverage.out ./...
 
-      # Publish coverage once, from the pinned Go version (avoids double upload
-      # across the matrix).
-      # Third-party actions are SHA-pinned and allowlisted by infra policy; a
-      # bare tag is blocked at startup. Comment records the tag at pin time.
+      # SHA-pinned: repository policy blocks bare tags at startup. The trailing
+      # comment records the tag this SHA stood for.
       - name: Upload coverage to Codecov
-        if: matrix.go == '1.26'
         uses: codecov/codecov-action@04b047e8bb82a0c002c8312c1c880fbc6a999d45 # v5
         with:
           files: coverage.out
