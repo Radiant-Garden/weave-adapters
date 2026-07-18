@@ -77,12 +77,18 @@ func rank(s Status) int {
 	}
 }
 
-// httpStatus maps an overall status to its HTTP response code: 503 only when
-// unavailable, so an orchestrator readiness probe can key on the code alone.
+// httpStatus maps an overall status to its HTTP response code, so an
+// orchestrator readiness probe can key on the code alone. Only healthy and
+// unhealthy serve 200; anything else — unavailable, or a status outside the
+// vocabulary — fails safe to 503, matching rank's ordering. A probe returning a
+// zero-value Result must stop weave routing to us, not look fine.
 func httpStatus(s Status) int {
-	if s == StatusUnavailable {
+	switch s {
+	case StatusHealthy, StatusUnhealthy:
+		return http.StatusOK
+	case StatusUnavailable:
+		return http.StatusServiceUnavailable
+	default:
 		return http.StatusServiceUnavailable
 	}
-
-	return http.StatusOK
 }

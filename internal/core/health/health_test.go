@@ -4,21 +4,43 @@ Testing: health.go
 Pending:
 
 Tested:
+  NewHandler / Handler.runProbes
+    - TestHandler_ShouldPrependCoreProbe: core leads the adapter probes, and each
+      probe's Detail/Fields survive into its component.
   Handler.ServeHTTP / evaluate / runProbes
     - TestHandler_ShouldReturnWeaveShape: 200, no-cache, weave-shaped body with the core component.
+    - TestHandler_ShouldReportUptime: uptime is whole seconds since started, truncated.
     - TestHandler_Should503WhenUnavailable: an unavailable probe yields 503.
     - TestHandler_ShouldCacheProbeResults: probes run at most once per TTL.
     - TestHandler_ShouldReRunProbesAfterTTL: probes re-run once the TTL elapses.
-    - TestHandler_ShouldEmitHLTOnTransitionOnly: HLT-001 fires only on a status change.
+    - TestHandler_ShouldServeConcurrently: concurrent ServeHTTP calls are race-free.
+    - TestHandler_ShouldEmitHLTOnTransitionOnly: HLT-001 fires only on a status
+      change, with correct from/to across successive transitions.
 
 Tested elsewhere:
 
 Declined:
+  Within-TTL status flip producing no HLT-001: the composition of two mechanics
+    that are each already pinned — TestHandler_ShouldCacheProbeResults owns "no
+    re-run inside the TTL", and the transition test owns "emission follows a
+    change in the evaluated components". Asserting the composition would give
+    the transition test a second concept without covering a blind path.
+  Slow-probe serialization under the refresh lock: refresh holds the mutex
+    across every Check, so concurrent requests queue behind a re-run. This is a
+    deliberate M1 tradeoff (see refresh's doc comment) and unobservable while
+    coreProbe is the only probe. Deferred to M3, when the first backend probe
+    lands — revisit alongside running probes outside the lock.
 
 Additional Remarks:
   The transition test installs the global emitter hook (recorder) and drives an
   injected clock, so it runs sequentially. The other tests use their own Handler
   and never transition, so they stay parallel-safe.
+
+  stubProbe.calls is atomic so the concurrency test can read it without racing;
+  its other fields are only written during ARRANGE, or between sequential serves
+  in the transition test, so they need no synchronization. The concurrency test
+  uses the real clock — testClock is deliberately not concurrency-safe, and
+  ServeHTTP reads h.now() outside the handler mutex.
 */
 
 package health
@@ -28,6 +50,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,19 +61,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// stubProbe is a controllable probe that counts its checks.
+// stubProbe is a controllable probe that counts its checks. calls is atomic so
+// the concurrency test can read it while probes run.
 type stubProbe struct {
 	name   string
 	status Status
-	calls  int
+	detail string
+	fields map[string]string
+	calls  atomic.Int64
 }
 
 func (p *stubProbe) Name() string { return p.name }
 
 func (p *stubProbe) Check(context.Context) Result {
-	p.calls++
+	p.calls.Add(1)
 
-	return Result{Status: p.status}
+	return Result{Status: p.status, Detail: p.detail, Fields: p.fields}
 }
 
 // testClock is a manually-advanced clock.
@@ -88,6 +115,85 @@ func TestHandler_ShouldReturnWeaveShape(t *testing.T) {
 	assert.Equal(t, StatusHealthy, resp.Components[0].Status)
 }
 
+func TestHandler_ShouldReportUptime(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	clk := &testClock{t: time.Now()}
+	h := NewHandler("1.0.0", clk.now())
+	h.now = clk.now
+
+	// ACT — a fractional second must truncate down, not round.
+	clk.advance(90*time.Second + 500*time.Millisecond)
+
+	rw := serve(t, h)
+
+	// ASSERT
+	var resp Response
+
+	require.NoError(t, json.Unmarshal(rw.Body.Bytes(), &resp))
+	assert.Equal(t, int64(90), resp.UptimeSeconds)
+}
+
+func TestHandler_ShouldPrependCoreProbe(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — an adapter probe carrying the detail/fields weave shows operators.
+	backend := &stubProbe{
+		name:   "backend",
+		status: StatusUnhealthy,
+		detail: "lease pool nearly exhausted",
+		fields: map[string]string{"scope": "10.0.0.0/24", "free": "3"},
+	}
+
+	// ACT
+	rw := serve(t, NewHandler("1.0.0", time.Now(), backend))
+
+	// ASSERT — core is always present, and leads the adapter probes.
+	var resp Response
+
+	require.NoError(t, json.Unmarshal(rw.Body.Bytes(), &resp))
+	require.Len(t, resp.Components, 2)
+	assert.Equal(t, "core", resp.Components[0].Name)
+	assert.Equal(t, "backend", resp.Components[1].Name)
+
+	// Detail and Fields survive the probe -> component -> JSON round trip.
+	assert.Equal(t, "adapter core running", resp.Components[0].Detail)
+	assert.Equal(t, "lease pool nearly exhausted", resp.Components[1].Detail)
+	assert.Equal(t, map[string]string{"scope": "10.0.0.0/24", "free": "3"}, resp.Components[1].Fields)
+}
+
+func TestHandler_ShouldServeConcurrently(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the real clock: testClock is not safe for concurrent reads, and
+	// ServeHTTP calls h.now() outside the handler mutex.
+	const callers = 32
+
+	probe := &stubProbe{name: "backend", status: StatusHealthy}
+	h := NewHandler("1.0.0", time.Now(), probe)
+
+	codes := make([]int, callers)
+
+	var wg sync.WaitGroup
+
+	// ACT — hammer one handler from many goroutines (the suite runs with -race).
+	for i := range callers {
+		wg.Go(func() {
+			codes[i] = serve(t, h).Code
+		})
+	}
+
+	wg.Wait()
+
+	// ASSERT — every caller got a well-formed response and the probe ran.
+	for _, code := range codes {
+		assert.Equal(t, http.StatusOK, code)
+	}
+
+	assert.Positive(t, probe.calls.Load())
+}
+
 func TestHandler_Should503WhenUnavailable(t *testing.T) {
 	t.Parallel()
 
@@ -115,7 +221,7 @@ func TestHandler_ShouldCacheProbeResults(t *testing.T) {
 	serve(t, h)
 
 	// ASSERT — the probe ran only once.
-	assert.Equal(t, 1, probe.calls)
+	assert.Equal(t, int64(1), probe.calls.Load())
 }
 
 func TestHandler_ShouldReRunProbesAfterTTL(t *testing.T) {
@@ -133,7 +239,7 @@ func TestHandler_ShouldReRunProbesAfterTTL(t *testing.T) {
 	serve(t, h)
 
 	// ASSERT — the TTL elapsed, so the probe ran again.
-	assert.Equal(t, 2, probe.calls)
+	assert.Equal(t, int64(2), probe.calls.Load())
 }
 
 func TestHandler_ShouldEmitHLTOnTransitionOnly(t *testing.T) { //nolint:paralleltest // installs the global emitter hook
@@ -162,7 +268,19 @@ func TestHandler_ShouldEmitHLTOnTransitionOnly(t *testing.T) { //nolint:parallel
 	serve(t, h)
 
 	rec.AssertEmittedN(t, catalog.HLT001, 1)
-	rec.AssertData(t, catalog.HLT001, "from", "healthy")
-	rec.AssertData(t, catalog.HLT001, "to", "unavailable")
+
+	// Recovery is a second transition, and reports the prior status as from —
+	// so the emission updated the remembered status, not just read it.
+	probe.status = StatusHealthy
+
+	clk.advance(probeCacheTTL + time.Second)
+	serve(t, h)
+
+	emitted := rec.FindByID(catalog.HLT001)
+	require.Len(t, emitted, 2)
+	assert.Equal(t, "healthy", emitted[0].Data("from"))
+	assert.Equal(t, "unavailable", emitted[0].Data("to"))
+	assert.Equal(t, "unavailable", emitted[1].Data("from"))
+	assert.Equal(t, "healthy", emitted[1].Data("to"))
 	rec.AssertMatchesCatalog(t)
 }

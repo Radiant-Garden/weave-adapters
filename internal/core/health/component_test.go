@@ -5,18 +5,26 @@ Pending:
 
 Tested:
   overallStatus
-    - TestOverallStatus_ShouldReturnWorst: worst-of-wins across components.
+    - TestOverallStatus_ShouldReturnWorst: worst-of-wins across components,
+      including a status outside the vocabulary.
   httpStatus
-    - TestHTTPStatus_ShouldMapUnavailableTo503: 503 only for unavailable.
+    - TestHTTPStatus_ShouldMapUnavailableTo503: 503 for unavailable and for any
+      unknown status; 200 only for healthy/unhealthy.
   coreProbe
-    - TestCoreProbe_ShouldReportHealthy: the core self-probe is always healthy.
+    - TestCoreProbe_ShouldReportHealthy: the core self-probe is always healthy,
+      with the core detail string.
 
 Tested elsewhere:
-  rank: exercised through overallStatus.
+  rank: all branches exercised through overallStatus, including the default
+    branch via the unknown-status case.
 
 Declined:
 
 Additional Remarks:
+  httpStatus fails safe: any status outside healthy/unhealthy serves 503. This
+  keeps it consistent with rank, which orders an unknown status worst — a probe
+  returning a zero-value Result must stop weave routing to the adapter rather
+  than reporting 200 with an empty status.
 */
 
 package health
@@ -52,6 +60,11 @@ func TestOverallStatus_ShouldReturnWorst(t *testing.T) {
 			comps: []Component{{Status: StatusHealthy}, {Status: StatusUnhealthy}, {Status: StatusUnavailable}},
 			want:  StatusUnavailable,
 		},
+		{
+			name:  "unknown status beats unavailable when a probe returns a zero-value Result",
+			comps: []Component{{Status: StatusUnavailable}, {Status: ""}},
+			want:  "",
+		},
 	}
 
 	for _, tc := range tests {
@@ -69,6 +82,10 @@ func TestHTTPStatus_ShouldMapUnavailableTo503(t *testing.T) {
 	assert.Equal(t, http.StatusOK, httpStatus(StatusHealthy))
 	assert.Equal(t, http.StatusOK, httpStatus(StatusUnhealthy))
 	assert.Equal(t, http.StatusServiceUnavailable, httpStatus(StatusUnavailable))
+
+	// An unknown status fails safe: weave must stop routing, not see 200.
+	assert.Equal(t, http.StatusServiceUnavailable, httpStatus(""))
+	assert.Equal(t, http.StatusServiceUnavailable, httpStatus("bogus"))
 }
 
 func TestCoreProbe_ShouldReportHealthy(t *testing.T) {
@@ -77,5 +94,6 @@ func TestCoreProbe_ShouldReportHealthy(t *testing.T) {
 	res := coreProbe{}.Check(t.Context())
 
 	assert.Equal(t, StatusHealthy, res.Status)
+	assert.Equal(t, "adapter core running", res.Detail)
 	assert.Equal(t, "core", coreProbe{}.Name())
 }
