@@ -10,10 +10,10 @@ Tested:
     - TestFieldError_ShouldMatchTheHandWrittenStruct: same for the errors[] element.
     - TestProblemType_ShouldMatchTheLiveTaxonomy: the enum and the Go taxonomy list exactly the same codes.
   pagination.yaml -> pagination.gen.go
-    - TestPageEnvelope_ShouldMatchTheHandWrittenStruct: generated envelope and pagination.Page agree on field names and optionality.
+    - TestPageEnvelope_ShouldMatchTheHandWrittenStruct: generated envelope and pagination.Page agree on field names, and on optionality on both sides.
     - TestPageParameters_ShouldMatchTheHandWrittenNames: the spec's query parameters are the constants handlers actually read.
   jobs.yaml -> jobs.gen.go
-    - TestJob_ShouldOmitAbsentOptionalFields: a pending job carries no zero timestamp and no empty error object.
+    - TestJob_ShouldOmitAbsentOptionalFields: a pending job renders exactly id/status/createdAt — no zero timestamp, no empty error object.
 
 Tested elsewhere:
   The behaviour behind these shapes is tested in the packages that own it —
@@ -41,6 +41,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -59,6 +60,11 @@ type jsonField struct {
 }
 
 // jsonFieldsOf describes a struct type by its JSON fields.
+//
+// An exported field with no json tag still serializes, under its Go name, and
+// an embedded struct promotes its fields onto the wire. Both are ignored by a
+// naive tag scan, so both are handled here — otherwise adding an untagged field
+// to one side would change the wire format and still compare equal.
 func jsonFieldsOf(t *testing.T, target any) map[string]jsonField {
 	t.Helper()
 
@@ -68,13 +74,36 @@ func jsonFieldsOf(t *testing.T, target any) map[string]jsonField {
 	fields := make(map[string]jsonField, typ.NumField())
 
 	for field := range typ.Fields() {
+		if !field.IsExported() {
+			continue
+		}
+
 		tag := field.Tag.Get("json")
-		if tag == "-" || tag == "" {
+		if tag == "-" {
 			continue
 		}
 
 		parts := strings.Split(tag, ",")
 		name := parts[0]
+
+		// Embedded and untagged: encoding/json promotes an anonymous struct's
+		// fields, and falls back to the Go name when there is no tag.
+		if name == "" {
+			if field.Anonymous && field.Type.Kind() == reflect.Struct {
+				for embedded, describe := range jsonFieldsOf(t, reflect.Zero(field.Type).Interface()) {
+					_, clash := fields[embedded]
+					require.False(t, clash, "two fields share the JSON name %q", embedded)
+					fields[embedded] = describe
+				}
+
+				continue
+			}
+
+			name = field.Name
+		}
+
+		_, clash := fields[name]
+		require.False(t, clash, "two fields share the JSON name %q", name)
 
 		fields[name] = jsonField{
 			Name:      name,
@@ -218,19 +247,30 @@ func TestPageEnvelope_ShouldMatchTheHandWrittenStruct(t *testing.T) {
 	generated := jsonFieldsOf(t, PageEnvelope{})
 	handWritten := jsonFieldsOf(t, pagination.Page[struct{}]{})
 
-	// ACT
-	generatedNames := fieldNames(generated)
-	handWrittenNames := fieldNames(handWritten)
+	// ACT / ASSERT — the same field names on both sides.
+	assert.ElementsMatch(t, fieldNames(handWritten), fieldNames(generated))
 
-	// ASSERT
-	assert.ElementsMatch(t, handWrittenNames, generatedNames)
+	// Optionality is asserted on BOTH sides. Checking only the Go struct would
+	// let pagination.yaml move a cursor field into required:, which makes the
+	// last page unrepresentable for every generated client.
+	for _, side := range []struct {
+		name   string
+		fields map[string]jsonField
+	}{
+		{name: "generated", fields: generated},
+		{name: "hand-written", fields: handWritten},
+	} {
+		// Presence is required first: a missing key reads as the zero
+		// jsonField, whose OmitEmpty is false, so an absent items would
+		// satisfy the assertion below rather than fail it.
+		require.Contains(t, side.fields, "items", side.name)
+		require.Contains(t, side.fields, "nextPageToken", side.name)
+		require.Contains(t, side.fields, "nextPageUrl", side.name)
 
-	// items is required on both sides; the two cursor forms are optional and
-	// absent together on the last page.
-	assert.False(t, generated["items"].OmitEmpty, "items is required by the spec")
-	assert.False(t, handWritten["items"].OmitEmpty, "items must always be rendered")
-	assert.True(t, handWritten["nextPageToken"].OmitEmpty)
-	assert.True(t, handWritten["nextPageUrl"].OmitEmpty)
+		assert.False(t, side.fields["items"].OmitEmpty, "%s: items is always rendered", side.name)
+		assert.True(t, side.fields["nextPageToken"].OmitEmpty, "%s: absent on the last page", side.name)
+		assert.True(t, side.fields["nextPageUrl"].OmitEmpty, "%s: absent on the last page", side.name)
+	}
 }
 
 func fieldNames(fields map[string]jsonField) []string {
@@ -277,18 +317,25 @@ func TestJob_ShouldOmitAbsentOptionalFields(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE — a job that has not finished, so neither completion time nor
-	// error exists yet.
-	job := Job{Id: "01J9Z6X2QK7N4V8TA3B5C6D7E8", Status: Pending}
+	// error exists yet. createdAt is required, so it is set: leaving it zero
+	// would emit the very zero timestamp this test exists to catch.
+	job := Job{
+		Id:        "01J9Z6X2QK7N4V8TA3B5C6D7E8",
+		Status:    Pending,
+		CreatedAt: time.Date(2026, time.July, 18, 9, 2, 36, 0, time.UTC),
+	}
 
 	// ACT
 	encoded, err := json.Marshal(job)
 	require.NoError(t, err)
 
-	// ASSERT — omitempty does nothing for a struct or a time.Time, so without
-	// pointers these would render as a zero timestamp and an empty error
-	// object, and "absent" would be indistinguishable from "failed with a blank
-	// problem".
-	assert.NotContains(t, string(encoded), "completedAt")
-	assert.NotContains(t, string(encoded), "error")
-	assert.Contains(t, string(encoded), `"status":"pending"`)
+	// ASSERT — the whole document, not a substring scan: omitempty does nothing
+	// for a struct or a time.Time, so without pointers these would render as a
+	// zero timestamp and an empty error object, and "absent" would be
+	// indistinguishable from "failed with a blank problem".
+	assert.JSONEq(t, `{
+		"id":        "01J9Z6X2QK7N4V8TA3B5C6D7E8",
+		"status":    "pending",
+		"createdAt": "2026-07-18T09:02:36Z"
+	}`, string(encoded))
 }

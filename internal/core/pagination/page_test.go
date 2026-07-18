@@ -20,8 +20,10 @@ Tested:
     - TestNextToken_ShouldMintNoTokenForAnEmptyKey: the exhausted-listing case composes into a last-page envelope.
     - TestNextToken_ShouldNotBeParseableByAnotherCollection: scopes do not cross.
   Next
-    - TestNext_ShouldMintBothCursorForms: token and link carry the same cursor, and neither appears alone.
+    - TestNext_ShouldMintBothCursorForms: token and link carry the same cursor.
+    - TestNext_ShouldPreserveAnEncodedSlashInThePath: %2F stays encoded, or the link addresses another resource.
     - TestNext_ShouldProduceARelativeLink: no scheme or host, so nothing is derived from Host / X-Forwarded-*.
+    - TestNext_ShouldNotProduceALinkOffTheAdaptersOwnHost: an authority in the request target never reaches the link.
     - TestNext_ShouldPreserveEveryOtherQueryParameter: a dropped filter would leave later pages unfiltered.
     - TestNext_ShouldReplaceAnExistingPageToken: one token per link, or the client loops on page 2.
     - TestNext_ShouldBeEmptyWhenThereIsNoNextPage: exhausted listing and missing URL both yield a last page.
@@ -358,6 +360,76 @@ func TestNext_ShouldProduceARelativeLink(t *testing.T) {
 	assert.Empty(t, parsed.Scheme)
 	assert.Empty(t, parsed.Host)
 	assert.True(t, strings.HasPrefix(next.URL, "/api/v1/leases?"), "got %q", next.URL)
+}
+
+func TestNext_ShouldNotProduceALinkOffTheAdaptersOwnHost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// requestURL is built directly rather than parsed for the cases that
+		// url.Parse cannot produce: a Path already beginning with "//" is what
+		// a route decoding %2F%2F hands a handler, and it is the input that
+		// actually renders a network-path reference.
+		requestURL *url.URL
+	}{
+		{name: "should drop an authority in the request target", requestURL: mustParse(t, "//evil.example.com/api/v1/leases")},
+		{name: "should ignore a scheme and host", requestURL: mustParse(t, "https://evil.example.com/api/v1/leases")},
+		{name: "should collapse a path that begins with two slashes", requestURL: &url.URL{Path: "//evil.example.com/api/v1/leases"}},
+		{name: "should collapse a path that begins with three slashes", requestURL: &url.URL{Path: "///evil.example.com/x"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT
+			next := leasePages.Next(tt.requestURL, "lease-0042")
+
+			// ASSERT — the client resolves the link against its own base, so a
+			// link that carried an authority would send it somewhere else. Next
+			// takes only the path, and this is what pins that.
+			base, err := url.Parse("https://adapter.internal/api/v1/leases")
+			require.NoError(t, err)
+
+			ref, err := url.Parse(next.URL)
+			require.NoError(t, err)
+
+			assert.Equal(t, "adapter.internal", base.ResolveReference(ref).Host)
+		})
+	}
+}
+
+func TestNext_ShouldPreserveAnEncodedSlashInThePath(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a wildcard route whose identifier contains an encoded slash, as
+	// net/http hands it to a handler: Path is decoded, RawPath keeps the
+	// original encoding.
+	requestURL := &url.URL{
+		Path:     "/api/v1/leases/a/b",
+		RawPath:  "/api/v1/leases/a%2Fb",
+		RawQuery: "pageSize=50",
+	}
+
+	// ACT
+	next := leasePages.Next(requestURL, "lease-0042")
+
+	// ASSERT — rebuilding from the decoded Path would emit /leases/a/b, which
+	// addresses a different resource, so the next page would 404 or list the
+	// wrong collection.
+	assert.Contains(t, next.URL, "/api/v1/leases/a%2Fb")
+	assert.NotContains(t, next.URL, "/api/v1/leases/a/b")
+}
+
+// mustParse parses a request target that url.Parse can represent.
+func mustParse(t *testing.T, target string) *url.URL {
+	t.Helper()
+
+	parsed, err := url.Parse(target)
+	require.NoError(t, err)
+
+	return parsed
 }
 
 func TestNext_ShouldPreserveEveryOtherQueryParameter(t *testing.T) {

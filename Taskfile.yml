@@ -145,9 +145,11 @@ tasks:
     cmds:
       - task: generate
       # Scope the diff to generated outputs only, so an otherwise-dirty working
-      # tree doesn't fail the check. docs/ is the event catalog; api/ is
-      # oapi-codegen's *.gen.go, which must not drift from the specs beside them.
-      - git diff --exit-code -- docs api
+      # tree doesn't fail the check. docs/ is the event catalog; the *.gen.go
+      # are oapi-codegen's, and must not drift from the specs beside them.
+      # Deliberately NOT all of api/ — that also holds hand-written specs and
+      # tests, and an uncommitted edit to those is not a generation failure.
+      - git diff --exit-code -- docs ':(glob)api/**/*.gen.go'
 
   up:
     desc: Build the linux binary and start the adapter in Docker

@@ -21,15 +21,16 @@ components:
       in: query
       required: false
       description: >-
-        Maximum items to return. A value above the endpoint's documented maximum
-        is clamped to it rather than rejected, so a client must always treat
-        nextPageToken — not the item count — as the authority on whether more
-        items exist. A value that is not a positive integer is a 400.
+        Maximum items to return. Each endpoint documents its own default and
+        maximum, so neither is fixed here.
+
+        A value above the endpoint's maximum is clamped to it rather than
+        rejected, so a client must always treat nextPageToken — not the item
+        count — as the authority on whether more items exist. A value that is
+        not a positive integer is a 400.
       schema:
         type: integer
-        format: int32
         minimum: 1
-        default: 100
 
     PageToken:
       name: pageToken

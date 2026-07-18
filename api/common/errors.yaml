@@ -30,10 +30,15 @@ components:
         - status
       properties:
         type:
-          type: string
+          allOf:
+            - $ref: '#/components/schemas/ProblemType'
           description: >-
             Stable slug identifying the error class. Clients may switch on it;
             it is the one field guaranteed not to change wording.
+
+            The enum lists the codes core defines. An adapter may add its own,
+            so a client must treat an unrecognised value as an error it does not
+            specifically handle rather than as a protocol violation.
           example: weave-adapters:not-found
         title:
           type: string
@@ -110,10 +115,3 @@ components:
         - weave-adapters:method-not-allowed
         - weave-adapters:internal
 
-  responses:
-    Problem:
-      description: An error, as RFC 9457 problem+json.
-      content:
-        application/problem+json:
-          schema:
-            $ref: '#/components/schemas/Problem'

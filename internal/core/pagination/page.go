@@ -170,24 +170,41 @@ type NextPage struct {
 // the last item on the page just built. An empty key yields a zero NextPage,
 // which renders as a last page.
 //
-// The link is always relative, so the adapter never has to derive its own
-// external base URL from Host or X-Forwarded-* headers.
+// The link is always a path-absolute relative reference, so the adapter never
+// has to derive its own external base URL from Host or X-Forwarded-* headers,
+// and the link can never send a client to another host.
 //
-// It preserves every query parameter and replaces only pageToken. A
-// link-following client sends nothing but the link, so dropping a filter here
-// would serve a filtered first page and unfiltered later ones.
+// It replaces only pageToken and keeps every other parameter that url.Values
+// can parse — a link-following client sends nothing but the link, so a dropped
+// filter would serve a filtered first page and unfiltered later ones. A
+// parameter Go rejects (a bare ";" separator, bad percent-encoding) is dropped
+// here, but the handler's own Query() call drops it too, so the link still
+// matches the page it came from.
 func (p Paginator) Next(requestURL *url.URL, key string) NextPage {
 	token := p.NextToken(key)
 	if token == "" || requestURL == nil {
 		return NextPage{}
 	}
 
+	// Copy rather than rebuild from Path: a fresh url.URL would drop RawPath,
+	// and EscapedPath does not re-escape "/", so a segment containing %2F would
+	// come back as a path separator and point the link at a different resource.
+	next := *requestURL
+	next.Scheme, next.Host, next.User = "", "", nil
+	next.Fragment, next.RawFragment = "", ""
+
+	// A path starting with "//" renders as a network-path reference, which a
+	// client resolves against the authority that follows rather than against
+	// its own base. Collapse the leading slashes the way a router's path
+	// cleaning would; RawPath is dropped because it no longer encodes Path.
+	if strings.HasPrefix(next.Path, "//") {
+		next.Path = "/" + strings.TrimLeft(next.Path, "/")
+		next.RawPath = ""
+	}
+
 	query := requestURL.Query()
 	query.Set(ParamPageToken, token)
-
-	// Path and RawQuery only: url.URL renders a relative reference when Scheme
-	// and Host are empty.
-	next := url.URL{Path: requestURL.Path, RawQuery: query.Encode()}
+	next.RawQuery = query.Encode()
 
 	return NextPage{Token: token, URL: next.String()}
 }

@@ -22,7 +22,7 @@ type PageEnvelope struct {
 }
 
 // PageSize defines model for PageSize.
-type PageSize = int32
+type PageSize = int
 
 // PageToken defines model for PageToken.
 type PageToken = string

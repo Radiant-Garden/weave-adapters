@@ -79,9 +79,10 @@ type Problem struct {
 	Title string `json:"title"`
 
 	// Type Stable slug identifying the error class. Clients may switch on it; it is the one field guaranteed not to change wording.
+	// The enum lists the codes core defines. An adapter may add its own, so a client must treat an unrecognised value as an error it does not specifically handle rather than as a protocol violation.
 	//
 	// Example: weave-adapters:not-found
-	Type string `json:"type"`
+	Type ProblemType `json:"type"`
 }
 
 // ProblemType The problem types this version of core defines. An adapter may add its own, but never a second error shape.
