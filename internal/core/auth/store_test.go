@@ -148,7 +148,7 @@ func TestLoad_ShouldEnforceTheInvariantsAddApplies(t *testing.T) {
 		wantErr error
 	}{
 		{
-			name: "should reject a label that could not be added",
+			name:    "should reject a label that could not be added",
 			content: "[[tokens]]\nlabel = 'weave prod; rm -rf'\nhash = '" + validHash + "'\n" + createdAt,
 			wantErr: ErrInvalidLabel,
 		},

@@ -283,9 +283,10 @@ func TestRun_ShouldWarnLoudlyWhenAuthIsDisabled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	errCh := make(chan error, 1)
+	port := strconv.Itoa(freePort(t))
 
 	go func() {
-		errCh <- run(ctx, []string{"--port", strconv.Itoa(freePort(t)), "--disable-auth"})
+		errCh <- run(ctx, []string{"--port", port, "--disable-auth"})
 	}()
 
 	waitForListening(t, rec)

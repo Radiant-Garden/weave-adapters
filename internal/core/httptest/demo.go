@@ -124,6 +124,7 @@ func (r *Resource) list(w http.ResponseWriter, req *http.Request) {
 	// Resume after the cursor key. The slice is sorted by ID, so the first item
 	// ordered after it starts the page.
 	start := 0
+
 	if params.After != "" {
 		// BinarySearchFunc lands on the first item ordered at or after the
 		// cursor key; when the key itself is still present, step over it.

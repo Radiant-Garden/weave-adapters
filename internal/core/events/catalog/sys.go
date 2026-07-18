@@ -62,8 +62,8 @@ func init() {
 		Level:           slog.LevelInfo,
 		MessageTemplate: "shutdown initiated",
 		Description:     "A termination signal was received; the server is draining.",
-		Category: events.CategorySystem.String(),
-		Topic:    "Lifecycle",
+		Category:        events.CategorySystem.String(),
+		Topic:           "Lifecycle",
 		// No "signal" field: signal.NotifyContext absorbs the signal's identity
 		// into a plain context, so by the time httpserver sees ctx.Done() there
 		// is nothing left to name. Documenting a field nothing can populate is
@@ -81,24 +81,6 @@ func init() {
 		Topic:           "Lifecycle",
 		Example:         `{"eventId":"SYS-004","data":{}}`,
 		Troubleshooting: "Informational. Marks a clean end to a process lifecycle.",
-	})
-
-	events.Register(&events.Event{
-		ID:              SYS007,
-		Level:           slog.LevelError,
-		MessageTemplate: "shutdown incomplete",
-		Description:     "The drain grace period expired with requests still in flight; they were cut off.",
-		Category:        events.CategorySystem.String(),
-		Topic:           "Lifecycle",
-		Fields: []events.FieldDef{
-			{Name: "error", Type: "string", Required: true, Description: "The shutdown error."},
-			{Name: "graceSeconds", Type: "int", Required: true, Description: "The drain grace period that expired."},
-		},
-		Example: `{"eventId":"SYS-007","data":{"error":"context deadline exceeded","graceSeconds":15}}`,
-		Troubleshooting: "Clients of the cut-off requests saw a dropped connection and may retry a " +
-			"non-idempotent call. Check for a handler that outlives the grace period — a slow backend " +
-			"call with no timeout of its own is the usual cause. If the drain is legitimately long, " +
-			"raise the grace period; otherwise bound the handler.",
 	})
 
 	events.Register(&events.Event{
@@ -127,5 +109,22 @@ func init() {
 		Topic:           "Lifecycle",
 		Example:         `{"eventId":"SYS-006","data":{}}`,
 		Troubleshooting: "Development-only setting. Unset disableAuth and configure a token (`token gen --label <name>`) before this host is reachable by anything but you.",
+	})
+	events.Register(&events.Event{
+		ID:              SYS007,
+		Level:           slog.LevelError,
+		MessageTemplate: "shutdown incomplete",
+		Description:     "The drain grace period expired with requests still in flight; they were cut off.",
+		Category:        events.CategorySystem.String(),
+		Topic:           "Lifecycle",
+		Fields: []events.FieldDef{
+			{Name: "error", Type: "string", Required: true, Description: "The shutdown error."},
+			{Name: "graceSeconds", Type: "int", Required: true, Description: "The drain grace period that expired."},
+		},
+		Example: `{"eventId":"SYS-007","data":{"error":"context deadline exceeded","graceSeconds":15}}`,
+		Troubleshooting: "Clients of the cut-off requests saw a dropped connection and may retry a " +
+			"non-idempotent call. Check for a handler that outlives the grace period — a slow backend " +
+			"call with no timeout of its own is the usual cause. If the drain is legitimately long, " +
+			"raise the grace period; otherwise bound the handler.",
 	})
 }
