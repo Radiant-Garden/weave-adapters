@@ -12,6 +12,8 @@ Tested:
     - TestDecodeToken_ShouldRejectAnOlderVersion: a wire-format bump invalidates outstanding tokens.
     - FuzzDecodeToken: an attacker-controlled token never panics, and an accepted one carries a bounded key.
     - FuzzEncodeToken: any key round-trips byte for byte, or is refused for exceeding MaxKeyBytes.
+  maxTokenLen
+    - TestMaxTokenLen_ShouldLeaveRoomForEveryTokenThisScopeCanMint: the pre-decode gate never rejects a token we minted.
 
 Tested elsewhere:
   That an unreadable token becomes a 400 problem+json rather than a panic or a
@@ -198,6 +200,39 @@ func FuzzDecodeToken(f *testing.F) {
 		// an arbitrarily large "identifier".
 		assert.LessOrEqual(t, len(after), MaxKeyBytes)
 	})
+}
+
+func TestMaxTokenLen_ShouldLeaveRoomForEveryTokenThisScopeCanMint(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the gate runs before base64-decoding, so it has to be derived
+	// from the cursor's own maximum rather than guessed. A bound even slightly
+	// too tight would reject legitimate last-page tokens, and only for the
+	// collections whose keys happen to run long.
+	tests := []struct {
+		name  string
+		scope string
+	}{
+		{name: "should hold for a short scope", scope: "a"},
+		{name: "should hold for an ordinary scope", scope: "leases"},
+		{name: "should hold for an implausibly long scope", scope: strings.Repeat("s", 300)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT — the largest token this scope could ever legitimately mint.
+			token := encodeToken(tt.scope, strings.Repeat("k", MaxKeyBytes))
+
+			// ASSERT
+			assert.LessOrEqual(t, len(token), maxTokenLen(tt.scope))
+
+			after, ok := decodeToken(token, tt.scope)
+			require.True(t, ok, "a token this scope minted must survive its own gate")
+			assert.Len(t, after, MaxKeyBytes)
+		})
+	}
 }
 
 func FuzzEncodeToken(f *testing.F) {

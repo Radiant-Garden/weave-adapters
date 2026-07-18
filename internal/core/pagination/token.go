@@ -57,6 +57,20 @@ type cursor struct {
 	After []byte `json:"k"`
 }
 
+// maxTokenLen returns the longest token this scope can legitimately have minted.
+//
+// A MaxKeyBytes key is base64'd by encoding/json inside the cursor, so the JSON
+// carries ceil(MaxKeyBytes/3)*4 bytes for the key, plus the scope and the fixed
+// structure; the whole document is then base64'd again. The slack covers the
+// field names, braces, quotes and the version number.
+func maxTokenLen(scope string) int {
+	const cursorOverhead = 64
+
+	keyJSON := (MaxKeyBytes+2)/3*4 + 2
+
+	return base64.RawURLEncoding.EncodedLen(keyJSON + len(scope) + cursorOverhead)
+}
+
 // encodeToken renders a cursor as an opaque token. RawURLEncoding is used so
 // the token is query-safe with no escaping and no '=' padding that a client
 // might trim in transit.
@@ -80,6 +94,14 @@ func encodeToken(scope, after string) string {
 // this scope, and an HMAC would add a key and a token lifetime to manage
 // without addressing a threat that matters here.
 func decodeToken(token, scope string) (after string, ok bool) {
+	// Length-gated before decoding, so rejecting an oversized token costs no
+	// allocation at all. The bound is derived from the cursor's own maximum
+	// rather than a round number: a scope long enough to make a legitimate token
+	// exceed a hard-coded 2 KiB would turn this into a silent false reject.
+	if len(token) > maxTokenLen(scope) {
+		return "", false
+	}
+
 	raw, err := base64.RawURLEncoding.DecodeString(token)
 	if err != nil {
 		return "", false
