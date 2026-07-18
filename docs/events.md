@@ -42,6 +42,21 @@
 
 **Troubleshooting:** A handler bug caused a panic. Read the stack field, reproduce via method+path, and fix the root cause (often a nil dereference or out-of-range index). Correlate other events by requestId.
 
+## API-012 — response too large to tag
+
+- **Level:** WARN
+- **Category / Topic:** API / Request
+- **Description:** A conditionally-read response exceeded the size the ETag wrapper will buffer, so it was streamed through without an ETag. Clients cannot cache it and every poll pays for the full body.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| path | string | true | The route that produced the oversized response. |
+| limitBytes | int | true | The buffering limit that was exceeded. |
+
+**Example:** `{"eventId":"API-012","data":{"path":"/api/v1/leases","limitBytes":4194304}}`
+
+**Troubleshooting:** The route returns an unbounded collection. Add or lower pagination (pageSize) so a page fits the limit, or stop wrapping the handler in etag.Conditional if the resource is genuinely a stream.
+
 ## API-020 — request rejected: no credential
 
 - **Level:** WARN

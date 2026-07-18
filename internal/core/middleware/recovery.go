@@ -9,6 +9,7 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
+	"github.com/radiantgarden/weave-adapters/internal/core/httpx"
 )
 
 // Recovery is the outermost middleware: it recovers a panic from any inner
@@ -21,7 +22,7 @@ import (
 // request metadata as explicit data (API-011 is not an ExternalSource event).
 func Recovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		rw := &recoveryWriter{ResponseWriter: w}
+		rw := httpx.NewRecorder(w)
 
 		defer func() {
 			rec := recover()
@@ -42,7 +43,7 @@ func Recovery(next http.Handler) http.Handler {
 				"stack", string(debug.Stack()),
 			)
 
-			if rw.wrote {
+			if rw.Wrote() {
 				return // response already committed; a 500 now would corrupt it.
 			}
 
@@ -61,28 +62,4 @@ func Recovery(next http.Handler) http.Handler {
 
 		next.ServeHTTP(rw, r)
 	})
-}
-
-// recoveryWriter tracks whether the response has started so Recovery does not
-// write a 500 over an already-committed response. Unwrap keeps optional
-// ResponseWriter capabilities reachable via http.ResponseController.
-type recoveryWriter struct {
-	http.ResponseWriter
-
-	wrote bool
-}
-
-func (w *recoveryWriter) WriteHeader(code int) {
-	w.wrote = true
-	w.ResponseWriter.WriteHeader(code)
-}
-
-func (w *recoveryWriter) Write(b []byte) (int, error) {
-	w.wrote = true
-
-	return w.ResponseWriter.Write(b)
-}
-
-func (w *recoveryWriter) Unwrap() http.ResponseWriter {
-	return w.ResponseWriter
 }

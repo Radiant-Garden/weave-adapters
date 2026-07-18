@@ -21,6 +21,10 @@ const (
 	// API011 is emitted when a handler panics and recovery returns 500.
 	API011 events.EventID = "API-011"
 
+	// API012 is emitted when a response was too large to tag conditionally and
+	// was streamed through untagged.
+	API012 events.EventID = "API-012"
+
 	// API020 is emitted when a request carries no Authorization header.
 	API020 events.EventID = "API-020"
 	// API021 is emitted when the Authorization header uses a scheme other than
@@ -186,6 +190,23 @@ func init() {
 		Example: `{"eventId":"API-011","data":{"method":"GET","path":"/x","remoteAddr":"192.0.2.1:1234","requestId":"…","panic":"runtime error: invalid memory address"}}`,
 		Troubleshooting: "A handler bug caused a panic. Read the stack field, reproduce via method+path, and fix the root cause " +
 			"(often a nil dereference or out-of-range index). Correlate other events by requestId.",
+	})
+
+	events.Register(&events.Event{
+		ID:              API012,
+		Level:           slog.LevelWarn,
+		MessageTemplate: "response too large to tag",
+		Description: "A conditionally-read response exceeded the size the ETag wrapper will buffer, so it was " +
+			"streamed through without an ETag. Clients cannot cache it and every poll pays for the full body.",
+		Category: events.CategoryAPI.String(),
+		Topic:    "Request",
+		Fields: []events.FieldDef{
+			{Name: "path", Type: "string", Required: true, Description: "The route that produced the oversized response."},
+			{Name: "limitBytes", Type: "int", Required: true, Description: "The buffering limit that was exceeded."},
+		},
+		Example: `{"eventId":"API-012","data":{"path":"/api/v1/leases","limitBytes":4194304}}`,
+		Troubleshooting: "The route returns an unbounded collection. Add or lower pagination (pageSize) so a page " +
+			"fits the limit, or stop wrapping the handler in etag.Conditional if the resource is genuinely a stream.",
 	})
 
 	for _, ce := range clientErrors {

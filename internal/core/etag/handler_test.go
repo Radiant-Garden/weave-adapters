@@ -15,6 +15,11 @@ Tested:
     - TestConditional_ShouldTrackTheRepresentationAcrossChanges: the tag follows the data.
     - TestConditional_ShouldHandleHeadRequests: HEAD is conditional too.
     - TestConditional_ShouldTagAnEmptyBody: a handler that writes nothing still tags.
+    - TestConditional_ShouldStreamThroughWhenTooLargeToTag: an oversized body is served untagged and reported.
+    - TestConditional_ShouldStreamThroughInChunksWithoutLosingBytes: the flush-and-switch keeps every byte.
+    - TestConditional_ShouldSkipWorkWhenClientHasGoneAway: no hashing for a response nobody will read.
+    - TestConditional_ShouldReportItsStatusToTheMiddlewareChain: a 304 is audited as 304, in the real chain.
+    - TestConditional_ShouldLetProblemErrorsHandleARouterMiss: a router 404 still renders as problem+json.
 
 Tested elsewhere:
   Tag computation and If-None-Match parsing are covered in etag_test.go.
@@ -32,6 +37,8 @@ Additional Remarks:
 package etag
 
 import (
+	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -39,6 +46,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
+	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
+	eventstest "github.com/radiantgarden/weave-adapters/internal/core/events/testing"
+	"github.com/radiantgarden/weave-adapters/internal/core/middleware"
 )
 
 const representation = `{"items":[{"id":"lease-1"}],"nextPageToken":""}`
@@ -261,6 +273,164 @@ func TestConditional_ShouldHandleHeadRequests(t *testing.T) {
 	// ASSERT — HEAD is a read, so it is tagged and conditional like GET.
 	assert.Equal(t, tag, tagged.Header().Get("ETag"))
 	assert.Equal(t, http.StatusNotModified, conditional.Code)
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestConditional_ShouldStreamThroughWhenTooLargeToTag(t *testing.T) {
+	// ARRANGE — an unpaginated collection, the case that would otherwise be
+	// held whole in memory once per in-flight request.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	oversized := bytes.Repeat([]byte("x"), MaxTaggedBytes+1024)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(oversized)
+	})
+
+	// ACT
+	resp := call(t, handler, http.MethodGet, "")
+
+	// ASSERT — the route still works, it just stops being cheap to poll, and
+	// the degradation is reported rather than silent.
+	require.Equal(t, http.StatusOK, resp.Code)
+	assert.Len(t, resp.Body.Bytes(), len(oversized), "the whole body must still reach the client")
+	assert.Empty(t, resp.Header().Get("ETag"), "an untagged response must not claim a tag")
+
+	rec.AssertEmitted(t, catalog.API012)
+	rec.AssertData(t, catalog.API012, "limitBytes", int64(MaxTaggedBytes))
+	rec.AssertMatchesCatalog(t)
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestConditional_ShouldStreamThroughInChunksWithoutLosingBytes(t *testing.T) {
+	// ARRANGE — writes that straddle the limit, so the flush-and-switch path
+	// runs mid-body rather than on a single oversized write.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	chunk := bytes.Repeat([]byte("y"), MaxTaggedBytes/3)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		for range 4 {
+			_, _ = w.Write(chunk)
+		}
+	})
+
+	// ACT
+	resp := call(t, handler, http.MethodGet, "")
+
+	// ASSERT — the buffered prefix and the streamed remainder must join up
+	// exactly; dropping or duplicating the flushed bytes would corrupt the body.
+	assert.Len(t, resp.Body.Bytes(), len(chunk)*4)
+	assert.Equal(t, bytes.Repeat([]byte("y"), len(chunk)*4), resp.Body.Bytes())
+}
+
+func TestConditional_ShouldSkipWorkWhenClientHasGoneAway(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the client disconnects while the handler is working. Handler
+	// writes land in the buffer and always succeed, so the context is the only
+	// signal that anything changed.
+	ctx, cancel := context.WithCancel(t.Context())
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		cancel()
+
+		_, _ = w.Write([]byte(representation))
+	})
+
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/v1/leases", nil)
+	resp := httptest.NewRecorder()
+
+	// ACT
+	Conditional(handler).ServeHTTP(resp, req)
+
+	// ASSERT — nothing is hashed or written for a response nobody will read.
+	assert.Empty(t, resp.Body.String())
+	assert.Empty(t, resp.Header().Get("ETag"))
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestConditional_ShouldReportItsStatusToTheMiddlewareChain(t *testing.T) {
+	// ARRANGE — the arrangement production uses: Conditional wraps a handler
+	// mounted under the server chain, four writer wrappers deep.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /api/v1/leases", Conditional(jsonHandler(representation)))
+
+	chained := middleware.Chain(mux,
+		middleware.Recovery, middleware.RequestID, middleware.Logging(nil), middleware.ProblemErrors,
+	)
+
+	ts := httptest.NewServer(chained)
+	t.Cleanup(ts.Close)
+
+	first, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+"/api/v1/leases", nil)
+	require.NoError(t, err)
+
+	firstResp, err := ts.Client().Do(first)
+	require.NoError(t, err)
+	require.NoError(t, firstResp.Body.Close())
+
+	tag := firstResp.Header.Get("ETag")
+	require.NotEmpty(t, tag)
+
+	// ACT — poll again with the tag.
+	second, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+"/api/v1/leases", nil)
+	require.NoError(t, err)
+	second.Header.Set("If-None-Match", tag)
+
+	secondResp, err := ts.Client().Do(second)
+	require.NoError(t, err)
+	require.NoError(t, secondResp.Body.Close())
+
+	// ASSERT — the audit line for a conditional poll must record 304, not the
+	// 200 the inner handler produced. Every poll weave makes goes through here.
+	require.Equal(t, http.StatusNotModified, secondResp.StatusCode)
+
+	audits := rec.FindByID(catalog.API010)
+	require.Len(t, audits, 2)
+	assert.Equal(t, int64(http.StatusOK), audits[0].Data("status"))
+	assert.Equal(t, int64(http.StatusNotModified), audits[1].Data("status"))
+	assert.Equal(t, int64(0), audits[1].Data("bytesWritten"), "a 304 sends no body")
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestConditional_ShouldLetProblemErrorsHandleARouterMiss(t *testing.T) {
+	// ARRANGE — a wrapped route plus a request that matches no route, so the
+	// mux's own 404 has to survive passing outward through Conditional's
+	// sibling wrappers.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	mux := http.NewServeMux()
+	mux.Handle("GET /api/v1/leases", Conditional(jsonHandler(representation)))
+
+	chained := middleware.Chain(mux,
+		middleware.Recovery, middleware.RequestID, middleware.Logging(nil), middleware.ProblemErrors,
+	)
+
+	ts := httptest.NewServer(chained)
+	t.Cleanup(ts.Close)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, ts.URL+"/api/v1/nope", nil)
+	require.NoError(t, err)
+
+	// ACT
+	resp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	// ASSERT — still problem+json, and untagged.
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, apierror.ContentType, resp.Header.Get("Content-Type"))
+	assert.Empty(t, resp.Header.Get("ETag"))
+	rec.AssertEmitted(t, catalog.API900)
 }
 
 func TestConditional_ShouldTagAnEmptyBody(t *testing.T) {

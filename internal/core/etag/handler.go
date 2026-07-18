@@ -3,7 +3,16 @@ package etag
 import (
 	"bytes"
 	"net/http"
+
+	"github.com/radiantgarden/weave-adapters/internal/core/events"
+	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 )
+
+// MaxTaggedBytes bounds how much of a response the wrapper will hold in memory
+// to hash it. A response that grows past this is streamed through untagged
+// rather than buffered without limit — an unpaginated collection would
+// otherwise be held whole, once per in-flight request.
+const MaxTaggedBytes = 4 << 20 // 4 MiB
 
 // Conditional wraps a read handler with conditional-request support: it tags
 // the response with a strong ETag and answers 304 Not Modified when the
@@ -18,6 +27,14 @@ import (
 // Only GET and HEAD are handled. On other methods If-None-Match means something
 // different (optimistic concurrency, M3's write side), and answering 304 there
 // would be wrong.
+//
+// Two consequences of buffering are worth knowing before wrapping a handler:
+//
+//   - A response over MaxTaggedBytes is sent untagged and emits API-012. The
+//     route still works; it just stops being cheap to poll.
+//   - Handler writes land in a buffer and always succeed, so a handler cannot
+//     learn from a failed Write that the client has gone away. Use the request
+//     context for cancellation, which is unaffected.
 func Conditional(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -28,6 +45,27 @@ func Conditional(next http.Handler) http.Handler {
 
 		captured := &captureWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(captured, r)
+
+		// Too large to tag: the response has already been streamed through, so
+		// there is nothing left to write — only to report.
+		if captured.overflowed {
+			ctx := events.EnsureCaller(r.Context(), events.Caller{
+				RemoteAddr: r.RemoteAddr,
+				Method:     r.Method,
+				Path:       r.URL.Path,
+			})
+
+			events.Emit(ctx, catalog.API012, "path", r.URL.Path, "limitBytes", MaxTaggedBytes)
+
+			return
+		}
+
+		// The client gave up while the handler was working. Hashing and writing
+		// a response nobody will read is pure waste, and the write would fail
+		// anyway.
+		if r.Context().Err() != nil {
+			return
+		}
 
 		body := captured.body.Bytes()
 
@@ -64,12 +102,20 @@ func Conditional(next http.Handler) http.Handler {
 // sent. Header mutations pass straight through to the real writer, so anything
 // the handler set — Cache-Control, Content-Type — is already in place when the
 // status is finally written.
+//
+// It deliberately does not share the recorder used by the middleware wrappers:
+// those forward every write onward, and this one withholds writes until the
+// body is complete. That inversion is the whole point of the type, so composing
+// it from a forwarding recorder would obscure rather than share.
 type captureWriter struct {
 	http.ResponseWriter
 
 	status int
 	body   bytes.Buffer
 	wrote  bool
+	// overflowed records that the body outgrew MaxTaggedBytes, at which point
+	// the buffered bytes were flushed and the response became a pass-through.
+	overflowed bool
 }
 
 func (w *captureWriter) WriteHeader(code int) {
@@ -84,7 +130,29 @@ func (w *captureWriter) WriteHeader(code int) {
 func (w *captureWriter) Write(b []byte) (int, error) {
 	w.wrote = true
 
-	return w.body.Write(b)
+	if w.overflowed {
+		return w.ResponseWriter.Write(b)
+	}
+
+	if w.body.Len()+len(b) <= MaxTaggedBytes {
+		return w.body.Write(b)
+	}
+
+	// Past the limit: commit the status, flush what was buffered, and let this
+	// and every later write go straight through. The response loses its ETag
+	// but is otherwise served normally — degrading to "not cacheable" beats
+	// holding an unbounded body in memory.
+	w.overflowed = true
+
+	w.ResponseWriter.WriteHeader(w.status)
+
+	if _, err := w.ResponseWriter.Write(w.body.Bytes()); err != nil {
+		return 0, err
+	}
+
+	w.body.Reset()
+
+	return w.ResponseWriter.Write(b)
 }
 
 // Unwrap exposes the underlying writer to http.ResponseController. Note that a

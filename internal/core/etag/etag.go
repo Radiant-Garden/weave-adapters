@@ -64,7 +64,7 @@ func Matches(ifNoneMatch, etag string) bool {
 		return false
 	}
 
-	for candidate := range strings.SplitSeq(ifNoneMatch, ",") {
+	for _, candidate := range splitTags(ifNoneMatch) {
 		if opaqueTag(candidate) == want {
 			return true
 		}
@@ -73,13 +73,50 @@ func Matches(ifNoneMatch, etag string) bool {
 	return false
 }
 
+// splitTags splits an If-None-Match list on the commas that separate tags,
+// ignoring commas inside a quoted tag.
+//
+// RFC 9110's etagc is %x21 / %x23-7E, which includes the comma, so an
+// entity-tag may legitimately contain one. A plain strings.Split would shred
+// such a tag into two invalid fragments. Our own tags are hex and can never
+// contain a comma, but the write side (If-Match) compares tags minted
+// elsewhere, and this parser is what it will reach for.
+func splitTags(header string) []string {
+	var (
+		tags     []string
+		start    int
+		inQuotes bool
+	)
+
+	for i := range len(header) {
+		switch header[i] {
+		case '"':
+			inQuotes = !inQuotes
+		case ',':
+			if !inQuotes {
+				tags = append(tags, header[start:i])
+				start = i + 1
+			}
+		}
+	}
+
+	return append(tags, header[start:])
+}
+
 // opaqueTag strips surrounding whitespace and any weak marker, returning the
 // quoted opaque tag used for weak comparison. It returns "" for a value that is
 // not a syntactically valid entity-tag, so garbage never compares equal to
 // garbage.
 func opaqueTag(value string) string {
 	value = strings.TrimSpace(value)
-	value = strings.TrimPrefix(value, weakPrefix)
+
+	// The weak marker is defined case-sensitively (%s"W/"), but a client that
+	// sends "w/" is asking a question we can answer, and accepting it cannot
+	// produce a false match — the opaque tag still has to be equal. Rejecting
+	// it would silently cost that client every 304 it should have received.
+	if len(value) >= len(weakPrefix) && strings.EqualFold(value[:len(weakPrefix)], weakPrefix) {
+		value = value[len(weakPrefix):]
+	}
 
 	if len(value) < 2 || !strings.HasPrefix(value, `"`) || !strings.HasSuffix(value, `"`) {
 		return ""
