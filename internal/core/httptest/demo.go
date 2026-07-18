@@ -15,10 +15,10 @@
 package httptest
 
 import (
+	"cmp"
 	"encoding/json"
 	"net/http"
 	"slices"
-	"sort"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 	"github.com/radiantgarden/weave-adapters/internal/core/etag"
@@ -85,7 +85,7 @@ func NewResource(items ...Item) *Resource {
 	}
 
 	sorted := slices.Clone(items)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	slices.SortFunc(sorted, func(a, b Item) int { return cmp.Compare(a.ID, b.ID) })
 
 	return &Resource{
 		items: sorted,
@@ -125,7 +125,16 @@ func (r *Resource) list(w http.ResponseWriter, req *http.Request) {
 	// ordered after it starts the page.
 	start := 0
 	if params.After != "" {
-		start = sort.Search(len(r.items), func(i int) bool { return r.items[i].ID > params.After })
+		// BinarySearchFunc lands on the first item ordered at or after the
+		// cursor key; when the key itself is still present, step over it.
+		found := false
+
+		start, found = slices.BinarySearchFunc(r.items, params.After, func(it Item, after string) int {
+			return cmp.Compare(it.ID, after)
+		})
+		if found {
+			start++
+		}
 	}
 
 	end := min(start+params.Size, len(r.items))
