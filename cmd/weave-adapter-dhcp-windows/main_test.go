@@ -15,11 +15,14 @@ Tested elsewhere:
   what wiring adds — that the pieces are connected in the right order and that
   every failure path returns instead of exiting.
 
+  isTokenCommand
+    - TestIsTokenCommand_ShouldRecogniseOnlyTheTokenVerb: server args never route to the CLI.
+
 Declined:
-  main — signal.NotifyContext plus os.Exit cannot be exercised without either
-  signalling or killing the test process. Hoisting the signal context out of run
-  is what makes the rest of the startup path testable, and that split is the only
-  logic main holds.
+  main / runServer — signal.NotifyContext plus os.Exit cannot be exercised
+  without either signalling or killing the test process. The CLI-vs-server
+  split main performs is covered by isTokenCommand, and everything downstream is
+  covered by run and runToken.
 
 Additional Remarks:
   These tests call observability.Setup, which replaces the process-global default
@@ -83,6 +86,30 @@ func waitForListening(t *testing.T, rec *eventstest.Recorder) {
 	}
 
 	t.Fatal("server did not report listening within 5s")
+}
+
+func TestIsTokenCommand_ShouldRecogniseOnlyTheTokenVerb(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "should route token management to the CLI", args: []string{"token", "list"}, want: true},
+		{name: "should run the server when no args are given", args: nil, want: false},
+		{name: "should run the server for flags", args: []string{"--port", "8444"}, want: false},
+		{name: "should not match a flag that merely contains the verb", args: []string{"--token-file", "x"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT / ASSERT
+			assert.Equal(t, tt.want, isTokenCommand(tt.args))
+		})
+	}
 }
 
 //nolint:paralleltest // observability.Setup replaces the global slog logger

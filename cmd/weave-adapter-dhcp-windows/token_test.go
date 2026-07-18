@@ -1,0 +1,358 @@
+/*
+Testing: token.go
+
+Pending:
+
+Tested:
+  runToken
+    - TestRunToken_ShouldReportUsageWhenCommandMissingOrUnknown: no silent no-op.
+  runTokenGen
+    - TestRunTokenGen_ShouldMintStoreAndPrintTokenOnce: the token is shown but only its hash is stored.
+    - TestRunTokenGen_ShouldSetExpiryWhenRequested: --expires-in-days lands on the entry.
+    - TestRunTokenGen_ShouldRejectInvalidInput: missing label, negative days, duplicate label.
+    - TestRunTokenGen_ShouldNotWriteFileWhenLabelDuplicate: a rejected add leaves the store untouched.
+  runTokenList
+    - TestRunTokenList_ShouldReportEmptyStore: a fresh install is not an error.
+    - TestRunTokenList_ShouldRenderExpiryStatus: never / expiring / expired columns.
+    - TestRunTokenList_ShouldNeverPrintHashesOrTokens: list output carries no secret material.
+  runTokenRevoke
+    - TestRunTokenRevoke_ShouldRemoveNamedToken: removes one, keeps the rest.
+    - TestRunTokenRevoke_ShouldReturnErrorWhenLabelUnknown: a typo fails loudly.
+  loadOrEmpty
+    - TestLoadOrEmpty_ShouldTreatMissingFileAsEmpty: covered via list/gen on a fresh path.
+    - TestLoadOrEmpty_ShouldPropagateMalformedFile: a corrupt store is never overwritten.
+
+Tested elsewhere:
+  Token generation, hashing and persistence are covered in internal/core/auth;
+  these tests cover only the CLI behavior layered on top.
+
+Declined:
+  printGenerated / describeExpiry / formatDays — pure formatters, asserted
+  through their commands' output rather than called directly.
+
+Additional Remarks:
+  Every test uses t.TempDir() and an explicit clock, so no test touches the
+  developer's real tokens.toml and expiry rendering is deterministic.
+
+  The "restart required" notice is asserted because restart-only rotation is a
+  locked decision: an operator who is not told will read the CLI as broken.
+*/
+
+package main
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/radiantgarden/weave-adapters/internal/core/auth"
+)
+
+// cliClock is the fixed time CLI tests run at.
+var cliClock = time.Date(2026, time.July, 18, 12, 0, 0, 0, time.UTC)
+
+// fixedNow returns a clock function pinned to cliClock.
+func fixedNow() func() time.Time {
+	return func() time.Time { return cliClock }
+}
+
+// tokenFile returns a path inside a fresh temp dir.
+func tokenFile(t *testing.T) string {
+	t.Helper()
+
+	return filepath.Join(t.TempDir(), "tokens.toml")
+}
+
+// runTokenCLI runs a token command and returns its output.
+func runTokenCLI(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+
+	var out bytes.Buffer
+
+	err := runToken(args, &out, fixedNow())
+
+	return out.String(), err
+}
+
+func TestRunToken_ShouldReportUsageWhenCommandMissingOrUnknown(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "should report usage when no command is given", args: nil},
+		{name: "should report usage when the command is unknown", args: []string{"delete"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT
+			out, err := runTokenCLI(t, tt.args...)
+
+			// ASSERT — the error is short; the usage goes to stdout.
+			require.Error(t, err)
+			assert.Contains(t, out, "gen")
+			assert.Contains(t, out, "revoke")
+		})
+	}
+}
+
+func TestRunTokenGen_ShouldMintStoreAndPrintTokenOnce(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	path := tokenFile(t)
+
+	// ACT
+	out, err := runTokenCLI(t, "gen", "--label", "weave-prod", "--file", path)
+	require.NoError(t, err)
+
+	// ASSERT — the token is printed with the scheme weave must send...
+	token := extractToken(t, out)
+	assert.Contains(t, out, "Bearer "+token)
+	assert.Contains(t, out, restartNotice)
+
+	// ...and only its hash reaches disk.
+	raw, err := os.ReadFile(path) //nolint:gosec // test-controlled path
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), token)
+
+	store, err := auth.Load(path)
+	require.NoError(t, err)
+	require.Len(t, store.Tokens, 1)
+	assert.Equal(t, "weave-prod", store.Tokens[0].Label)
+	assert.Equal(t, auth.Hash(token), store.Tokens[0].Hash)
+	assert.Nil(t, store.Tokens[0].ExpiresAt)
+}
+
+func TestRunTokenGen_ShouldSetExpiryWhenRequested(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	path := tokenFile(t)
+
+	// ACT
+	out, err := runTokenCLI(t, "gen", "--label", "weave-prod", "--file", path, "--expires-in-days", "90")
+	require.NoError(t, err)
+
+	// ASSERT
+	store, err := auth.Load(path)
+	require.NoError(t, err)
+	require.Len(t, store.Tokens, 1)
+	require.NotNil(t, store.Tokens[0].ExpiresAt)
+
+	want := cliClock.AddDate(0, 0, 90)
+	assert.True(t, want.Equal(store.Tokens[0].ExpiresAt.Time()),
+		"expected expiry %s, got %s", want, store.Tokens[0].ExpiresAt.Time())
+	assert.Contains(t, out, "Expires")
+}
+
+func TestRunTokenGen_ShouldRejectInvalidInput(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr string
+	}{
+		{
+			name:    "should reject when label is missing",
+			args:    []string{"gen"},
+			wantErr: "--label is required",
+		},
+		{
+			name:    "should reject when expiry is negative",
+			args:    []string{"gen", "--label", "weave-prod", "--expires-in-days", "-1"},
+			wantErr: "must not be negative",
+		},
+		{
+			name:    "should reject when the label is malformed",
+			args:    []string{"gen", "--label", "weave prod"},
+			wantErr: "label must be",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ARRANGE
+			args := append(tt.args, "--file", tokenFile(t)) //nolint:gocritic // per-case copy is intended
+
+			// ACT
+			_, err := runTokenCLI(t, args...)
+
+			// ASSERT
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestRunTokenGen_ShouldNotWriteFileWhenLabelDuplicate(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — one token already exists.
+	path := tokenFile(t)
+	_, err := runTokenCLI(t, "gen", "--label", "weave-prod", "--file", path)
+	require.NoError(t, err)
+
+	before, err := os.ReadFile(path) //nolint:gosec // test-controlled path
+	require.NoError(t, err)
+
+	// ACT
+	_, err = runTokenCLI(t, "gen", "--label", "weave-prod", "--file", path)
+
+	// ASSERT — the live token must survive an accidental re-mint untouched.
+	require.ErrorIs(t, err, auth.ErrDuplicateLabel)
+
+	after, err := os.ReadFile(path) //nolint:gosec // test-controlled path
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after))
+}
+
+func TestRunTokenList_ShouldReportEmptyStore(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE / ACT — a fresh install has no token file at all.
+	out, err := runTokenCLI(t, "list", "--file", tokenFile(t))
+
+	// ASSERT
+	require.NoError(t, err)
+	assert.Contains(t, out, "No tokens configured")
+}
+
+func TestRunTokenList_ShouldRenderExpiryStatus(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — one never-expiring, one future, one already past.
+	path := tokenFile(t)
+	store := &auth.Store{Tokens: []auth.Entry{
+		{Label: "forever", Hash: auth.Hash("a"), CreatedAt: cliClock},
+		{Label: "soon", Hash: auth.Hash("b"), CreatedAt: cliClock, ExpiresAt: auth.NewExpiry(cliClock.AddDate(0, 0, 3))},
+		{Label: "stale", Hash: auth.Hash("c"), CreatedAt: cliClock, ExpiresAt: auth.NewExpiry(cliClock.AddDate(0, 0, -2))},
+	}}
+	require.NoError(t, store.Save(path))
+
+	// ACT
+	out, err := runTokenCLI(t, "list", "--file", path)
+	require.NoError(t, err)
+
+	// ASSERT — an approaching expiry must be visible before requests fail.
+	assert.Contains(t, out, "never")
+	assert.Contains(t, out, "expires in 3 days")
+	assert.Contains(t, out, "EXPIRED 2 days ago")
+}
+
+func TestRunTokenList_ShouldNeverPrintHashesOrTokens(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	path := tokenFile(t)
+	genOut, err := runTokenCLI(t, "gen", "--label", "weave-prod", "--file", path)
+	require.NoError(t, err)
+
+	token := extractToken(t, genOut)
+
+	// ACT
+	out, err := runTokenCLI(t, "list", "--file", path)
+	require.NoError(t, err)
+
+	// ASSERT — listing is safe to paste into a ticket.
+	assert.NotContains(t, out, token)
+	assert.NotContains(t, out, auth.Hash(token))
+	assert.Contains(t, out, "weave-prod")
+}
+
+func TestRunTokenRevoke_ShouldRemoveNamedToken(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	path := tokenFile(t)
+	for _, label := range []string{"keep", "drop"} {
+		_, err := runTokenCLI(t, "gen", "--label", label, "--file", path)
+		require.NoError(t, err)
+	}
+
+	// ACT
+	out, err := runTokenCLI(t, "revoke", "--label", "drop", "--file", path)
+	require.NoError(t, err)
+
+	// ASSERT
+	assert.Contains(t, out, restartNotice)
+
+	store, err := auth.Load(path)
+	require.NoError(t, err)
+	require.Len(t, store.Tokens, 1)
+	assert.Equal(t, "keep", store.Tokens[0].Label)
+}
+
+func TestRunTokenRevoke_ShouldReturnErrorWhenLabelUnknown(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	path := tokenFile(t)
+	_, err := runTokenCLI(t, "gen", "--label", "weave-prod", "--file", path)
+	require.NoError(t, err)
+
+	// ACT — a typo must not report success while the real token stays live.
+	_, err = runTokenCLI(t, "revoke", "--label", "weave-prd", "--file", path)
+
+	// ASSERT
+	require.ErrorIs(t, err, auth.ErrUnknownLabel)
+
+	store, err := auth.Load(path)
+	require.NoError(t, err)
+	assert.Len(t, store.Tokens, 1)
+}
+
+func TestLoadOrEmpty_ShouldTreatMissingFileAsEmpty(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE / ACT
+	store, err := loadOrEmpty(tokenFile(t))
+
+	// ASSERT
+	require.NoError(t, err)
+	assert.Empty(t, store.Tokens)
+}
+
+func TestLoadOrEmpty_ShouldPropagateMalformedFile(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a corrupt store must never be treated as empty, or the next
+	// gen would overwrite every configured token.
+	path := tokenFile(t)
+	require.NoError(t, os.WriteFile(path, []byte("not = = toml"), 0o600))
+
+	// ACT
+	_, err := loadOrEmpty(path)
+
+	// ASSERT
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parsing token file")
+}
+
+// extractToken pulls the generated token out of gen's output.
+func extractToken(t *testing.T, out string) string {
+	t.Helper()
+
+	for line := range strings.Lines(out) {
+		if field := strings.TrimSpace(line); strings.HasPrefix(field, auth.TokenPrefix) {
+			return field
+		}
+	}
+
+	t.Fatalf("no token found in output:\n%s", out)
+
+	return ""
+}

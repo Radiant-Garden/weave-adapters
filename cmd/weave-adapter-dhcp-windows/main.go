@@ -26,17 +26,48 @@ import (
 // version is the adapter version, overridable via -ldflags at build time.
 var version = "0.0.0-dev"
 
-// main owns the two things run must not: signal wiring and the process exit
-// code. It is the only place that calls os.Exit, so every startup path stays
-// testable through run.
+// main owns the three things run must not: signal wiring, the CLI-vs-server
+// split, and the process exit code. It is the only place that calls os.Exit, so
+// every startup path stays testable through run.
 func main() {
+	args := os.Args[1:]
+
+	var err error
+
+	if isTokenCommand(args) {
+		err = runToken(args[1:], os.Stdout, time.Now)
+		if err != nil {
+			// A CLI mistake (bad flag, duplicate label) is not a startup
+			// failure: it gets a plain message on stderr, never a SYS-005
+			// event. Emitting one would hand an operator who typo'd a flag a
+			// structured log line claiming the adapter failed to start.
+			fmt.Fprintln(os.Stderr, "error:", err)
+		}
+	} else {
+		err = runServer(args)
+	}
+
+	if err != nil {
+		os.Exit(1)
+	}
+}
+
+// isTokenCommand reports whether args invoke token management rather than a
+// server run.
+func isTokenCommand(args []string) bool {
+	return len(args) > 0 && args[0] == "token"
+}
+
+// runServer runs the adapter until a signal arrives, reporting a startup
+// failure as SYS-005.
+func runServer(args []string) error {
 	// On Windows Server 2022 a console exe receives os.Interrupt (Ctrl+C,
 	// CTRL_CLOSE); SIGTERM is a no-op there but keeps Unix dev parity.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
-	err := run(ctx, os.Args[1:])
+	err := run(ctx, args)
 
-	// Not deferred: os.Exit below would skip it.
+	// Not deferred: main's os.Exit would skip it.
 	stop()
 
 	if err != nil {
@@ -44,8 +75,9 @@ func main() {
 		// observability.Setup may not have run yet; the events system writes to
 		// slog.Default either way.
 		events.Emit(context.Background(), catalog.SYS005, "error", err.Error())
-		os.Exit(1)
 	}
+
+	return err
 }
 
 // run wires the adapter together and serves until ctx is cancelled. It returns
