@@ -9,8 +9,8 @@
 
     1. mints a bearer token through the token CLI
     2. starts the adapter on an unprivileged port
-    3. asserts an unauthenticated request is rejected (401)
-    4. asserts an authenticated request returns 200 and a healthy payload
+    3. asserts health answers 200 with no credentials, as weave polls it
+    4. asserts a non-exempt route is 401 anonymous and 404 with the token
     5. asks the process to shut down and confirms it exits cleanly
 
   Step 5 sends a real console Ctrl+C, because "a console exe receives
@@ -160,20 +160,16 @@ try {
         throw "adapter did not accept connections on $Port within 15s"
     }
 
-    # --- 3. auth is enforced --------------------------------------------------
-    Write-Step "asserting an unauthenticated request is rejected"
-    $anon = Invoke-Endpoint -Uri $health -TimeoutSec 5
-    if ($anon.StatusCode -ne 401) {
-        throw "expected 401 without a token, got $($anon.StatusCode): $($anon.Content)"
-    }
-
-    # --- 4. the health endpoint answers --------------------------------------
-    Write-Step "asserting an authenticated request returns a healthy payload"
-    $resp = Invoke-Endpoint -Uri $health -TimeoutSec 5 `
-        -Headers @{ Authorization = "Bearer $token" }
+    # --- 3. health answers without credentials --------------------------------
+    # Open by contract: weave polls health to decide whether the adapter is
+    # reachable at all, so an auth failure there would read as an outage. See
+    # httpserver.Unauthenticated. This is also the M1 sign-off criterion
+    # verbatim -- curl /api/v1/health on a real WS2022 host.
+    Write-Step "asserting health answers without credentials"
+    $resp = Invoke-Endpoint -Uri $health -TimeoutSec 5
 
     if ($resp.StatusCode -ne 200) {
-        throw "expected 200 from $health, got $($resp.StatusCode): $($resp.Content)"
+        throw "expected 200 from $health without a token, got $($resp.StatusCode): $($resp.Content)"
     }
 
     $body = $resp.Content | ConvertFrom-Json
@@ -189,6 +185,31 @@ try {
     }
 
     Write-Host "    status=$($body.status) version=$($body.version) uptime=$($body.uptimeSeconds)s"
+
+    # --- 4. everything else authenticates -------------------------------------
+    # Health being open says nothing about whether auth is wired at all, so this
+    # drives a route that is not exempt. An unmatched path is the honest choice:
+    # httpserver.Unauthenticated documents that paths matching no route still
+    # authenticate, so an anonymous caller cannot enumerate what exists.
+    #
+    # The pair matters more than either half. 401 anonymous proves the
+    # middleware is engaged; 404 with the token proves the token actually
+    # authenticated and reached the router, rather than the 401 having come
+    # from something unrelated.
+    $guarded = "http://127.0.0.1:$Port/api/v1/does-not-exist"
+
+    Write-Step "asserting a non-exempt route rejects an anonymous caller"
+    $anon = Invoke-Endpoint -Uri $guarded -TimeoutSec 5
+    if ($anon.StatusCode -ne 401) {
+        throw "expected 401 from $guarded without a token, got $($anon.StatusCode): $($anon.Content)"
+    }
+
+    Write-Step "asserting the minted token authenticates"
+    $authed = Invoke-Endpoint -Uri $guarded -TimeoutSec 5 `
+        -Headers @{ Authorization = "Bearer $token" }
+    if ($authed.StatusCode -ne 404) {
+        throw "expected 404 from $guarded with a valid token (past auth, no such route), got $($authed.StatusCode): $($authed.Content)"
+    }
 
     # --- 5. graceful shutdown -------------------------------------------------
     # Attach to the child's console and raise Ctrl+C there. SetConsoleCtrlHandler
