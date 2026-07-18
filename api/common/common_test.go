@@ -271,6 +271,18 @@ func TestPageEnvelope_ShouldMatchTheHandWrittenStruct(t *testing.T) {
 		assert.True(t, side.fields["nextPageToken"].OmitEmpty, "%s: absent on the last page", side.name)
 		assert.True(t, side.fields["nextPageUrl"].OmitEmpty, "%s: absent on the last page", side.name)
 	}
+
+	// Types too, for the cursor fields. Names and optionality alone would let
+	// pagination.yaml retype nextPageToken to integer, regenerate it as an int,
+	// and still pass — while every generated client started rejecting the
+	// strings this adapter actually sends.
+	//
+	// items is excluded deliberately: it is []T on the hand-written side and
+	// []interface{} on the generated one by construction, which is the one
+	// difference the envelope's genericity requires.
+	for _, name := range []string{"nextPageToken", "nextPageUrl"} {
+		assert.Equal(t, handWritten[name].Kind, generated[name].Kind, "%s type", name)
+	}
 }
 
 func fieldNames(fields map[string]jsonField) []string {
@@ -289,28 +301,42 @@ func TestPageParameters_ShouldMatchTheHandWrittenNames(t *testing.T) {
 	raw, err := os.ReadFile("pagination.yaml")
 	require.NoError(t, err)
 
+	type declaredParameter struct {
+		Name   string `yaml:"name"`
+		In     string `yaml:"in"`
+		Schema struct {
+			Type    string `yaml:"type"`
+			Minimum int    `yaml:"minimum"`
+		} `yaml:"schema"`
+	}
+
 	var doc struct {
 		Components struct {
-			Parameters map[string]struct {
-				Name string `yaml:"name"`
-				In   string `yaml:"in"`
-			} `yaml:"parameters"`
+			Parameters map[string]declaredParameter `yaml:"parameters"`
 		} `yaml:"components"`
 	}
 
 	require.NoError(t, yaml.Unmarshal(raw, &doc))
 
 	// ACT
-	declared := make(map[string]string, len(doc.Components.Parameters))
+	declared := make(map[string]declaredParameter, len(doc.Components.Parameters))
 	for _, parameter := range doc.Components.Parameters {
-		declared[parameter.Name] = parameter.In
+		declared[parameter.Name] = parameter
 	}
 
 	// ASSERT — a spec that documents a parameter the handler does not read is
 	// worse than no spec: a client would send it and be silently ignored.
-	assert.Equal(t, "query", declared[pagination.ParamPageSize])
-	assert.Equal(t, "query", declared[pagination.ParamPageToken])
+	assert.Equal(t, "query", declared[pagination.ParamPageSize].In)
+	assert.Equal(t, "query", declared[pagination.ParamPageToken].In)
 	assert.Len(t, declared, 2, "every published parameter should have a constant handlers read")
+
+	// The schemas matter as much as the names. pageSize retyped to string would
+	// generate clients that send "50" to a handler that answers 400 to anything
+	// strconv.Atoi refuses, and the name-only assertions above would not notice.
+	assert.Equal(t, "integer", declared[pagination.ParamPageSize].Schema.Type)
+	assert.Equal(t, 1, declared[pagination.ParamPageSize].Schema.Minimum,
+		"parseSize rejects anything below 1 rather than clamping up to it")
+	assert.Equal(t, "string", declared[pagination.ParamPageToken].Schema.Type)
 }
 
 func TestJob_ShouldOmitAbsentOptionalFields(t *testing.T) {
