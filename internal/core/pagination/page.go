@@ -148,10 +148,26 @@ func (p Paginator) parseToken(raw string) (after string, ok bool) {
 // empty token, so a token carrying no key is never minted — which is why
 // decoding one is a rejection rather than a silent restart.
 //
+// It panics on a key above MaxKeyBytes. That is a key this package cannot
+// round-trip: Parse would reject the token it just minted with "must be a
+// nextPageToken returned by this endpoint", and the recovery that message
+// prescribes — start again from page one — re-mints the same unusable token, so
+// the collection becomes unlistable past that boundary with no way out. The two
+// honest alternatives are both worse: minting an empty token renders as a last
+// page and silently truncates the listing, and raising the cap unbounds the work
+// a crafted token can make Parse do. A collection whose keys can exceed
+// MaxKeyBytes needs a different resume key, and this is where that decision
+// surfaces.
+//
 // Most handlers want Next, which mints this token and its link together.
 func (p Paginator) NextToken(key string) string {
 	if key == "" {
 		return ""
+	}
+
+	if len(key) > MaxKeyBytes {
+		panic(fmt.Sprintf("pagination: resume key for scope %q is %d bytes, over the %d-byte maximum; "+
+			"this collection needs a shorter key", p.scope, len(key), MaxKeyBytes))
 	}
 
 	return encodeToken(p.scope, key)

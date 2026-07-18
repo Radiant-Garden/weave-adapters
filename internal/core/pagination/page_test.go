@@ -19,6 +19,8 @@ Tested:
     - TestNextToken_ShouldMintATokenThisPaginatorCanParse: the encode/parse pair closes.
     - TestNextToken_ShouldMintNoTokenForAnEmptyKey: the exhausted-listing case composes into a last-page envelope.
     - TestNextToken_ShouldNotBeParseableByAnotherCollection: scopes do not cross.
+    - TestNextToken_ShouldPanicOnAKeyItCouldNotParseBack: a key over the cap is never minted.
+    - TestNextToken_ShouldMintAKeyExactlyAtTheCap: the cap is inclusive, so the boundary round-trips.
   Next
     - TestNext_ShouldMintBothCursorForms: token and link carry the same cursor.
     - TestNext_ShouldPreserveAnEncodedSlashInThePath: %2F stays encoded, or the link addresses another resource.
@@ -310,6 +312,36 @@ func TestNextToken_ShouldMintNoTokenForAnEmptyKey(t *testing.T) {
 	encoded, err := json.Marshal(page)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"items":[]}`, string(encoded))
+}
+
+func TestNextToken_ShouldPanicOnAKeyItCouldNotParseBack(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a key one byte past what a token may carry.
+	key := strings.Repeat("k", MaxKeyBytes+1)
+
+	// ACT / ASSERT — minting it would hand the client a token this same
+	// Paginator answers 400 to, whose prescribed recovery re-mints the identical
+	// token: the listing could never be read past this boundary.
+	assert.PanicsWithValue(t,
+		`pagination: resume key for scope "leases" is 1025 bytes, over the 1024-byte maximum; `+
+			`this collection needs a shorter key`,
+		func() { _ = leasePages.NextToken(key) },
+	)
+}
+
+func TestNextToken_ShouldMintAKeyExactlyAtTheCap(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the boundary itself must still round-trip; the cap is inclusive.
+	key := strings.Repeat("k", MaxKeyBytes)
+
+	// ACT
+	params, err := leasePages.Parse(url.Values{ParamPageToken: {leasePages.NextToken(key)}})
+
+	// ASSERT
+	require.NoError(t, err)
+	assert.Equal(t, key, params.After)
 }
 
 // listURL is the request URL of a plain first-page listing.

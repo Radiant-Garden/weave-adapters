@@ -218,6 +218,11 @@ func FuzzEncodeToken(f *testing.F) {
 		// An empty key is refused rather than read as "first page", and a key
 		// over the cap is refused outright — refusing beats resuming from a
 		// truncated key that still looks valid.
+		//
+		// encodeToken is deliberately unguarded here: it is the raw codec, and
+		// the cap is enforced one layer up by NextToken, which is the only
+		// minting path a handler can reach. See
+		// TestNextToken_ShouldPanicOnAKeyItCouldNotParseBack.
 		if key == "" || len(key) > MaxKeyBytes {
 			assert.False(t, ok)
 			assert.Empty(t, after)
