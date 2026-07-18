@@ -81,6 +81,12 @@ func Matches(ifNoneMatch, etag string) bool {
 // such a tag into two invalid fragments. Our own tags are hex and can never
 // contain a comma, but the write side (If-Match) compares tags minted
 // elsewhere, and this parser is what it will reach for.
+// A header whose quotes do not balance falls back to a plain comma split. The
+// quote tracking is only trustworthy while the quotes pair up; left alone, one
+// malformed element swallows the commas after it and the whole list collapses
+// into a single unparseable tag, so a client that mangled its first element
+// silently loses every 304 it should have received. The fallback cannot
+// manufacture a match — opaqueTag still has to accept each piece.
 func splitTags(header string) []string {
 	var (
 		tags     []string
@@ -98,6 +104,10 @@ func splitTags(header string) []string {
 				start = i + 1
 			}
 		}
+	}
+
+	if inQuotes {
+		return strings.Split(header, ",")
 	}
 
 	return append(tags, header[start:])
@@ -120,6 +130,19 @@ func opaqueTag(value string) string {
 
 	if len(value) < 2 || !strings.HasPrefix(value, `"`) || !strings.HasSuffix(value, `"`) {
 		return ""
+	}
+
+	// The delimiters alone are not enough: `"a"b"` passes a prefix/suffix check
+	// while being two tags jammed together. Validating the opaque text against
+	// RFC 9110's etagc (%x21 / %x23-7E) rejects that, along with control bytes
+	// and embedded whitespace, in one pass — and it is what makes this function's
+	// "not a syntactically valid entity-tag" contract true rather than aspirational.
+	// It matters on the M3 write side, where If-Match compares tags minted
+	// elsewhere; our own tags are hex and pass trivially.
+	for i := 1; i < len(value)-1; i++ {
+		if c := value[i]; c != 0x21 && (c < 0x23 || c > 0x7E) {
+			return ""
+		}
 	}
 
 	return value

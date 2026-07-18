@@ -10,14 +10,21 @@ Tested:
     - TestCompute_ShouldReturnAQuotedTag: RFC 9110 syntax.
   Matches
     - TestMatches_ShouldEvaluateIfNoneMatch: table over wildcard, lists, weak forms, and junk.
+    - TestMatches_ShouldTreatACommaInsideAQuotedTagAsPartOfIt: the case splitTags exists for.
     - FuzzMatches: attacker-controlled header never panics or hits on a tag it lacks.
 
 Tested elsewhere:
   How a tag reaches the wire and drives a 304 is covered in handler_test.go.
 
 Declined:
-  opaqueTag — unexported parser, exercised through every Matches case including
-  the malformed ones.
+  opaqueTag / splitTags — unexported parsers, exercised through every Matches
+  case including the malformed ones.
+
+Additional Remarks (parsing):
+  FuzzMatches can only catch false positives: it returns early unless Matches
+  reports a hit, so a tag that should match and does not is invisible to it.
+  That is why the comma-inside-a-quoted-tag and unbalanced-quote cases are
+  table-driven rather than left to the fuzzer — both are false negatives.
 
 Additional Remarks:
   Compute's hash is not asserted against a fixed digest. Pinning one would test
@@ -138,6 +145,18 @@ func TestMatches_ShouldEvaluateIfNoneMatch(t *testing.T) {
 			name: "should not match a bare quote", ifNoneMatch: `"`, want: false,
 			whyItMatters: "malformed input must not compare equal to anything",
 		},
+		{
+			name: "should still match past a malformed leading element", ifNoneMatch: `", "abc123"`, want: true,
+			whyItMatters: "one unbalanced quote must not cost the client every 304 in the list",
+		},
+		{
+			name: "should not match a tag with interior quotes", ifNoneMatch: `"abc123"x"`, want: false,
+			whyItMatters: "delimiters alone would accept two tags jammed together as one",
+		},
+		{
+			name: "should not match a tag carrying a control byte", ifNoneMatch: "\"abc\x01123\"", want: false,
+			whyItMatters: "etagc excludes control bytes; accepting them is a parser that lies about validity",
+		},
 	}
 
 	for _, tt := range tests {
@@ -146,6 +165,44 @@ func TestMatches_ShouldEvaluateIfNoneMatch(t *testing.T) {
 
 			// ACT / ASSERT
 			assert.Equal(t, tt.want, Matches(tt.ifNoneMatch, tag), tt.whyItMatters)
+		})
+	}
+}
+
+func TestMatches_ShouldTreatACommaInsideAQuotedTagAsPartOfIt(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the case splitTags exists for. RFC 9110's etagc includes the
+	// comma, so a tag minted elsewhere may legitimately carry one; a plain split
+	// would shred it into two invalid fragments.
+	const commaTag = `"v1,2"`
+
+	tests := []struct {
+		name         string
+		ifNoneMatch  string
+		want         bool
+		whyItMatters string
+	}{
+		{
+			name: "should match a comma-carrying tag alone", ifNoneMatch: `"v1,2"`, want: true,
+			whyItMatters: "the tag is one value, not two",
+		},
+		{
+			name: "should match a comma-carrying tag inside a list", ifNoneMatch: `"other", "v1,2", "more"`, want: true,
+			whyItMatters: "the separator commas and the in-tag comma must be told apart",
+		},
+		{
+			name: "should not match the fragment before the interior comma", ifNoneMatch: `"v1"`, want: false,
+			whyItMatters: "shredding the tag would make a half of it satisfy the condition",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT / ASSERT
+			assert.Equal(t, tt.want, Matches(tt.ifNoneMatch, commaTag), tt.whyItMatters)
 		})
 	}
 }
