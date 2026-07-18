@@ -254,7 +254,7 @@ func TestLoad_ShouldDefaultAuthSettings(t *testing.T) {
 
 	// ASSERT — auth is on by default; the token file is the one the CLI writes.
 	require.NoError(t, err)
-	assert.Equal(t, defaultAuthTokensFile, cfg.AuthTokensFile)
+	assert.Equal(t, DefaultAuthTokensFile, cfg.AuthTokensFile)
 	assert.False(t, cfg.DisableAuth)
 }
 

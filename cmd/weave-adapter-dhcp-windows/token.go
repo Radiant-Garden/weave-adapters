@@ -11,13 +11,13 @@ import (
 	"time"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/auth"
+	"github.com/radiantgarden/weave-adapters/internal/core/config"
 )
 
-// defaultStorePath is the token store the CLI manages. It is deliberately a
-// separate file from config.toml: this one is machine-owned and rewritten
-// wholesale, and go-toml/v2 does not preserve comments on round-trip, so
-// rewriting the hand-edited config would silently eat the operator's comments.
-const defaultStorePath = "tokens.toml"
+// defaultStorePath is the token store the CLI manages. It aliases the config
+// package's constant rather than repeating the literal: the CLI writing where
+// the server does not read is a drift this file cannot detect on its own.
+const defaultStorePath = config.DefaultAuthTokensFile
 
 // restartNotice is printed after every mutation. Token changes are picked up
 // only at startup — the adapter never watches or reloads this file — so an

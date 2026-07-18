@@ -27,13 +27,23 @@ const (
 	envAuthTokensFile = envPrefix + "AUTH_TOKENS_FILE"
 	envDisableAuth    = envPrefix + "DISABLE_AUTH"
 
-	defaultPort           = 8444
-	defaultLogSeverity    = "info"
-	defaultAuthTokensFile = "tokens.toml"
+	defaultPort        = 8444
+	defaultLogSeverity = "info"
 
 	minPort = 1
 	maxPort = 65535
 )
+
+// DefaultAuthTokensFile is the token store both the server and the token CLI
+// default to. Exported and shared, because the two halves drifting apart means
+// the CLI writes tokens where the server never looks -- a failure that surfaces
+// as "no tokens configured" for a file the operator can see is full.
+//
+// It is deliberately a separate file from config.toml: this one is
+// machine-owned and rewritten wholesale, and go-toml/v2 does not preserve
+// comments on round-trip, so rewriting the hand-edited config would silently eat
+// the operator's comments.
+const DefaultAuthTokensFile = "tokens.toml"
 
 // validate is the shared struct validator (safe for concurrent use, caches
 // struct metadata).
@@ -118,7 +128,7 @@ func defaults() map[string]any {
 		"port":           defaultPort,
 		"disableHttps":   true,
 		"logSeverity":    defaultLogSeverity,
-		"authTokensFile": defaultAuthTokensFile,
+		"authTokensFile": DefaultAuthTokensFile,
 		"disableAuth":    false,
 	}
 }
