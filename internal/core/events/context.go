@@ -40,6 +40,13 @@ func WithCaller(ctx context.Context, c Caller) context.Context {
 	return ctx
 }
 
+// CallerFrom reads the caller metadata attached by WithCaller, returning zero
+// values if absent. Middleware uses it to check whether a request already
+// carries caller context.
+func CallerFrom(ctx context.Context) Caller {
+	return callerFrom(ctx)
+}
+
 // callerFrom reads the caller metadata from the context (zero values if absent).
 func callerFrom(ctx context.Context) Caller {
 	str := func(k callerContextKey) string {

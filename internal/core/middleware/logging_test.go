@@ -4,18 +4,19 @@ Testing: logging.go
 Pending:
 
 Tested:
-  Logging (via RequestID → Logging chain)
-    - TestLogging_ShouldEmitRequestCompleted: API-010 with status, bytes, and the
-      caller/request groups; the recorded event conforms to the catalog.
+  Logging (via RequestID → Logging chain, and standalone)
+    - TestLogging_ShouldEmitRequestCompleted: API-010 with status/bytes, caller/request groups, catalog conformance.
+    - TestLogging_ShouldSkipWhenPredicateMatches: skipped requests emit nothing.
+    - TestLogging_ShouldSeedRemoteAddrWithoutRequestID: standalone Logging seeds remoteAddr and does not panic.
 
 Tested elsewhere:
 
 Declined:
 
 Additional Remarks:
-  Installs the global emitter hook via the recorder, so this test runs
-  sequentially. Logging is exercised behind RequestID because API-010 is an
-  ExternalSource event and needs the caller context RequestID installs.
+  Installs the global emitter hook via the recorder, so these tests run
+  sequentially. API-010 is an ExternalSource event, normally emitted behind
+  RequestID; the standalone case verifies the remoteAddr seeding fallback.
 */
 
 package middleware
@@ -40,7 +41,7 @@ func TestLogging_ShouldEmitRequestCompleted(t *testing.T) { //nolint:paralleltes
 		w.WriteHeader(http.StatusCreated)
 		_, _ = w.Write([]byte("hello"))
 	})
-	h := Chain(handler, RequestID, Logging)
+	h := Chain(handler, RequestID, Logging(nil))
 	rw := httptest.NewRecorder()
 
 	// ACT
@@ -56,6 +57,49 @@ func TestLogging_ShouldEmitRequestCompleted(t *testing.T) { //nolint:paralleltes
 	assert.Equal(t, rw.Header().Get("X-Request-Id"), got[0].Request("requestId"))
 	assert.Equal(t, http.MethodGet, got[0].Request("method"))
 
-	// The emitted fields must match the catalog spec (no drift).
 	rec.AssertMatchesCatalog(t)
+}
+
+func TestLogging_ShouldSkipWhenPredicateMatches(t *testing.T) { //nolint:paralleltest // installs the global emitter hook
+	// ARRANGE
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	skip := func(r *http.Request) bool { return r.URL.Path == "/skipme" }
+	h := Chain(handler, RequestID, Logging(skip))
+	rw := httptest.NewRecorder()
+
+	// ACT
+	h.ServeHTTP(rw, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/skipme", nil))
+
+	// ASSERT
+	rec.AssertNotEmitted(t, catalog.API010)
+}
+
+func TestLogging_ShouldSeedRemoteAddrWithoutRequestID(t *testing.T) { //nolint:paralleltest // installs the global emitter hook
+	// ARRANGE — Logging alone, without RequestID populating the context.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	h := Logging(nil)(handler)
+	rw := httptest.NewRecorder()
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/x", nil)
+
+	// ACT
+	require.NotPanics(t, func() {
+		h.ServeHTTP(rw, req)
+	})
+
+	// ASSERT — the ExternalSource guard is satisfied by seeding remoteAddr.
+	rec.AssertEmitted(t, catalog.API010)
+
+	got := rec.FindByID(catalog.API010)
+	require.Len(t, got, 1)
+	assert.Equal(t, req.RemoteAddr, got[0].Caller("remoteAddr"))
 }

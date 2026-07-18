@@ -4,8 +4,8 @@ Testing: context.go
 Pending:
 
 Tested:
-  WithCaller / callerFrom
-    - TestWithCaller_ShouldRoundTrip: values set are read back.
+  WithCaller / CallerFrom / callerFrom
+    - TestWithCaller_ShouldRoundTrip: values set via WithCaller are read back by CallerFrom.
   InternalActorCtx
     - TestInternalActorCtx_ShouldSatisfyExternalSourceContract: emitting an
       ExternalSource event with it does not panic; role is "system".
@@ -38,7 +38,7 @@ func TestWithCaller_ShouldRoundTrip(t *testing.T) {
 	}
 
 	// ACT
-	got := callerFrom(WithCaller(context.Background(), want))
+	got := CallerFrom(WithCaller(context.Background(), want))
 
 	// ASSERT
 	assert.Equal(t, want, got)

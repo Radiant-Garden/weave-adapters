@@ -8,23 +8,39 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 )
 
-// Logging emits the API-010 request-completed event after the handler returns.
-// It runs inside RequestID, so the request context carries the caller/request
-// metadata the ExternalSource event needs. Request/response bodies are never
-// logged.
-func Logging(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+// Logging returns middleware that emits the API-010 request-completed event
+// after each request. Requests for which skip returns true (e.g. high-frequency
+// health polls) are served but not logged. It runs inside RequestID; if the
+// caller context is absent it seeds remoteAddr from the request so the
+// ExternalSource event never panics. Request/response bodies are never logged.
+func Logging(skip func(*http.Request) bool) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 
-		next.ServeHTTP(rec, r)
+			next.ServeHTTP(rec, r)
 
-		events.Emit(r.Context(), catalog.API010,
-			"status", rec.status,
-			"durationMs", time.Since(start).Milliseconds(),
-			"bytesWritten", rec.bytes,
-		)
-	})
+			if skip != nil && skip(r) {
+				return
+			}
+
+			ctx := r.Context()
+			if events.CallerFrom(ctx).RemoteAddr == "" {
+				ctx = events.WithCaller(ctx, events.Caller{
+					RemoteAddr: r.RemoteAddr,
+					Method:     r.Method,
+					Path:       r.URL.Path,
+				})
+			}
+
+			events.Emit(ctx, catalog.API010,
+				"status", rec.status,
+				"durationMs", time.Since(start).Milliseconds(),
+				"bytesWritten", rec.bytes,
+			)
+		})
+	}
 }
 
 // statusRecorder wraps an http.ResponseWriter to capture the status code and
@@ -46,4 +62,11 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	s.bytes += n
 
 	return n, err
+}
+
+// Unwrap exposes the underlying ResponseWriter so http.ResponseController can
+// reach optional capabilities (Flusher, Hijacker) that this wrapper hides —
+// needed by streaming handlers such as a future SSE event stream.
+func (s *statusRecorder) Unwrap() http.ResponseWriter {
+	return s.ResponseWriter
 }

@@ -20,6 +20,8 @@ import (
 const (
 	readHeaderTimeout = 10 * time.Second
 	shutdownGrace     = 15 * time.Second
+
+	healthPath = "/api/v1/health"
 )
 
 // Server wraps net/http.Server with the adapter's standard routes.
@@ -32,12 +34,14 @@ type Server struct {
 // request-ID → logging).
 func New(addr string, healthHandler http.Handler) *Server {
 	mux := http.NewServeMux()
-	mux.Handle("GET /api/v1/health", healthHandler)
+	mux.Handle("GET "+healthPath, healthHandler)
 
 	handler := middleware.Chain(mux,
 		middleware.Recovery,
 		middleware.RequestID,
-		middleware.Logging,
+		// Health is polled frequently; recover and correlate it, but don't emit
+		// an API-010 audit line for every poll.
+		middleware.Logging(skipHealthPolls),
 	)
 
 	return &Server{
@@ -47,6 +51,12 @@ func New(addr string, healthHandler http.Handler) *Server {
 			ReadHeaderTimeout: readHeaderTimeout,
 		},
 	}
+}
+
+// skipHealthPolls reports whether request logging should skip r (the health
+// endpoint).
+func skipHealthPolls(r *http.Request) bool {
+	return r.URL.Path == healthPath
 }
 
 // Run starts the server and blocks until ctx is cancelled, then drains
