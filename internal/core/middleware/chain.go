@@ -1,7 +1,9 @@
 // Package middleware provides the adapter's standard HTTP middleware chain:
-// recovery, request-ID, and request logging, applied outermost-first as
-// recovery → request-ID → logging. Auth and body limits arrive in M2; the
-// metrics middleware is deferred with the rest of Prometheus.
+// recovery, request-ID, request logging, and problem-errors, applied
+// outermost-first as recovery → request-ID → logging → problem-errors. Auth is
+// applied by httpserver from internal/core/auth, outside this package. Body
+// limits arrive with the first request-body handler; the metrics middleware is
+// deferred with the rest of Prometheus.
 package middleware
 
 import "net/http"
