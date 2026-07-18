@@ -10,10 +10,12 @@ Tested:
     - TestWriteError_ShouldRedactUnmappedErrors: an internal message never reaches the client.
     - TestWriteError_ShouldResolveWrappedAPIErrors: fmt.Errorf("%w") keeps the taxonomy entry.
     - TestWriteError_ShouldIncludeRequestIDFromContext: responses correlate with logs.
-    - TestWriteError_ShouldRenderValidationFieldErrors: errors[] reaches the body.
-    - TestWriteError_ShouldRenderBackendError: the sanitized backend message is surfaced.
+    - TestWriteError_ShouldRenderFieldErrors: errors[] reaches the body.
+    - TestWriteError_ShouldRenderBackendError: the sanitized backend message is surfaced, the cause is not.
+    - TestWriteError_ShouldNotPanicWithoutCallerContext: a request outside the middleware chain still gets its status.
   WriteProblem
     - TestWriteProblem_ShouldWriteWithoutEmitting: the recovery path stays single-lined.
+    - TestWriteProblem_ShouldDefaultMissingStatus: an unset status answers 500 instead of panicking.
   render
     - TestRender_ShouldSubstitutePlaceholders: {{key}} substitution.
     - TestRender_ShouldLeaveUnresolvedPlaceholdersVisible: a missing field is loud, not blank.
@@ -24,8 +26,8 @@ Tested elsewhere:
   Code-to-status mapping is covered in taxonomy_test.go.
 
 Declined:
-  asError / problem / valueToString — unexported helpers, asserted through
-  WriteError's observable output rather than called directly.
+  asError / problem — unexported helpers, asserted through WriteError's
+  observable output rather than called directly.
 
 Additional Remarks:
   Tests that install the event recorder mutate the process-global emitter hook
@@ -112,11 +114,11 @@ func TestWriteError_ShouldEmitExactlyOneEvent(t *testing.T) {
 	t.Cleanup(rec.Install())
 
 	// ACT
-	WriteError(httptest.NewRecorder(), newRequest(t, "/api/v1/leases"), BackendTimeout("dhcp"))
+	WriteError(httptest.NewRecorder(), newRequest(t, "/api/v1/leases"), Internal(errors.New("backend timed out")))
 
 	// ASSERT
-	rec.AssertEmittedN(t, catalog.API907, 1)
-	rec.AssertData(t, catalog.API907, "backend", "dhcp")
+	rec.AssertEmittedN(t, catalog.API901, 1)
+	rec.AssertData(t, catalog.API901, "error", "backend timed out")
 	rec.AssertMatchesCatalog(t)
 	assert.Len(t, rec.All(), 1, "WriteError should emit the error event and nothing else")
 }
@@ -143,8 +145,8 @@ func TestWriteError_ShouldRedactUnmappedErrors(t *testing.T) {
 	assert.Equal(t, "An unexpected error occurred.", problem.Detail)
 
 	// ...while the operator gets the full cause.
-	rec.AssertEmitted(t, catalog.API908)
-	rec.AssertData(t, catalog.API908, "error", leaky.Error())
+	rec.AssertEmitted(t, catalog.API901)
+	rec.AssertData(t, catalog.API901, "error", leaky.Error())
 }
 
 //nolint:paralleltest // installs the recorder, which mutates the global emitter hook
@@ -162,8 +164,8 @@ func TestWriteError_ShouldResolveWrappedAPIErrors(t *testing.T) {
 
 	// ASSERT — wrapping must not degrade a 404 into a 500.
 	assert.Equal(t, http.StatusNotFound, recorder.Code)
-	rec.AssertEmitted(t, catalog.API902)
-	rec.AssertNotEmitted(t, catalog.API908)
+	rec.AssertEmitted(t, catalog.API900)
+	rec.AssertNotEmitted(t, catalog.API901)
 }
 
 //nolint:paralleltest // installs the recorder, which mutates the global emitter hook
@@ -175,21 +177,20 @@ func TestWriteError_ShouldIncludeRequestIDFromContext(t *testing.T) {
 	recorder := httptest.NewRecorder()
 
 	// ACT
-	WriteError(recorder, newRequest(t, "/api/v1/leases"), Unauthorized("a bearer token is required"))
+	WriteError(recorder, newRequest(t, "/api/v1/leases"), NotFound("lease 10.0.0.5"))
 
 	// ASSERT — the ID in the body is what an operator greps for in the logs.
 	problem := decodeProblem(t, recorder)
 	assert.Equal(t, "req-abc", problem.RequestID)
-	assert.Equal(t, "a bearer token is required", problem.Detail)
 }
 
 //nolint:paralleltest // installs the recorder, which mutates the global emitter hook
-func TestWriteError_ShouldRenderValidationFieldErrors(t *testing.T) {
+func TestWriteError_ShouldRenderFieldErrors(t *testing.T) {
 	// ARRANGE
 	rec := eventstest.NewRecorder()
 	t.Cleanup(rec.Install())
 
-	err := ValidationFailed(
+	err := NotFound("lease 10.0.0.5").WithFieldErrors(
 		FieldError{Field: "scopeId", Message: "is required"},
 		FieldError{Field: "leaseDurationSeconds", Message: "must be positive"},
 	)
@@ -200,8 +201,6 @@ func TestWriteError_ShouldRenderValidationFieldErrors(t *testing.T) {
 	WriteError(recorder, newRequest(t, "/api/v1/leases"), err)
 
 	// ASSERT — every failure in one response, not first-failure-only.
-	require.Equal(t, http.StatusBadRequest, recorder.Code)
-
 	problem := decodeProblem(t, recorder)
 	require.Len(t, problem.Errors, 2)
 	assert.Equal(t, "scopeId", problem.Errors[0].Field)
@@ -214,19 +213,66 @@ func TestWriteError_ShouldRenderBackendError(t *testing.T) {
 	rec := eventstest.NewRecorder()
 	t.Cleanup(rec.Install())
 
-	err := BackendError("dhcp").WithBackendError("The DHCP server rejected the scope ID.")
+	err := Internal(errors.New("winrm: 500")).WithBackendError("The DHCP server rejected the scope ID.")
 
 	recorder := httptest.NewRecorder()
 
 	// ACT
 	WriteError(recorder, newRequest(t, "/api/v1/scopes"), err)
 
-	// ASSERT
-	require.Equal(t, http.StatusBadGateway, recorder.Code)
+	// ASSERT — the sanitized backend text is surfaced; the raw cause is not.
+	require.Equal(t, http.StatusInternalServerError, recorder.Code)
 
 	problem := decodeProblem(t, recorder)
-	assert.Equal(t, "The dhcp backend reported an error.", problem.Detail)
 	assert.Equal(t, "The DHCP server rejected the scope ID.", problem.BackendError)
+	assert.NotContains(t, recorder.Body.String(), "winrm: 500")
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestWriteError_ShouldNotPanicWithoutCallerContext(t *testing.T) {
+	// ARRANGE — a request that never passed through the request-ID middleware:
+	// a route mounted outside the chain, or a handler under direct unit test.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/api/v1/leases/1", nil)
+	recorder := httptest.NewRecorder()
+
+	// ACT — Emit panics on an ExternalSource event with no remoteAddr, so
+	// without a fallback this would 500 via the recovery middleware instead of
+	// returning the 404 the handler asked for.
+	require.NotPanics(t, func() {
+		WriteError(recorder, req, NotFound("lease 1"))
+	})
+
+	// ASSERT — the intended status survives, and the event still carries an
+	// address, seeded from the request.
+	assert.Equal(t, http.StatusNotFound, recorder.Code)
+	rec.AssertEmitted(t, catalog.API900)
+	rec.AssertMatchesCatalog(t)
+
+	emitted := rec.FindByID(catalog.API900)
+	require.NotEmpty(t, emitted)
+	assert.Equal(t, req.RemoteAddr, emitted[0].Caller("remoteAddr"))
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestWriteProblem_ShouldDefaultMissingStatus(t *testing.T) {
+	// ARRANGE — a Problem built without a Status, as a caller using TypeFor and
+	// TitleFor could easily produce.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	recorder := httptest.NewRecorder()
+
+	// ACT — net/http panics on any code below 100, so an unset status must not
+	// reach WriteHeader.
+	require.NotPanics(t, func() {
+		WriteProblem(recorder, Problem{Type: TypeFor(events.CodeInternal), Title: TitleFor(events.CodeInternal)})
+	})
+
+	// ASSERT
+	assert.Equal(t, http.StatusInternalServerError, recorder.Code)
 }
 
 //nolint:paralleltest // installs the recorder, which mutates the global emitter hook

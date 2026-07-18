@@ -63,23 +63,16 @@ type ResponseCode string
 // The core error taxonomy. Adapters map their backend failures onto these codes;
 // they may add their own, but never a second error shape. Codes gain HTTP
 // meaning in internal/core/apierror.
+//
+// Only codes with a live emitter exist. The rest of the taxonomy documented in
+// 02-shared-core.md (validation-failed, unauthorized, conflict,
+// precondition-failed, backend-*) lands with the code that returns it —
+// unauthorized with the auth middleware, the backend codes with the first
+// backend client. A registered code nobody emits is a ghost event, which
+// .claude/guidelines/event-logging.md rules out.
 const (
-	// CodeValidationFailed — the request was malformed or failed validation (400).
-	CodeValidationFailed ResponseCode = "validation-failed"
-	// CodeUnauthorized — authentication was missing or invalid (401).
-	CodeUnauthorized ResponseCode = "unauthorized"
 	// CodeNotFound — the addressed resource does not exist (404).
 	CodeNotFound ResponseCode = "not-found"
-	// CodeConflict — the request conflicts with current state (409).
-	CodeConflict ResponseCode = "conflict"
-	// CodePreconditionFailed — a conditional request precondition failed (412).
-	CodePreconditionFailed ResponseCode = "precondition-failed"
-	// CodeBackendUnreachable — the backend could not be contacted (502).
-	CodeBackendUnreachable ResponseCode = "backend-unreachable"
-	// CodeBackendError — the backend answered with a failure (502).
-	CodeBackendError ResponseCode = "backend-error"
-	// CodeBackendTimeout — the backend did not answer in time (504).
-	CodeBackendTimeout ResponseCode = "backend-timeout"
 	// CodeInternal — an unexpected adapter fault (500).
 	CodeInternal ResponseCode = "internal"
 )

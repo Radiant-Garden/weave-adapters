@@ -12,7 +12,6 @@ Tested:
     - TestTypeFor_ShouldNamespaceTheCode: types are prefixed so clients can tell them apart.
   constructors
     - TestConstructors_ShouldBindTheCatalogEventAndStatus: every constructor lands on its event and status.
-    - TestValidationFailed_ShouldCarryEveryFieldError: all failures ride one response.
     - TestInternal_ShouldWrapCauseForErrorsIs: errors.Is reaches the wrapped cause.
     - TestInternal_ShouldTolerateNilCause: a nil cause does not panic.
 
@@ -77,14 +76,7 @@ func TestTaxonomy_ShouldMapEachCodeToItsHTTPStatus(t *testing.T) {
 		wantStatus int
 		wantTitle  string
 	}{
-		{name: "should map validation failures to 400", code: events.CodeValidationFailed, wantStatus: http.StatusBadRequest, wantTitle: "Validation failed"},
-		{name: "should map unauthorized to 401", code: events.CodeUnauthorized, wantStatus: http.StatusUnauthorized, wantTitle: "Unauthorized"},
 		{name: "should map not found to 404", code: events.CodeNotFound, wantStatus: http.StatusNotFound, wantTitle: "Not found"},
-		{name: "should map conflict to 409", code: events.CodeConflict, wantStatus: http.StatusConflict, wantTitle: "Conflict"},
-		{name: "should map precondition failed to 412", code: events.CodePreconditionFailed, wantStatus: http.StatusPreconditionFailed, wantTitle: "Precondition failed"},
-		{name: "should map backend unreachable to 502", code: events.CodeBackendUnreachable, wantStatus: http.StatusBadGateway, wantTitle: "Backend unreachable"},
-		{name: "should map backend error to 502", code: events.CodeBackendError, wantStatus: http.StatusBadGateway, wantTitle: "Backend error"},
-		{name: "should map backend timeout to 504", code: events.CodeBackendTimeout, wantStatus: http.StatusGatewayTimeout, wantTitle: "Backend timeout"},
 		{name: "should map internal to 500", code: events.CodeInternal, wantStatus: http.StatusInternalServerError, wantTitle: "Internal server error"},
 	}
 
@@ -129,15 +121,8 @@ func TestConstructors_ShouldBindTheCatalogEventAndStatus(t *testing.T) {
 		wantEvent  events.EventID
 		wantStatus int
 	}{
-		{name: "should bind validation failures", err: ValidationFailed(), wantEvent: catalog.API900, wantStatus: http.StatusBadRequest},
-		{name: "should bind unauthorized", err: Unauthorized("token required"), wantEvent: catalog.API901, wantStatus: http.StatusUnauthorized},
-		{name: "should bind not found", err: NotFound("lease 10.0.0.5"), wantEvent: catalog.API902, wantStatus: http.StatusNotFound},
-		{name: "should bind conflict", err: Conflict("scope is locked"), wantEvent: catalog.API903, wantStatus: http.StatusConflict},
-		{name: "should bind precondition failed", err: PreconditionFailed(`"v1"`), wantEvent: catalog.API904, wantStatus: http.StatusPreconditionFailed},
-		{name: "should bind backend unreachable", err: BackendUnreachable("dhcp"), wantEvent: catalog.API905, wantStatus: http.StatusBadGateway},
-		{name: "should bind backend error", err: BackendError("dhcp"), wantEvent: catalog.API906, wantStatus: http.StatusBadGateway},
-		{name: "should bind backend timeout", err: BackendTimeout("dhcp"), wantEvent: catalog.API907, wantStatus: http.StatusGatewayTimeout},
-		{name: "should bind internal", err: Internal(errors.New("boom")), wantEvent: catalog.API908, wantStatus: http.StatusInternalServerError},
+		{name: "should bind not found", err: NotFound("lease 10.0.0.5"), wantEvent: catalog.API900, wantStatus: http.StatusNotFound},
+		{name: "should bind internal", err: Internal(errors.New("boom")), wantEvent: catalog.API901, wantStatus: http.StatusInternalServerError},
 	}
 
 	for _, tt := range tests {
@@ -153,23 +138,6 @@ func TestConstructors_ShouldBindTheCatalogEventAndStatus(t *testing.T) {
 			assert.Equal(t, tt.wantStatus, lookup(spec.ResponseCode).status)
 		})
 	}
-}
-
-func TestValidationFailed_ShouldCarryEveryFieldError(t *testing.T) {
-	t.Parallel()
-
-	// ARRANGE — clients must be able to fix everything in one round trip.
-	failures := []FieldError{
-		{Field: "scopeId", Message: "is required"},
-		{Field: "leaseDurationSeconds", Message: "must be positive"},
-	}
-
-	// ACT
-	err := ValidationFailed(failures...)
-
-	// ASSERT
-	assert.Equal(t, failures, err.fieldErrors)
-	assert.Equal(t, 2, err.fields["fieldErrors"])
 }
 
 func TestInternal_ShouldWrapCauseForErrorsIs(t *testing.T) {
@@ -194,6 +162,6 @@ func TestInternal_ShouldTolerateNilCause(t *testing.T) {
 
 	// ASSERT
 	require.NotNil(t, err)
-	assert.Equal(t, catalog.API908, err.EventID())
+	assert.Equal(t, catalog.API901, err.EventID())
 	assert.Empty(t, err.fields["error"])
 }

@@ -6,7 +6,7 @@ Pending:
 Tested:
   New
     - TestNew_ShouldServeHealthEndpoint: GET /api/v1/health returns the weave health shape.
-    - TestNew_ShouldReturnNotFoundForOpenAPIDocument: the reserved spec route answers 404 in M1.
+    - TestNew_ShouldReturnNotFoundForOpenAPIDocument: the reserved spec route answers a problem+json 404.
     - TestNew_ShouldEchoRequestIDHeader: the middleware chain is wired around the mux.
     - TestNew_ShouldRecoverFromHandlerPanic: a panicking handler yields 500, not a dead connection.
     - TestNew_ShouldSkipRequestLoggingForHealthPolls: health polls emit no API-010; other routes do.
@@ -46,6 +46,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 	eventstest "github.com/radiantgarden/weave-adapters/internal/core/events/testing"
 	"github.com/radiantgarden/weave-adapters/internal/core/health"
@@ -124,8 +125,16 @@ func TestNew_ShouldReturnNotFoundForOpenAPIDocument(t *testing.T) {
 	// ACT — the route is reserved in M1; the document itself arrives in M2.
 	resp := get(t, ts, "/openapi.yaml", nil)
 
-	// ASSERT
-	assert.Equal(t, http.StatusNotFound, resp.status)
+	// ASSERT — problem+json, not stdlib plain text: 03-api-conventions requires
+	// every error share one shape, including 404s.
+	require.Equal(t, http.StatusNotFound, resp.status)
+	assert.Equal(t, "application/problem+json", resp.header.Get("Content-Type"))
+
+	var problem apierror.Problem
+	require.NoError(t, json.Unmarshal(resp.body, &problem))
+	assert.Equal(t, "weave-adapters:not-found", problem.Type)
+	assert.Equal(t, "/openapi.yaml", problem.Instance)
+	assert.NotEmpty(t, problem.RequestID)
 }
 
 func TestNew_ShouldEchoRequestIDHeader(t *testing.T) {
@@ -178,7 +187,8 @@ func TestNew_ShouldSkipRequestLoggingForHealthPolls(t *testing.T) {
 
 	get(t, ts, "/openapi.yaml", nil)
 
-	// ASSERT — the skip is scoped to health, not a blanket disable.
+	// ASSERT — the skip is scoped to health, not a blanket disable. The openapi
+	// 404 also emits its own API-900; only the request-audit line is counted.
 	rec.AssertEmittedN(t, catalog.API010, 1)
 	// slog widens ints, so the recorded value comes back as int64.
 	rec.AssertData(t, catalog.API010, "status", int64(http.StatusNotFound))

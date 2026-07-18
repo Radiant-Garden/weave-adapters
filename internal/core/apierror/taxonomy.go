@@ -17,22 +17,18 @@ type entry struct {
 	title  string
 }
 
-// taxonomy maps every response code to its HTTP status and title. This is the
-// whole client-facing error vocabulary: adapters map their backend failures onto
-// these codes and may add their own, but never invent a second error shape.
+// taxonomy maps every response code to its HTTP status and title. Adapters map
+// their backend failures onto these codes and may add their own, but never
+// invent a second error shape.
 //
-// Codes are added by the milestone that needs them — 405, 413 and 428 arrive
-// with the middleware and ETag write side that produce them.
+// Entries exist only for codes something actually returns. The rest of the
+// vocabulary in 02-shared-core.md arrives with its emitter: unauthorized (401)
+// with the auth middleware, conflict/precondition (409/412) and the backend
+// codes (502/504) with the first backend client, 405/413/428 with the
+// middleware and ETag write side that produce them.
 var taxonomy = map[events.ResponseCode]entry{
-	events.CodeValidationFailed:   {status: http.StatusBadRequest, title: "Validation failed"},
-	events.CodeUnauthorized:       {status: http.StatusUnauthorized, title: "Unauthorized"},
-	events.CodeNotFound:           {status: http.StatusNotFound, title: "Not found"},
-	events.CodeConflict:           {status: http.StatusConflict, title: "Conflict"},
-	events.CodePreconditionFailed: {status: http.StatusPreconditionFailed, title: "Precondition failed"},
-	events.CodeBackendUnreachable: {status: http.StatusBadGateway, title: "Backend unreachable"},
-	events.CodeBackendError:       {status: http.StatusBadGateway, title: "Backend error"},
-	events.CodeBackendTimeout:     {status: http.StatusGatewayTimeout, title: "Backend timeout"},
-	events.CodeInternal:           {status: http.StatusInternalServerError, title: "Internal server error"},
+	events.CodeNotFound: {status: http.StatusNotFound, title: "Not found"},
+	events.CodeInternal: {status: http.StatusInternalServerError, title: "Internal server error"},
 }
 
 // lookup returns the HTTP meaning of a response code. An unknown code resolves
@@ -60,51 +56,10 @@ func TitleFor(code events.ResponseCode) string {
 	return lookup(code).title
 }
 
-// ValidationFailed reports a request that failed validation. Pass every failing
-// field: clients fix them in one round trip rather than one per attempt.
-func ValidationFailed(fieldErrors ...FieldError) *Error {
-	return newError(catalog.API900, map[string]any{
-		"fieldErrors": len(fieldErrors),
-	}).WithFieldErrors(fieldErrors...)
-}
-
-// Unauthorized reports a missing, malformed, or unknown credential. reason is
-// returned to the client, so it must describe what is expected without
-// confirming what was wrong with the credential presented.
-func Unauthorized(reason string) *Error {
-	return newError(catalog.API901, map[string]any{"reason": reason})
-}
-
 // NotFound reports an addressed resource that does not exist. resource is
 // echoed to the client, so name the kind and identifier, not internal state.
 func NotFound(resource string) *Error {
-	return newError(catalog.API902, map[string]any{"resource": resource})
-}
-
-// Conflict reports a request that conflicts with current state.
-func Conflict(reason string) *Error {
-	return newError(catalog.API903, map[string]any{"reason": reason})
-}
-
-// PreconditionFailed reports a conditional request whose precondition did not
-// hold — the resource changed since the client last read it.
-func PreconditionFailed(expected string) *Error {
-	return newError(catalog.API904, map[string]any{"expected": expected})
-}
-
-// BackendUnreachable reports a backend that could not be contacted at all.
-func BackendUnreachable(backend string) *Error {
-	return newError(catalog.API905, map[string]any{"backend": backend})
-}
-
-// BackendError reports a backend that answered with a failure.
-func BackendError(backend string) *Error {
-	return newError(catalog.API906, map[string]any{"backend": backend})
-}
-
-// BackendTimeout reports a backend call that exceeded its deadline.
-func BackendTimeout(backend string) *Error {
-	return newError(catalog.API907, map[string]any{"backend": backend})
+	return newError(catalog.API900, map[string]any{"resource": resource})
 }
 
 // Internal reports an unexpected fault. The cause is recorded for the operator
@@ -117,5 +72,5 @@ func Internal(cause error) *Error {
 		message = cause.Error()
 	}
 
-	return newError(catalog.API908, map[string]any{"error": message}).WithCause(cause)
+	return newError(catalog.API901, map[string]any{"error": message}).WithCause(cause)
 }

@@ -18,6 +18,11 @@ import (
 	_ "github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 )
 
+// problemTypePrefix mirrors apierror's namespace. It is duplicated rather than
+// imported because apierror imports the catalog, and docgen importing apierror
+// would close that loop.
+const problemTypePrefix = "weave-adapters:"
+
 func main() {
 	root, err := moduleRoot()
 	if err != nil {
@@ -102,11 +107,40 @@ func writeEvent(b *strings.Builder, e *events.Event) {
 		}
 	}
 
+	writeResponse(b, e)
+
 	if e.Example != "" {
 		fmt.Fprintf(b, "\n**Example:** `%s`\n", e.Example)
 	}
 
 	if e.Troubleshooting != "" {
 		fmt.Fprintf(b, "\n**Troubleshooting:** %s\n", e.Troubleshooting)
+	}
+}
+
+// writeResponse documents the client-facing half of an event-derived error.
+//
+// Without this the catalog only describes the log line, which undercuts the
+// point of the design: the same entry defines what the operator sees and what
+// the client receives, and this file is where an integrator looks up either.
+func writeResponse(b *strings.Builder, e *events.Event) {
+	if e.ResponseCode == "" {
+		return
+	}
+
+	b.WriteString("\n**Client response**\n\n")
+	fmt.Fprintf(b, "- **Problem type:** `%s%s`\n", problemTypePrefix, e.ResponseCode)
+
+	if e.ResponseDetail != "" {
+		fmt.Fprintf(b, "- **Detail:** %s\n", e.ResponseDetail)
+	}
+
+	if len(e.Impacts) > 0 {
+		impacts := make([]string, 0, len(e.Impacts))
+		for _, impact := range e.Impacts {
+			impacts = append(impacts, "`"+impact.String()+"`")
+		}
+
+		fmt.Fprintf(b, "- **Impacts:** %s\n", strings.Join(impacts, ", "))
 	}
 }

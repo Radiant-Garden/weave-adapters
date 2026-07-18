@@ -68,7 +68,7 @@ func TestRecovery_ShouldReturn500AndEmitOnPanic(t *testing.T) { //nolint:paralle
 
 	// One panic, one event: Recovery renders the body itself rather than going
 	// through WriteError, which would emit API-908 on top of API-011.
-	rec.AssertNotEmitted(t, catalog.API908)
+	rec.AssertNotEmitted(t, catalog.API901)
 }
 
 func TestRecovery_ShouldPassThroughWhenNoPanic(t *testing.T) { //nolint:paralleltest // installs the global emitter hook

@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 	"github.com/radiantgarden/weave-adapters/internal/core/middleware"
@@ -67,8 +68,13 @@ func skipHealthPolls(r *http.Request) bool {
 // serveOpenAPI answers the reserved spec route. The document itself is M2
 // (spec-first work); until then the route exists so it is owned and logged, and
 // answers the way any absent document would.
-func serveOpenAPI(w http.ResponseWriter, _ *http.Request) {
-	http.Error(w, "openapi document not available in this build", http.StatusNotFound)
+//
+// It goes through apierror rather than http.Error so the body is problem+json
+// like every other error this API returns — 03-api-conventions requires that
+// shape "including 401/404 from middleware", and a plain-text 404 here would be
+// the one response a generic client could not parse.
+func serveOpenAPI(w http.ResponseWriter, r *http.Request) {
+	apierror.WriteError(w, r, apierror.NotFound("openapi document"))
 }
 
 // Run binds the listen address, serves, and blocks until ctx is cancelled, then

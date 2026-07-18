@@ -13,6 +13,7 @@ package apierror
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 )
@@ -97,26 +98,44 @@ func (e *Error) Unwrap() error { return e.cause }
 // EventID returns the catalog event backing this error.
 func (e *Error) EventID() events.EventID { return e.eventID }
 
-// WithCause attaches the internal error that led here. The cause is logged with
-// the event and never appears in the response body.
+// clone returns a copy of the error with its slice independent of the original.
+//
+// The builders below copy rather than mutate so a shared *Error is safe: a
+// package-level sentinel (var errMissing = apierror.NotFound("lease")) decorated
+// per request would otherwise be written by every goroutine at once, racing on
+// the cause and leaking one request's detail into another's response.
+func (e *Error) clone() *Error {
+	copied := *e
+	copied.fieldErrors = slices.Clone(e.fieldErrors)
+
+	return &copied
+}
+
+// WithCause returns a copy carrying the internal error that led here. The cause
+// is logged with the event and never appears in the response body.
 func (e *Error) WithCause(cause error) *Error {
-	e.cause = cause
+	next := e.clone()
+	next.cause = cause
 
-	return e
+	return next
 }
 
-// WithBackendError attaches a sanitized backend message, surfaced to the client
-// in the backendError extension. Only pass text that is safe to return —
-// callers are responsible for stripping credentials and internal hostnames.
+// WithBackendError returns a copy carrying a sanitized backend message, surfaced
+// to the client in the backendError extension. Only pass text that is safe to
+// return — callers are responsible for stripping credentials and internal
+// hostnames.
 func (e *Error) WithBackendError(message string) *Error {
-	e.backendError = message
+	next := e.clone()
+	next.backendError = message
 
-	return e
+	return next
 }
 
-// WithFieldErrors attaches field-level validation failures.
+// WithFieldErrors returns a copy carrying additional field-level validation
+// failures.
 func (e *Error) WithFieldErrors(fieldErrors ...FieldError) *Error {
-	e.fieldErrors = append(e.fieldErrors, fieldErrors...)
+	next := e.clone()
+	next.fieldErrors = append(next.fieldErrors, fieldErrors...)
 
-	return e
+	return next
 }

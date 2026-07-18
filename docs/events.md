@@ -9,7 +9,7 @@
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands in M2). |
+| subject | string | false | Authenticated caller (empty until auth lands). |
 | role | string | false | Caller role (empty until auth). |
 | remoteAddr | string | true | Client address. |
 | requestId | string | true | Correlation ID (X-Request-Id). |
@@ -42,43 +42,7 @@
 
 **Troubleshooting:** A handler bug caused a panic. Read the stack field, reproduce via method+path, and fix the root cause (often a nil dereference or out-of-range index). Correlate other events by requestId.
 
-## API-900 — request rejected: validation failed
-
-- **Level:** DEBUG
-- **Category / Topic:** API / Errors
-- **External source:** yes
-- **Description:** A request was rejected because it failed validation. The response lists every failing field.
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
-| remoteAddr | string | true | Client address. |
-| fieldErrors | int | false | Number of failing fields. |
-
-**Example:** `{"eventId":"API-900","caller":{"remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"…"},"data":{}}`
-
-**Troubleshooting:** Client-side fault. Read the errors[] array in the response body; each entry names a field and why it failed.
-
-## API-901 — request rejected: unauthorized
-
-- **Level:** DEBUG
-- **Category / Topic:** API / Errors
-- **External source:** yes
-- **Description:** A request was rejected because its credential was missing, malformed, or unknown.
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
-| remoteAddr | string | true | Client address. |
-| reason | string | true | Client-safe reason the credential was rejected. |
-
-**Example:** `{"eventId":"API-901","caller":{"remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"…"},"data":{}}`
-
-**Troubleshooting:** Check the caller sends 'Authorization: Bearer <token>' with the full scheme, and that the token is listed by `token list` and not expired. See docs/token-management.md.
-
-## API-902 — request rejected: not found
+## API-900 — request rejected: not found
 
 - **Level:** DEBUG
 - **Category / Topic:** API / Errors
@@ -92,101 +56,17 @@
 | remoteAddr | string | true | Client address. |
 | resource | string | true | The resource that was not found. |
 
-**Example:** `{"eventId":"API-902","caller":{"remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"…"},"data":{}}`
+**Client response**
+
+- **Problem type:** `weave-adapters:not-found`
+- **Detail:** The requested {{resource}} was not found.
+- **Impacts:** `request_rejected`
+
+**Example:** `{"eventId":"API-900","caller":{"subject":"","role":"","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/openapi.yaml"},"data":{"resource":"openapi document"}}`
 
 **Troubleshooting:** Usually a stale client cache or a deleted resource. Confirm the identifier against a list call.
 
-## API-903 — request rejected: conflict
-
-- **Level:** DEBUG
-- **Category / Topic:** API / Errors
-- **External source:** yes
-- **Description:** A request conflicted with the current state of the resource.
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
-| remoteAddr | string | true | Client address. |
-| reason | string | true | Client-safe description of the conflict. |
-
-**Example:** `{"eventId":"API-903","caller":{"remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"…"},"data":{}}`
-
-**Troubleshooting:** Re-read the resource and retry against its current state.
-
-## API-904 — request rejected: precondition failed
-
-- **Level:** DEBUG
-- **Category / Topic:** API / Errors
-- **External source:** yes
-- **Description:** A conditional request failed because the resource changed since the client last read it.
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
-| remoteAddr | string | true | Client address. |
-| expected | string | false | The If-Match value supplied. |
-
-**Example:** `{"eventId":"API-904","caller":{"remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"…"},"data":{}}`
-
-**Troubleshooting:** Expected under concurrent writes. The client should re-read, re-apply, and retry with the new ETag.
-
-## API-905 — backend unreachable
-
-- **Level:** ERROR
-- **Category / Topic:** API / Errors
-- **External source:** yes
-- **Description:** The adapter could not contact its backend service at all.
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
-| remoteAddr | string | true | Client address. |
-| backend | string | true | The backend that could not be reached. |
-
-**Example:** `{"eventId":"API-905","caller":{"remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"…"},"data":{}}`
-
-**Troubleshooting:** Check the backend is running and reachable from this host: DNS, routing, firewall, and credentials.
-
-## API-906 — backend error
-
-- **Level:** ERROR
-- **Category / Topic:** API / Errors
-- **External source:** yes
-- **Description:** The backend was reached but answered with a failure.
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
-| remoteAddr | string | true | Client address. |
-| backend | string | true | The backend that failed. |
-
-**Example:** `{"eventId":"API-906","caller":{"remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"…"},"data":{}}`
-
-**Troubleshooting:** Read the backendError field in the response and the backend's own logs; the fault is on the backend side.
-
-## API-907 — backend timeout
-
-- **Level:** ERROR
-- **Category / Topic:** API / Errors
-- **External source:** yes
-- **Description:** A backend call exceeded its deadline.
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
-| remoteAddr | string | true | Client address. |
-| backend | string | true | The backend that timed out. |
-
-**Example:** `{"eventId":"API-907","caller":{"remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"…"},"data":{}}`
-
-**Troubleshooting:** Check backend load and health. Persistent timeouts mean the backend is overloaded or the timeout is too tight.
-
-## API-908 — internal error
+## API-901 — internal error
 
 - **Level:** ERROR
 - **Category / Topic:** API / Errors
@@ -200,7 +80,13 @@
 | remoteAddr | string | true | Client address. |
 | error | string | true | The internal error. Never sent to the client. |
 
-**Example:** `{"eventId":"API-908","caller":{"remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"…"},"data":{}}`
+**Client response**
+
+- **Problem type:** `weave-adapters:internal`
+- **Detail:** An unexpected error occurred.
+- **Impacts:** `request_rejected`
+
+**Example:** `{"eventId":"API-901","caller":{"subject":"","role":"","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/leases"},"data":{"error":"dial tcp 10.0.0.9:445: connect: connection refused"}}`
 
 **Troubleshooting:** An adapter bug: some path returns an error that is not an apierror. Read the error field, then map that failure onto a taxonomy entry at its source.
 

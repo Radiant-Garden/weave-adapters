@@ -23,9 +23,19 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	apiErr := asError(err)
 	problem := apiErr.problem(r)
 
+	// The API-9xx events are ExternalSource, and Emit panics on one with no
+	// remoteAddr in context. A handler reached without the request-ID middleware
+	// (a route mounted outside the chain, or a direct unit test) would otherwise
+	// panic here and have its 404 turned into a 500 by the recovery middleware.
+	ctx := events.EnsureCaller(r.Context(), events.Caller{
+		RemoteAddr: r.RemoteAddr,
+		Method:     r.Method,
+		Path:       r.URL.Path,
+	})
+
 	// Emit before writing: if the client has gone away mid-write, the operator
 	// still gets the record of what happened.
-	events.Emit(r.Context(), apiErr.eventID, apiErr.eventData()...)
+	events.Emit(ctx, apiErr.eventID, apiErr.eventData()...)
 
 	WriteProblem(w, problem)
 }
@@ -34,8 +44,17 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 // only where the event was already emitted by the caller — the recovery
 // middleware, which owns API-011 — so a panic yields one log line, not two.
 func WriteProblem(w http.ResponseWriter, problem Problem) {
+	status := problem.Status
+	if status < http.StatusContinue {
+		// net/http panics on a status below 100, so a Problem built without one
+		// would crash the handler instead of answering. 500 is the honest
+		// reading of "the caller did not say", and it keeps the response
+		// serveable.
+		status = http.StatusInternalServerError
+	}
+
 	w.Header().Set("Content-Type", contentType)
-	w.WriteHeader(problem.Status)
+	w.WriteHeader(status)
 
 	// The status is already committed, so a write failure here is not
 	// actionable; the request-completed event records what was sent.
@@ -118,17 +137,8 @@ func render(template string, fields map[string]any) string {
 
 	pairs := make([]string, 0, len(fields)*2)
 	for key, value := range fields {
-		pairs = append(pairs, "{{"+key+"}}", valueToString(value))
+		pairs = append(pairs, "{{"+key+"}}", fmt.Sprint(value))
 	}
 
 	return strings.NewReplacer(pairs...).Replace(template)
-}
-
-// valueToString renders a placeholder value.
-func valueToString(value any) string {
-	if s, ok := value.(string); ok {
-		return s
-	}
-
-	return fmt.Sprint(value)
 }

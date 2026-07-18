@@ -12,6 +12,7 @@ Tested:
     - TestUnwrap_ShouldExposeCause: errors.Is/As reach the wrapped error.
   Error.WithCause / WithBackendError / WithFieldErrors
     - TestWithBuilders_ShouldChainAndAccumulate: builders compose; field errors append.
+    - TestWithBuilders_ShouldNotMutateReceiver: decorating a shared *Error copies rather than writes.
   Problem
     - TestProblem_ShouldOmitEmptyOptionalFields: absent extensions stay out of the JSON.
 
@@ -56,10 +57,10 @@ func TestError_ShouldAppendCause(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE / ACT
-	err := BackendUnreachable("dhcp").WithCause(errors.New("dial tcp: i/o timeout"))
+	err := NotFound("lease 10.0.0.5").WithCause(errors.New("dial tcp: i/o timeout"))
 
 	// ASSERT — operators need the cause; clients never see this string.
-	assert.Equal(t, "The dhcp backend could not be reached.: dial tcp: i/o timeout", err.Error())
+	assert.Equal(t, "The requested lease 10.0.0.5 was not found.: dial tcp: i/o timeout", err.Error())
 }
 
 func TestError_ShouldReportUnregisteredEvent(t *testing.T) {
@@ -79,7 +80,7 @@ func TestUnwrap_ShouldExposeCause(t *testing.T) {
 	sentinel := errors.New("connection reset")
 
 	// ACT
-	err := BackendError("dhcp").WithCause(sentinel)
+	err := NotFound("lease 10.0.0.5").WithCause(sentinel)
 
 	// ASSERT
 	require.ErrorIs(t, err, sentinel)
@@ -93,7 +94,8 @@ func TestWithBuilders_ShouldChainAndAccumulate(t *testing.T) {
 	cause := errors.New("boom")
 
 	// ACT — builders chain, and field errors accumulate across calls.
-	err := ValidationFailed(FieldError{Field: "a", Message: "is required"}).
+	err := NotFound("lease").
+		WithFieldErrors(FieldError{Field: "a", Message: "is required"}).
 		WithFieldErrors(FieldError{Field: "b", Message: "must be positive"}).
 		WithBackendError("sanitized backend text").
 		WithCause(cause)
@@ -103,6 +105,27 @@ func TestWithBuilders_ShouldChainAndAccumulate(t *testing.T) {
 	assert.Equal(t, "b", err.fieldErrors[1].Field)
 	assert.Equal(t, "sanitized backend text", err.backendError)
 	assert.Equal(t, cause, err.Unwrap())
+}
+
+func TestWithBuilders_ShouldNotMutateReceiver(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the shape a handler package would reach for: one shared error
+	// value decorated per request.
+	shared := NotFound("lease")
+
+	// ACT
+	first := shared.WithCause(errors.New("first"))
+	second := shared.WithFieldErrors(FieldError{Field: "b", Message: "bad"})
+
+	// ASSERT — decorating must not write through to the shared value, or two
+	// concurrent requests would race on it and leak each other's detail.
+	require.NoError(t, shared.Unwrap())
+	assert.Empty(t, shared.fieldErrors)
+	assert.Empty(t, first.fieldErrors)
+	require.NoError(t, second.Unwrap())
+	assert.Equal(t, "first", first.Unwrap().Error())
+	assert.Len(t, second.fieldErrors, 1)
 }
 
 func TestProblem_ShouldOmitEmptyOptionalFields(t *testing.T) {

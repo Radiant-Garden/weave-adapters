@@ -25,14 +25,11 @@ func Logging(skip func(*http.Request) bool) Middleware {
 				return
 			}
 
-			ctx := r.Context()
-			if events.CallerFrom(ctx).RemoteAddr == "" {
-				ctx = events.WithCaller(ctx, events.Caller{
-					RemoteAddr: r.RemoteAddr,
-					Method:     r.Method,
-					Path:       r.URL.Path,
-				})
-			}
+			ctx := events.EnsureCaller(r.Context(), events.Caller{
+				RemoteAddr: r.RemoteAddr,
+				Method:     r.Method,
+				Path:       r.URL.Path,
+			})
 
 			events.Emit(ctx, catalog.API010,
 				"status", rec.status,

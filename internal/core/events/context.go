@@ -47,6 +47,24 @@ func CallerFrom(ctx context.Context) Caller {
 	return callerFrom(ctx)
 }
 
+// EnsureCaller returns a context guaranteed to satisfy the ExternalSource
+// contract: if ctx already carries a remoteAddr it is returned untouched,
+// otherwise fallback is attached.
+//
+// Emit panics on an ExternalSource event with no remoteAddr, which is the right
+// guard for a background context but the wrong outcome for a handler on a
+// request that simply never passed through the request-ID middleware — a route
+// mounted outside the chain, or a handler under direct unit test. Every emitter
+// on the request path calls this so a missing caller degrades to a
+// request-derived one instead of a panic.
+func EnsureCaller(ctx context.Context, fallback Caller) context.Context {
+	if callerFrom(ctx).RemoteAddr != "" {
+		return ctx
+	}
+
+	return WithCaller(ctx, fallback)
+}
+
 // callerFrom reads the caller metadata from the context (zero values if absent).
 func callerFrom(ctx context.Context) Caller {
 	str := func(k callerContextKey) string {
