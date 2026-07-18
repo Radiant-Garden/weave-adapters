@@ -12,6 +12,8 @@ Tested:
     - TestNew_ShouldSkipRequestLoggingForHealthPolls: successful health polls emit no API-010; other routes and failures do.
     - TestNew_ShouldRenderRouterErrorsAsProblemJSON: mux 404/405 share the one error shape.
     - TestNew_ShouldLogRejectedRequests: inner middleware runs inside logging, so rejections are audited.
+  skipHealthPolls
+    - TestSkipHealthPolls_ShouldSuppressOnlyRoutineAnswers: routine polls are quiet; failures on that path are not.
   Run
     - TestRun_ShouldShutDownGracefullyWhenContextCancelled: returns nil and emits SYS-002/003/004.
     - TestRun_ShouldServeUntilContextCancelled: requests are served while Run blocks.
@@ -206,6 +208,50 @@ func TestNew_ShouldSkipRequestLoggingForHealthPolls(t *testing.T) {
 	// slog widens ints, so the recorded value comes back as int64.
 	rec.AssertData(t, catalog.API010, "status", int64(http.StatusNotFound))
 	rec.AssertMatchesCatalog(t)
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestSkipHealthPolls_ShouldSuppressOnlyRoutineAnswers(t *testing.T) {
+	tests := []struct {
+		name     string
+		method   string
+		path     string
+		status   int
+		wantSkip bool
+	}{
+		{
+			name: "should skip a healthy poll", method: http.MethodGet, path: "/api/v1/health",
+			status: http.StatusOK, wantSkip: true,
+		},
+		{
+			// The outage is when poll volume matters most and the information
+			// is least new — HLT-001 already recorded the transition once.
+			name: "should skip an unavailable poll", method: http.MethodGet, path: "/api/v1/health",
+			status: http.StatusServiceUnavailable, wantSkip: true,
+		},
+		{
+			name: "should log a wrong method on the health path", method: http.MethodPost, path: "/api/v1/health",
+			status: http.StatusMethodNotAllowed, wantSkip: false,
+		},
+		{
+			name: "should log an unexpected failure on the health path", method: http.MethodGet, path: "/api/v1/health",
+			status: http.StatusInternalServerError, wantSkip: false,
+		},
+		{
+			name: "should log every other path", method: http.MethodGet, path: "/api/v1/leases",
+			status: http.StatusOK, wantSkip: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) { //nolint:paralleltest // shares the global emitter hook
+			// ARRANGE
+			req := httptest.NewRequestWithContext(t.Context(), tt.method, tt.path, nil)
+
+			// ACT / ASSERT
+			assert.Equal(t, tt.wantSkip, skipHealthPolls(req, tt.status))
+		})
+	}
 }
 
 //nolint:paralleltest // installs the recorder, which mutates the global emitter hook

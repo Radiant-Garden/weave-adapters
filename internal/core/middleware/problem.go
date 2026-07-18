@@ -1,11 +1,18 @@
 package middleware
 
 import (
+	"mime"
 	"net/http"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 )
+
+// maxReflectedPathLen bounds how much of the request path is echoed into the
+// response detail and the event. The path is attacker-controlled and bounded
+// only by net/http's header limit, so a multi-kilobyte path would otherwise be
+// copied into both the body and log storage on every request.
+const maxReflectedPathLen = 128
 
 // ProblemErrors rewrites the router's own 404 and 405 responses as problem+json.
 //
@@ -29,6 +36,11 @@ func ProblemErrors(next http.Handler) http.Handler {
 // The decision is made at WriteHeader, before any body byte reaches the client,
 // so nothing is buffered and no other response is delayed — a streaming handler
 // passes through untouched.
+//
+// Like the other writers in this chain it exposes Unwrap rather than
+// implementing Flusher and friends, so a streaming handler must reach them
+// through http.ResponseController. A direct w.(http.Flusher) assertion fails —
+// there are three wrappers between a handler and the real writer.
 type problemWriter struct {
 	http.ResponseWriter
 
@@ -56,9 +68,13 @@ func (w *problemWriter) WriteHeader(code int) {
 
 	w.replaced = true
 
+	// The replacement body is longer than whatever the inner handler sized, and
+	// net/http truncates to a declared Content-Length — silently, leaving the
+	// client an empty body. Drop it and let net/http size the JSON. Other
+	// headers, including the mux's Allow, are deliberately left in place.
+	w.Header().Del("Content-Length")
+
 	// Write onto the wrapped writer, not this one, or WriteHeader would recurse.
-	// The Allow header the mux already set survives: WriteError only replaces
-	// Content-Type and the body.
 	apierror.WriteError(w.ResponseWriter, w.request, w.problemFor(code))
 }
 
@@ -87,12 +103,23 @@ func (w *problemWriter) Unwrap() http.ResponseWriter {
 // A problem+json content type means the response came from apierror — a handler
 // or the auth middleware already rendered it — so it is left alone. That check
 // is what keeps this from double-handling our own 404s.
+//
+// The media type is parsed rather than string-compared: adding a conventional
+// "; charset=utf-8" to the content type would otherwise make every
+// apierror-rendered 404 look router-generated, emitting a second event and
+// overwriting a specific detail with the generic one.
 func (w *problemWriter) shouldReplace(code int) bool {
 	if code != http.StatusNotFound && code != http.StatusMethodNotAllowed {
 		return false
 	}
 
-	return w.Header().Get("Content-Type") != apierror.ContentType
+	mediaType, _, err := mime.ParseMediaType(w.Header().Get("Content-Type"))
+	if err != nil {
+		// Unparseable or absent: not something this package wrote.
+		return true
+	}
+
+	return mediaType != apierror.ContentType
 }
 
 // problemFor builds the error for a router-generated status.
@@ -104,5 +131,14 @@ func (w *problemWriter) problemFor(code int) error {
 		)
 	}
 
-	return apierror.NotFound("route " + w.request.Method + " " + w.request.URL.Path)
+	return apierror.NotFound("route " + w.request.Method + " " + truncatePath(w.request.URL.Path))
+}
+
+// truncatePath bounds an echoed request path (see maxReflectedPathLen).
+func truncatePath(path string) string {
+	if len(path) <= maxReflectedPathLen {
+		return path
+	}
+
+	return path[:maxReflectedPathLen] + "…"
 }

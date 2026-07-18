@@ -73,11 +73,21 @@ func New(addr string, healthHandler http.Handler, inner ...middleware.Middleware
 
 // skipHealthPolls reports whether request logging should skip this request.
 //
-// Only a *successful* health GET is skipped. Suppressing the whole path would
-// also hide a 405 from a misconfigured client or a 503 from a failing probe —
-// the requests on that path most worth auditing.
+// Health GETs are skipped when they answer normally — 200 healthy/unhealthy or
+// 503 unavailable are both routine, and weave polls continuously. Logging the
+// 503s would put out thousands of identical lines per hour during exactly the
+// outage an operator is trying to read the log through, and HLT-001 already
+// records the transition once.
+//
+// Anything else on that path is audited: a 405 from a misconfigured client or a
+// 500 from a broken probe is not a poll, and suppressing the whole path would
+// hide the requests there most worth seeing.
 func skipHealthPolls(r *http.Request, status int) bool {
-	return r.URL.Path == healthPath && r.Method == http.MethodGet && status == http.StatusOK
+	if r.URL.Path != healthPath || r.Method != http.MethodGet {
+		return false
+	}
+
+	return status == http.StatusOK || status == http.StatusServiceUnavailable
 }
 
 // Unauthenticated reports whether r addresses a route that must stay open:

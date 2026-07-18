@@ -11,6 +11,12 @@ Tested:
     - TestProblemErrors_ShouldPassThroughOtherStatuses: success and other errors are untouched.
     - TestProblemErrors_ShouldNotAppendTheRouterBody: no plain text trails the JSON.
     - TestProblemErrors_ShouldIgnoreASecondWriteHeader: a duplicate status write is dropped.
+    - TestProblemErrors_ShouldClearStaleContentLength: a handler-declared length cannot truncate the JSON.
+    - TestProblemErrors_ShouldPreserveHandlerHeaders: Retry-After and friends survive the rewrite.
+    - TestProblemErrors_ShouldRewriteHeadRequests: HEAD keeps the status and content type.
+    - TestProblemErrors_ShouldNotDoubleHandleParameterisedContentType: a charset suffix still counts as ours.
+    - TestProblemErrors_ShouldTruncateAnOverlongPath: an attacker-sized path is bounded before it is echoed.
+    - TestProblemErrors_ShouldAllowFlushingThroughResponseController: streaming survives three wrappers.
 
 Tested elsewhere:
   The end-to-end shape through the real chain is covered in
@@ -32,8 +38,11 @@ package middleware
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -204,6 +213,154 @@ func TestProblemErrors_ShouldNotAppendTheRouterBody(t *testing.T) {
 	var problem apierror.Problem
 	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &problem),
 		"the body should be exactly one JSON document")
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestProblemErrors_ShouldClearStaleContentLength(t *testing.T) {
+	// ARRANGE — a handler that sizes its own 404 body, as a proxying or
+	// pre-rendering handler would. Served over a real listener: httptest's
+	// recorder does not enforce Content-Length, so a recorder-based test would
+	// pass while the wire truncated.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	handler := ProblemErrors(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		const short = "nope"
+
+		w.Header().Set("Content-Length", strconv.Itoa(len(short)))
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(short))
+	}))
+
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	// ACT
+	resp, err := ts.Client().Get(ts.URL + "/x") //nolint:noctx // test-local server
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	// ASSERT — a stale length would truncate the longer JSON to four bytes, or
+	// to nothing, leaving the client a response it cannot parse at all.
+	require.Equal(t, http.StatusNotFound, resp.StatusCode)
+
+	var problem apierror.Problem
+	require.NoError(t, json.Unmarshal(body, &problem), "body was truncated: %q", string(body))
+	assert.Equal(t, "weave-adapters:not-found", problem.Type)
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestProblemErrors_ShouldPreserveHandlerHeaders(t *testing.T) {
+	// ARRANGE
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	handler := ProblemErrors(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNotFound)
+	}))
+
+	// ACT
+	resp := through(t, handler, http.MethodGet, "/x")
+
+	// ASSERT — only the body and its content type are replaced. Resetting the
+	// header map would be an easy way to clear Content-Length and would drop
+	// these silently.
+	assert.Equal(t, "120", resp.Header().Get("Retry-After"))
+	assert.Equal(t, "no-store", resp.Header().Get("Cache-Control"))
+	assert.Equal(t, apierror.ContentType, resp.Header().Get("Content-Type"))
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestProblemErrors_ShouldRewriteHeadRequests(t *testing.T) {
+	// ARRANGE — net/http suppresses the body for HEAD but keeps the headers.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	// ACT
+	resp := routed(t, http.MethodHead, "/api/v1/nope")
+
+	// ASSERT — status and content type still describe a problem document.
+	assert.Equal(t, http.StatusNotFound, resp.Code)
+	assert.Equal(t, apierror.ContentType, resp.Header().Get("Content-Type"))
+	rec.AssertEmitted(t, catalog.API900)
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestProblemErrors_ShouldNotDoubleHandleParameterisedContentType(t *testing.T) {
+	// ARRANGE — the conventional spelling of the media type, with a charset.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	handler := ProblemErrors(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", apierror.ContentType+"; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"type":"weave-adapters:not-found","detail":"already rendered"}`))
+	}))
+
+	// ACT
+	resp := through(t, handler, http.MethodGet, "/x")
+
+	// ASSERT — a string compare would treat this as router-generated, emit a
+	// second event, and overwrite the specific detail with the generic one.
+	assert.Contains(t, resp.Body.String(), "already rendered")
+	assert.Empty(t, rec.All(), "an already-rendered problem must not be re-emitted")
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestProblemErrors_ShouldTruncateAnOverlongPath(t *testing.T) {
+	// ARRANGE
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	longPath := "/api/v1/" + strings.Repeat("a", 4000)
+
+	// ACT
+	resp := routed(t, http.MethodGet, longPath)
+
+	// ASSERT — the path is attacker-controlled; echoing it whole would copy
+	// kilobytes into both the response and log storage on every request.
+	var problem apierror.Problem
+	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &problem))
+	assert.Less(t, len(problem.Detail), 200)
+	assert.Contains(t, problem.Detail, "…")
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestProblemErrors_ShouldAllowFlushingThroughResponseController(t *testing.T) {
+	// ARRANGE — a streaming handler, as the planned SSE endpoint would be. It
+	// must reach Flush through http.ResponseController: three wrappers sit
+	// between it and the real writer, and none implement Flusher directly.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	// Buffered channel rather than a captured variable: the handler runs on the
+	// server's goroutine, so a plain assignment would be a data race.
+	flushed := make(chan error, 1)
+
+	handler := Chain(
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte("chunk"))
+			flushed <- http.NewResponseController(w).Flush()
+		}),
+		Recovery, RequestID, Logging(nil), ProblemErrors,
+	)
+
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+
+	// ACT
+	resp, err := ts.Client().Get(ts.URL + "/stream") //nolint:noctx // test-local server
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	// ASSERT
+	require.NoError(t, <-flushed, "Unwrap should keep Flush reachable through the chain")
 }
 
 //nolint:paralleltest // installs the recorder, which mutates the global emitter hook
