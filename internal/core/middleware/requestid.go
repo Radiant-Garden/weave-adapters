@@ -35,9 +35,11 @@ func RequestID(next http.Handler) http.Handler {
 // newRequestID returns a random UUIDv4-formatted string.
 func newRequestID() string {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "unknown" // crypto/rand failure is effectively impossible.
-	}
+
+	// Since Go 1.24 crypto/rand.Read never returns an error; it panics if the
+	// system source fails. There is no fallback to write here — a shared
+	// placeholder ID would silently merge unrelated requests' traces.
+	_, _ = rand.Read(b[:])
 
 	b[6] = (b[6] & 0x0f) | 0x40 // version 4
 	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
