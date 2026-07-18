@@ -12,6 +12,7 @@ Tested:
     - TestConditional_ShouldSendTheBodyWhenTagDiffers: a changed representation is not a 304.
     - TestConditional_ShouldMatchWeakAndListedTags: weak forms and multi-value headers hit.
     - TestConditional_ShouldNotTagErrorResponses: a 404 is passed through untagged.
+    - TestConditional_ShouldOwnTheETagHeaderOutright: an inner handler's tag is overwritten on 200, removed on errors.
     - TestConditional_ShouldPassThroughNonReadMethods: If-None-Match means something else there.
     - TestConditional_ShouldPreserveHandlerHeaders: Cache-Control and friends survive.
     - TestConditional_ShouldTrackTheRepresentationAcrossChanges: the tag follows the data.
@@ -259,6 +260,38 @@ func TestConditional_ShouldPassThroughNonReadMethods(t *testing.T) {
 			assert.Empty(t, resp.Header().Get("ETag"))
 		})
 	}
+}
+
+func TestConditional_ShouldOwnTheETagHeaderOutright(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a handler that sets its own tag, which the package doc rules
+	// out: a backend version field is not a tag over the representation.
+	tagged := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", `"backend-version-7"`)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(representation))
+	})
+
+	notFound := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("ETag", `"backend-version-7"`)
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	// ACT
+	ok := call(t, tagged, http.MethodGet, "")
+	missing := call(t, notFound, http.MethodGet, "")
+
+	// ASSERT — on a 200 the wrapper's tag wins, because it is the only one
+	// computed from the bytes actually being sent. A tag that disagreed with the
+	// body would hand a client a stale representation it believes is fresh.
+	assert.Equal(t, Compute([]byte(representation)), ok.Header().Get("ETag"))
+
+	// On an error the tag is removed rather than passed through: "errors pass
+	// through untagged" is the contract, and a 404 carrying a cacheable-looking
+	// tag is exactly what it exists to prevent.
+	assert.Empty(t, missing.Header().Get("ETag"))
+	assert.Equal(t, http.StatusNotFound, missing.Code)
 }
 
 func TestConditional_ShouldPreserveHandlerHeaders(t *testing.T) {

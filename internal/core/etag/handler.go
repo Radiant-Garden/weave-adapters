@@ -69,16 +69,28 @@ func Conditional(next http.Handler) http.Handler {
 
 		body := captured.body.Bytes()
 
-		// Only a successful representation gets a tag. A 404 or a 502 has no
-		// stable identity to cache, and tagging one would invite a client to
-		// treat an error as a cacheable resource.
+		// Only a 200 gets a tag — exactly 200, not any 2xx. A 404 or a 502 has
+		// no stable identity to cache, and tagging one would invite a client to
+		// treat an error as a cacheable resource. A 203 or 206 is excluded for a
+		// duller reason: nothing here produces one, and a 206 would need
+		// Content-Range in the tag's identity to be correct. Widening this
+		// without that is how a partial response gets cached as a whole one.
 		if captured.status != http.StatusOK {
+			// Strip any tag the inner handler set. "Errors pass through
+			// untagged" is the documented contract, and this wrapper cannot
+			// vouch for a tag it did not compute.
+			w.Header().Del("ETag")
 			w.WriteHeader(captured.status)
 			_, _ = w.Write(body)
 
 			return
 		}
 
+		// Set, not Add: this wrapper's tag is the authoritative one, since it is
+		// the only tag computed from the bytes actually being sent. An inner
+		// handler that set its own — a backend version field, which the package
+		// doc rules out — is overwritten here rather than allowed to disagree
+		// with the body.
 		tag := Compute(body)
 		w.Header().Set("ETag", tag)
 
