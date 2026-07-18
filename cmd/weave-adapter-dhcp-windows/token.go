@@ -157,7 +157,18 @@ func runTokenGen(args []string, p *printer, now func() time.Time) error {
 
 	printGenerated(p, *path, token, entry)
 
-	return p.err
+	if p.err != nil {
+		// The label is persisted but its token never reached the operator, and
+		// nothing can recover it — the store keeps only a hash. Saying so, with
+		// the command that clears the way for a retry, is the difference between
+		// a recoverable mistake and a label that is mysteriously occupied.
+		return fmt.Errorf(
+			"token %q was saved to %s but could not be displayed, and cannot be recovered: "+
+				"run `token revoke --label %s`, then generate it again: %w",
+			entry.Label, *path, entry.Label, p.err)
+	}
+
+	return nil
 }
 
 // printGenerated reports a freshly minted token. This is the only moment the
@@ -232,16 +243,35 @@ func describeExpiry(entry auth.Entry, now time.Time) (expires, status string) {
 	expires = at.Format(time.DateOnly)
 
 	if entry.Expired(now) {
-		return expires, "EXPIRED " + formatDays(now.Sub(at)) + " ago"
+		return expires, "EXPIRED " + formatElapsedDays(now.Sub(at)) + " ago"
 	}
 
 	return expires, "expires in " + formatDays(at.Sub(now))
 }
 
-// formatDays renders a duration in whole days, rounding up so a token with any
-// time left never reads as "0 days".
+// formatDays renders time remaining in whole days, rounding up so a token with
+// any time left never reads as "0 days".
 func formatDays(d time.Duration) string {
-	days := int(math.Ceil(d.Hours() / 24))
+	return pluralDays(int(math.Ceil(d.Hours() / 24)))
+}
+
+// formatElapsedDays renders time already past in whole days, rounding down.
+//
+// Down, not up like formatDays: a token that expired an hour ago reading
+// "EXPIRED 1 day ago" points the operator at the wrong day's logs. Rounding down
+// alone would report "0 days ago" for that same hour, which reads as a rendering
+// bug, so under a day says so in words instead.
+func formatElapsedDays(d time.Duration) string {
+	days := int(d.Hours() / 24)
+	if days < 1 {
+		return "less than a day"
+	}
+
+	return pluralDays(days)
+}
+
+// pluralDays renders a whole number of days with the right noun.
+func pluralDays(days int) string {
 	if days == 1 {
 		return "1 day"
 	}

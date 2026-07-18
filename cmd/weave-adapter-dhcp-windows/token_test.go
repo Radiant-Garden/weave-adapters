@@ -12,10 +12,12 @@ Tested:
     - TestRunTokenGen_ShouldSetExpiryWhenRequested: --expires-in-days lands on the entry.
     - TestRunTokenGen_ShouldRejectInvalidInput: missing label, negative days, duplicate label.
     - TestRunTokenGen_ShouldNotWriteFileWhenLabelDuplicate: a rejected add leaves the store untouched.
+    - TestRunTokenGen_ShouldTellTheOperatorToRevokeWhenTheTokenCannotBeShown: a failed print names the way out.
   runTokenList
     - TestRunTokenList_ShouldReportEmptyStore: a fresh install is not an error.
     - TestRunTokenList_ShouldRenderExpiryStatus: never / expiring / expired columns.
     - TestRunTokenList_ShouldNeverPrintHashesOrTokens: list output carries no secret material.
+    - TestRunTokenList_ShouldRoundEachDirectionTowardsTheTruth: elapsed rounds down, remaining rounds up.
   runTokenRevoke
     - TestRunTokenRevoke_ShouldRemoveNamedToken: removes one, keeps the rest.
     - TestRunTokenRevoke_ShouldReturnErrorWhenLabelUnknown: a typo fails loudly.
@@ -28,8 +30,9 @@ Tested elsewhere:
   these tests cover only the CLI behavior layered on top.
 
 Declined:
-  printGenerated / describeExpiry / formatDays / isHelpVerb / skipHelp — pure
-  helpers, asserted through their commands' output rather than called directly.
+  printGenerated / describeExpiry / formatDays / formatElapsedDays / pluralDays /
+  isHelpVerb / skipHelp — pure helpers, asserted through their commands' output
+  rather than called directly.
 
 Additional Remarks:
   Every test uses t.TempDir() and an explicit clock, so no test touches the
@@ -43,6 +46,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -290,6 +294,63 @@ func TestRunTokenList_ShouldRenderExpiryStatus(t *testing.T) {
 	assert.Contains(t, out, "expires in 3 days")
 	assert.Contains(t, out, "EXPIRED 2 days ago")
 }
+
+func TestRunTokenList_ShouldRoundEachDirectionTowardsTheTruth(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the fractional cases whole-day fixtures cannot distinguish:
+	// exact multiples of 24h render the same however the rounding goes.
+	path := tokenFile(t)
+	store := &auth.Store{Tokens: []auth.Entry{
+		{Label: "just-gone", Hash: auth.Hash("a"), CreatedAt: cliClock, ExpiresAt: auth.NewExpiry(cliClock.Add(-time.Hour))},
+		{Label: "at-boundary", Hash: auth.Hash("b"), CreatedAt: cliClock, ExpiresAt: auth.NewExpiry(cliClock)},
+		{Label: "nearly-gone", Hash: auth.Hash("c"), CreatedAt: cliClock, ExpiresAt: auth.NewExpiry(cliClock.Add(time.Hour))},
+	}}
+	require.NoError(t, store.Save(path))
+
+	// ACT
+	out, err := runTokenCLI(t, "list", "--file", path)
+	require.NoError(t, err)
+
+	// ASSERT — rounding an hour up to "1 day ago" points the operator at the
+	// wrong day's logs, and rounding it down to "0 days ago" reads as a
+	// rendering bug. Time remaining still rounds up, so a live token never
+	// reports "0 days".
+	assert.Contains(t, out, "EXPIRED less than a day ago")
+	assert.NotContains(t, out, "EXPIRED 1 day ago")
+	assert.NotContains(t, out, "EXPIRED 0 days ago")
+	assert.Contains(t, out, "expires in 1 day")
+}
+
+func TestRunTokenGen_ShouldTellTheOperatorToRevokeWhenTheTokenCannotBeShown(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a writer that fails partway, standing in for a broken pipe or a
+	// full disk after the store was already written.
+	path := tokenFile(t)
+
+	// ACT
+	err := runToken([]string{"gen", "--label", "weave-prod", "--file", path}, failingWriter{}, fixedNow())
+
+	// ASSERT — the label is occupied and its token is gone for good, so the
+	// error has to name the way out rather than just reporting the write.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot be recovered")
+	assert.Contains(t, err.Error(), "token revoke --label weave-prod")
+
+	// The entry really is on disk: this is guidance for a real state, not a
+	// hypothetical one.
+	store, loadErr := auth.Load(path)
+	require.NoError(t, loadErr)
+
+	_, found := store.Find("weave-prod")
+	assert.True(t, found)
+}
+
+// failingWriter fails every write, like a closed pipe.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("broken pipe") }
 
 func TestRunTokenList_ShouldNeverPrintHashesOrTokens(t *testing.T) {
 	t.Parallel()
