@@ -58,8 +58,22 @@ tasks:
       #     remote code should not execute on an internal host, and ci.yml
       #     already scans on ubuntu.
       - task: build-windows
-      - task: test
+      - task: test:windows
       - task: smoke:windows
+
+  test:windows:
+    desc: Run tests without the race detector (the WS2022 runner has no C toolchain)
+    cmds:
+      # No -race: the detector requires cgo, cgo requires a C compiler, and the
+      # runner carries only Go, Task and git. Asking infra to add mingw-w64 to
+      # a locked-down internal host would buy a signal ubuntu already reports
+      # on every push -- data races are not a Windows-specific behaviour. What
+      # this run is here to catch is path handling, file locking and process
+      # semantics, and those need no detector.
+      #
+      # -shuffle=on is kept: it needs no cgo and order-dependent tests are
+      # exactly the kind of thing that surfaces on one platform and not another.
+      - go test -shuffle=on ./...
 
   smoke:windows:
     desc: Run the built .exe on this Windows host and verify it serves (WS2022 only)
