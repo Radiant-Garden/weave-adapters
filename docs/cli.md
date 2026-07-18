@@ -24,11 +24,17 @@ $ weave-adapter-dhcp-windows --port 8444
 | `--config` | string | none | Path to a TOML config file |
 | `--log-severity` | string | `info` | Log level: `debug`, `info`, `warn`, `error` |
 | `--disable-https` | bool | `true` | Must stay `true` — HTTPS is not implemented yet, so `false` is a startup error rather than a silent no-op |
+| `--auth-tokens-file` | string | `tokens.toml` | Path to the bearer token store, read once at startup |
+| `--disable-auth` | bool | `false` | Development only: serves every route unauthenticated, and says so loudly at startup (`SYS-006`) |
 
 Configuration resolves **flags > environment > config file > defaults**.
 Environment variables use the `WEAVE_ADAPTER_` prefix: `WEAVE_ADAPTER_PORT`,
 `WEAVE_ADAPTER_LOG_SEVERITY`, `WEAVE_ADAPTER_DISABLE_HTTPS`. See
 [`config.example.toml`](../config.example.toml) for a documented sample.
+
+Startup fails if authentication is on and the token store is missing or empty;
+the error names the command that fixes it. See
+[token-management.md](token-management.md).
 
 The adapter shuts down gracefully on Ctrl+C (`os.Interrupt`) or `SIGTERM`,
 draining in-flight requests first.
@@ -39,6 +45,7 @@ draining in-flight requests first.
 |---|---|---|
 | `GET /api/v1/health` | none | Status, version, uptime, per-component detail |
 | `GET /openapi.yaml` | none | Reserved; returns 404 until the spec lands |
+| everything else | bearer | `401` without a valid token — including paths that match no route |
 
 `/api/v1/health` returns `200` when healthy or unhealthy and `503` when
 unavailable, so a readiness probe can key on the status code alone.

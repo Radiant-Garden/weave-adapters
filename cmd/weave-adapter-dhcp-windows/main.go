@@ -15,11 +15,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/radiantgarden/weave-adapters/internal/core/auth"
 	"github.com/radiantgarden/weave-adapters/internal/core/config"
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 	"github.com/radiantgarden/weave-adapters/internal/core/health"
 	"github.com/radiantgarden/weave-adapters/internal/core/httpserver"
+	"github.com/radiantgarden/weave-adapters/internal/core/middleware"
 	"github.com/radiantgarden/weave-adapters/internal/core/observability"
 )
 
@@ -97,8 +99,46 @@ func run(ctx context.Context, args []string) error {
 	// panics on a contract violation — so by this line the catalog is known good.
 	events.Emit(ctx, catalog.SYS001, "version", version)
 
+	authMiddleware, err := buildAuth(ctx, cfg)
+	if err != nil {
+		return err
+	}
+
 	addr := fmt.Sprintf(":%d", cfg.Port)
-	srv := httpserver.New(addr, health.NewHandler(version, started))
+	srv := httpserver.New(addr, health.NewHandler(version, started), authMiddleware...)
 
 	return srv.Run(ctx)
+}
+
+// buildAuth loads the token store and returns the authentication middleware, or
+// no middleware at all when auth is disabled.
+//
+// Tokens are read once, here: rotation is restart-only by design, so there is
+// no watcher and no reload path.
+func buildAuth(ctx context.Context, cfg *config.Config) ([]middleware.Middleware, error) {
+	if cfg.DisableAuth {
+		// Loud, and cataloged rather than a bare log line: a server running
+		// wide open is exactly the state an operator must be able to find
+		// later.
+		events.Emit(ctx, catalog.SYS006)
+
+		return nil, nil
+	}
+
+	store, err := auth.Load(cfg.AuthTokensFile)
+	if err != nil {
+		return nil, fmt.Errorf("loading tokens from %q (run `token gen --label <name>` to create one): %w",
+			cfg.AuthTokensFile, err)
+	}
+
+	verifier := auth.NewVerifier(store.Tokens)
+	if verifier.Len() == 0 {
+		// An empty allow-list would reject every request, which looks like a
+		// bug to whoever is on call. Fail at startup, where the message can say
+		// what to do.
+		return nil, fmt.Errorf("no tokens configured in %q: run `token gen --label <name>` or set disableAuth",
+			cfg.AuthTokensFile)
+	}
+
+	return []middleware.Middleware{auth.Bearer(verifier, httpserver.Unauthenticated)}, nil
 }

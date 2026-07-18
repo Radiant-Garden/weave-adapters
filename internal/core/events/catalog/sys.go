@@ -21,6 +21,8 @@ const (
 	SYS004 events.EventID = "SYS-004"
 	// SYS005 is emitted when the process fails to start.
 	SYS005 events.EventID = "SYS-005"
+	// SYS006 is emitted at startup when authentication is disabled.
+	SYS006 events.EventID = "SYS-006"
 )
 
 func init() {
@@ -91,5 +93,17 @@ func init() {
 		Troubleshooting: "The process did not start. Read the error field. Most often it is a " +
 			"config problem: check the config file, WEAVE_ADAPTER_* env vars, and flags. " +
 			"Validate the port range and logSeverity value, then re-run.",
+	})
+
+	events.Register(&events.Event{
+		ID:              SYS006,
+		Level:           slog.LevelWarn,
+		MessageTemplate: "authentication disabled",
+		Description: "The adapter started with disableAuth set: every route except health is open to anyone " +
+			"who can reach the port.",
+		Category:        events.CategorySystem.String(),
+		Topic:           "Lifecycle",
+		Example:         `{"eventId":"SYS-006","data":{}}`,
+		Troubleshooting: "Development-only setting. Unset disableAuth and configure a token (`token gen --label <name>`) before this host is reachable by anything but you.",
 	})
 }

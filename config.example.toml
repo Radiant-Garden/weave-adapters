@@ -14,3 +14,12 @@ disableHttps = true
 
 # Log level: debug | info | warn | error
 logSeverity = "info"
+
+# Path to the bearer token store managed by `weave-adapter-dhcp-windows token`.
+# Read once at startup — adding or revoking a token needs a restart.
+# Startup fails if this file is missing or holds no tokens.
+authTokensFile = "tokens.toml"
+
+# Development only. Serves every route unauthenticated and says so loudly at
+# startup (SYS-006). Never set this on a host anything else can reach.
+disableAuth = false

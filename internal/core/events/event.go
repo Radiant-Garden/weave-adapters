@@ -65,12 +65,13 @@ type ResponseCode string
 // meaning in internal/core/apierror.
 //
 // Only codes with a live emitter exist. The rest of the taxonomy documented in
-// 02-shared-core.md (validation-failed, unauthorized, conflict,
-// precondition-failed, backend-*) lands with the code that returns it —
-// unauthorized with the auth middleware, the backend codes with the first
-// backend client. A registered code nobody emits is a ghost event, which
+// 02-shared-core.md (validation-failed, conflict, precondition-failed,
+// backend-*) lands with the code that returns it — the backend codes with the
+// first backend client. A registered code nobody emits is a ghost event, which
 // .claude/guidelines/event-logging.md rules out.
 const (
+	// CodeUnauthorized — authentication was missing or invalid (401).
+	CodeUnauthorized ResponseCode = "unauthorized"
 	// CodeNotFound — the addressed resource does not exist (404).
 	CodeNotFound ResponseCode = "not-found"
 	// CodeInternal — an unexpected adapter fault (500).

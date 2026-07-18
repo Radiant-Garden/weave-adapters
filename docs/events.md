@@ -42,6 +42,101 @@
 
 **Troubleshooting:** A handler bug caused a panic. Read the stack field, reproduce via method+path, and fix the root cause (often a nil dereference or out-of-range index). Correlate other events by requestId.
 
+## API-020 — request rejected: no credential
+
+- **Level:** WARN
+- **Category / Topic:** API / Auth
+- **External source:** yes
+- **Description:** A request reached an authenticated route with no Authorization header.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| subject | string | false | Authenticated caller (empty until auth lands). |
+| role | string | false | Caller role (empty until auth). |
+| remoteAddr | string | true | Client address. |
+
+**Client response**
+
+- **Problem type:** `weave-adapters:unauthorized`
+- **Detail:** Authentication is required. Send 'Authorization: Bearer <token>'.
+- **Impacts:** `request_rejected`
+
+**Example:** `{"eventId":"API-020","caller":{"subject":"","role":"","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/leases"},"data":{}}`
+
+**Troubleshooting:** Expected from an unconfigured client or a probe. If weave is the caller, link a credential set to the service; see docs/token-management.md.
+
+## API-021 — request rejected: malformed credential
+
+- **Level:** WARN
+- **Category / Topic:** API / Auth
+- **External source:** yes
+- **Description:** A request carried an Authorization header that is not 'Bearer <token>'.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| subject | string | false | Authenticated caller (empty until auth lands). |
+| role | string | false | Caller role (empty until auth). |
+| remoteAddr | string | true | Client address. |
+| scheme | string | false | The scheme the caller presented, truncated; "(none)" when the header had no scheme. Never the credential. |
+
+**Client response**
+
+- **Problem type:** `weave-adapters:unauthorized`
+- **Detail:** Authorization must use the Bearer scheme, e.g. 'Authorization: Bearer <token>'.
+- **Impacts:** `request_rejected`
+
+**Example:** `{"eventId":"API-021","caller":{"subject":"","role":"","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/leases"},"data":{"scheme":"(none)"}}`
+
+**Troubleshooting:** Most often weave's apiToken holds a bare token: its credential store sends the field verbatim and does not prepend a scheme, so the stored value must read 'Bearer <token>'. See docs/token-management.md.
+
+## API-022 — request rejected: unknown credential
+
+- **Level:** WARN
+- **Category / Topic:** API / Auth
+- **External source:** yes
+- **Description:** A bearer token was presented that matches no configured token.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| subject | string | false | Authenticated caller (empty until auth lands). |
+| role | string | false | Caller role (empty until auth). |
+| remoteAddr | string | true | Client address. |
+
+**Client response**
+
+- **Problem type:** `weave-adapters:unauthorized`
+- **Detail:** The bearer token is not valid.
+- **Impacts:** `request_rejected`
+
+**Example:** `{"eventId":"API-022","caller":{"subject":"","role":"","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/leases"},"data":{}}`
+
+**Troubleshooting:** Check the token is listed by `weave-adapter-dhcp-windows token list` and that the adapter was restarted after it was added — tokens are read only at startup. Repeated hits from one address are credential probing.
+
+## API-023 — request rejected: expired credential
+
+- **Level:** WARN
+- **Category / Topic:** API / Auth
+- **External source:** yes
+- **Description:** A recognized bearer token was rejected because its expiry has passed.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| subject | string | false | Authenticated caller (empty until auth lands). |
+| role | string | false | Caller role (empty until auth). |
+| remoteAddr | string | true | Client address. |
+| label | string | true | Label of the expired token. |
+| expiredAt | string | true | When the token expired (RFC 3339). |
+
+**Client response**
+
+- **Problem type:** `weave-adapters:unauthorized`
+- **Detail:** The bearer token is not valid.
+- **Impacts:** `request_rejected`
+
+**Example:** `{"eventId":"API-023","caller":{"subject":"","role":"","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/leases"},"data":{"label":"weave-prod","expiredAt":"2026-10-16T09:02:36Z"}}`
+
+**Troubleshooting:** Mint a replacement with `token gen --label <name> --expires-in-days N`, give it to weave, then restart. The response is identical to an unknown token by design, so this event is the only signal.
+
 ## API-900 — request rejected: not found
 
 - **Level:** DEBUG
@@ -170,3 +265,13 @@
 **Example:** `{"eventId":"SYS-005","data":{"error":"loading config: port must be between 1 and 65535, got 0"}}`
 
 **Troubleshooting:** The process did not start. Read the error field. Most often it is a config problem: check the config file, WEAVE_ADAPTER_* env vars, and flags. Validate the port range and logSeverity value, then re-run.
+
+## SYS-006 — authentication disabled
+
+- **Level:** WARN
+- **Category / Topic:** SYS / Lifecycle
+- **Description:** The adapter started with disableAuth set: every route except health is open to anyone who can reach the port.
+
+**Example:** `{"eventId":"SYS-006","data":{}}`
+
+**Troubleshooting:** Development-only setting. Unset disableAuth and configure a token (`token gen --label <name>`) before this host is reachable by anything but you.

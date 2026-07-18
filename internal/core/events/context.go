@@ -6,14 +6,12 @@ import "context"
 // collisions with keys defined by other packages.
 type callerContextKey string
 
-const (
-	ctxCallerSubject    callerContextKey = "caller_subject"
-	ctxCallerRole       callerContextKey = "caller_role"
-	ctxCallerRemoteAddr callerContextKey = "caller_remote_addr"
-	ctxCallerRequestID  callerContextKey = "caller_request_id"
-	ctxCallerMethod     callerContextKey = "caller_method"
-	ctxCallerPath       callerContextKey = "caller_path"
-)
+// ctxCaller holds a *Caller rather than the fields individually, so an inner
+// middleware can enrich what an outer one later reads. Authentication runs
+// inside request logging but must appear on its audit line: with immutable
+// values, auth's context would be visible only to handlers beneath it, and the
+// API-010 line — the request audit record — would carry an empty subject.
+const ctxCaller callerContextKey = "caller"
 
 // Caller carries the identity and request metadata attached to ExternalSource
 // events. Middleware populates it from the inbound request; Emit reads it back.
@@ -30,14 +28,28 @@ type Caller struct {
 // metadata. The request-ID and auth middleware call this so ExternalSource
 // events can attach the caller/request groups.
 func WithCaller(ctx context.Context, c Caller) context.Context {
-	ctx = context.WithValue(ctx, ctxCallerSubject, c.Subject)
-	ctx = context.WithValue(ctx, ctxCallerRole, c.Role)
-	ctx = context.WithValue(ctx, ctxCallerRemoteAddr, c.RemoteAddr)
-	ctx = context.WithValue(ctx, ctxCallerRequestID, c.RequestID)
-	ctx = context.WithValue(ctx, ctxCallerMethod, c.Method)
-	ctx = context.WithValue(ctx, ctxCallerPath, c.Path)
+	stored := c
 
-	return ctx
+	return context.WithValue(ctx, ctxCaller, &stored)
+}
+
+// SetIdentity records the authenticated caller on the context established by
+// WithCaller, reporting whether there was one to record onto.
+//
+// It mutates in place so middleware that already ran — request logging, which
+// wraps authentication — observes the identity when it emits. The write happens
+// before the handler runs and nothing writes afterwards, so the later reads are
+// ordered after it without further synchronization.
+func SetIdentity(ctx context.Context, subject, role string) bool {
+	caller, ok := ctx.Value(ctxCaller).(*Caller)
+	if !ok || caller == nil {
+		return false
+	}
+
+	caller.Subject = subject
+	caller.Role = role
+
+	return true
 }
 
 // CallerFrom reads the caller metadata attached by WithCaller, returning zero
@@ -65,22 +77,15 @@ func EnsureCaller(ctx context.Context, fallback Caller) context.Context {
 	return WithCaller(ctx, fallback)
 }
 
-// callerFrom reads the caller metadata from the context (zero values if absent).
+// callerFrom reads the caller metadata from the context (zero values if
+// absent). It returns a copy, so a reader cannot alter what later events see.
 func callerFrom(ctx context.Context) Caller {
-	str := func(k callerContextKey) string {
-		v, _ := ctx.Value(k).(string)
-
-		return v
+	caller, ok := ctx.Value(ctxCaller).(*Caller)
+	if !ok || caller == nil {
+		return Caller{}
 	}
 
-	return Caller{
-		Subject:    str(ctxCallerSubject),
-		Role:       str(ctxCallerRole),
-		RemoteAddr: str(ctxCallerRemoteAddr),
-		RequestID:  str(ctxCallerRequestID),
-		Method:     str(ctxCallerMethod),
-		Path:       str(ctxCallerPath),
-	}
+	return *caller
 }
 
 // InternalActorCtx returns a context satisfying the ExternalSource contract for

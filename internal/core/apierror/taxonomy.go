@@ -22,13 +22,14 @@ type entry struct {
 // invent a second error shape.
 //
 // Entries exist only for codes something actually returns. The rest of the
-// vocabulary in 02-shared-core.md arrives with its emitter: unauthorized (401)
-// with the auth middleware, conflict/precondition (409/412) and the backend
-// codes (502/504) with the first backend client, 405/413/428 with the
-// middleware and ETag write side that produce them.
+// vocabulary in 02-shared-core.md arrives with its emitter:
+// conflict/precondition (409/412) and the backend codes (502/504) with the
+// first backend client, 405/413/428 with the middleware and ETag write side
+// that produce them.
 var taxonomy = map[events.ResponseCode]entry{
-	events.CodeNotFound: {status: http.StatusNotFound, title: "Not found"},
-	events.CodeInternal: {status: http.StatusInternalServerError, title: "Internal server error"},
+	events.CodeUnauthorized: {status: http.StatusUnauthorized, title: "Unauthorized"},
+	events.CodeNotFound:     {status: http.StatusNotFound, title: "Not found"},
+	events.CodeInternal:     {status: http.StatusInternalServerError, title: "Internal server error"},
 }
 
 // lookup returns the HTTP meaning of a response code. An unknown code resolves
@@ -54,6 +55,37 @@ func TypeFor(code events.ResponseCode) string {
 // TitleFor returns the problem+json title for a response code.
 func TitleFor(code events.ResponseCode) string {
 	return lookup(code).title
+}
+
+// New builds an error bound to any cataloged event, for packages that own their
+// own error events rather than using the constructors below — the auth
+// middleware owns API-02x, and adapters own their categories. The event must
+// declare a ResponseDetail and ResponseCode; fields are key/value pairs filling
+// its {{key}} placeholders.
+//
+// This is the seam that keeps one rejection to one event: the owning package
+// binds its own diagnostic rather than emitting its event and then asking a core
+// constructor to emit a second one.
+func New(id events.EventID, fields ...any) *Error {
+	return newError(id, pairsToMap(fields))
+}
+
+// pairsToMap turns Emit-style key/value pairs into a field map. An odd trailing
+// key is dropped rather than panicking: a malformed diagnostic must not take
+// down the request it was describing.
+func pairsToMap(pairs []any) map[string]any {
+	fields := make(map[string]any, len(pairs)/2)
+
+	for i := 0; i+1 < len(pairs); i += 2 {
+		key, ok := pairs[i].(string)
+		if !ok {
+			continue
+		}
+
+		fields[key] = pairs[i+1]
+	}
+
+	return fields
 }
 
 // NotFound reports an addressed resource that does not exist. resource is

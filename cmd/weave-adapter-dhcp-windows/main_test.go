@@ -8,15 +8,16 @@ Tested:
     - TestRun_ShouldServeHealthUntilContextCancelled: the wired binary serves health and shuts down cleanly.
     - TestRun_ShouldReturnErrorWhenConfigInvalid: a bad flag value fails startup before anything binds.
     - TestRun_ShouldReturnErrorWhenPortUnavailable: a port conflict fails startup rather than serving.
-
-Tested elsewhere:
-  Each wired component (config.Load, observability.Setup, httpserver.New/Run,
-  health.NewHandler) is unit-tested in its own package; the tests here cover only
-  what wiring adds — that the pieces are connected in the right order and that
-  every failure path returns instead of exiting.
+    - TestRun_ShouldRefuseToStartWithoutTokens: a missing or empty token store fails startup with a fix.
 
   isTokenCommand
     - TestIsTokenCommand_ShouldRecogniseOnlyTheTokenVerb: server args never route to the CLI.
+
+Tested elsewhere:
+  Each wired component (config.Load, observability.Setup, httpserver.New/Run,
+  health.NewHandler, auth.Bearer) is unit-tested in its own package; the tests
+  here cover only what wiring adds — that the pieces are connected in the right
+  order and that every failure path returns instead of exiting.
 
 Declined:
   main / runServer — signal.NotifyContext plus os.Exit cannot be exercised
@@ -42,6 +43,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -49,6 +51,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/radiantgarden/weave-adapters/internal/core/auth"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 	eventstest "github.com/radiantgarden/weave-adapters/internal/core/events/testing"
 	"github.com/radiantgarden/weave-adapters/internal/core/health"
@@ -69,6 +72,46 @@ func freePort(t *testing.T) int {
 	require.NoError(t, listener.Close())
 
 	return addr.Port
+}
+
+// tokenStore writes a token file holding one token and returns the path and the
+// token itself, so a server test can authenticate for real.
+func tokenStore(t *testing.T) (path, token string) {
+	t.Helper()
+
+	path = filepath.Join(t.TempDir(), "tokens.toml")
+
+	token, err := auth.Generate()
+	require.NoError(t, err)
+
+	store := &auth.Store{Tokens: []auth.Entry{{
+		Label:     "test-caller",
+		Hash:      auth.Hash(token),
+		CreatedAt: time.Now().UTC(),
+	}}}
+	require.NoError(t, store.Save(path))
+
+	return path, token
+}
+
+// statusOf issues a GET with an optional Authorization header and returns the
+// status code.
+func statusOf(t *testing.T, url, authHeader string) int {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
+	require.NoError(t, err)
+
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	return resp.StatusCode
 }
 
 // waitForListening blocks until run has emitted SYS-002.
@@ -122,9 +165,12 @@ func TestRun_ShouldServeHealthUntilContextCancelled(t *testing.T) {
 	t.Cleanup(cancel)
 
 	port := freePort(t)
+	tokensPath, token := tokenStore(t)
 	errCh := make(chan error, 1)
 
-	go func() { errCh <- run(ctx, []string{"--port", strconv.Itoa(port)}) }()
+	go func() {
+		errCh <- run(ctx, []string{"--port", strconv.Itoa(port), "--auth-tokens-file", tokensPath})
+	}()
 
 	waitForListening(t, rec)
 
@@ -142,7 +188,8 @@ func TestRun_ShouldServeHealthUntilContextCancelled(t *testing.T) {
 	raw, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 
-	// ASSERT — the config port, health handler, and middleware chain are wired.
+	// ASSERT — the config port, health handler, and middleware chain are wired,
+	// and health answers without a credential even though auth is enabled.
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	var body health.Response
@@ -151,6 +198,12 @@ func TestRun_ShouldServeHealthUntilContextCancelled(t *testing.T) {
 	assert.Equal(t, health.StatusHealthy, body.Status)
 	assert.Equal(t, version, body.Version)
 	assert.NotEmpty(t, resp.Header.Get("X-Request-Id"))
+
+	// A protected path rejects an anonymous caller and accepts the token.
+	base := "http://127.0.0.1:" + strconv.Itoa(port) + "/api/v1/leases"
+	assert.Equal(t, http.StatusUnauthorized, statusOf(t, base, ""))
+	assert.Equal(t, http.StatusNotFound, statusOf(t, base, "Bearer "+token),
+		"an authenticated caller should get past auth and reach the mux")
 
 	// Cancellation stands in for Ctrl+C, which main translates from a signal.
 	cancel()
@@ -191,8 +244,10 @@ func TestRun_ShouldReturnErrorWhenPortUnavailable(t *testing.T) {
 
 	t.Cleanup(func() { _ = held.Close() })
 
+	tokensPath, _ := tokenStore(t)
+
 	// ACT
-	err = run(t.Context(), []string{"--port", strconv.Itoa(port)})
+	err = run(t.Context(), []string{"--port", strconv.Itoa(port), "--auth-tokens-file", tokensPath})
 
 	// ASSERT — a bind conflict is a startup error, not a silent no-op.
 	require.Error(t, err)

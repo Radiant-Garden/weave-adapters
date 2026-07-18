@@ -36,19 +36,26 @@ type Server struct {
 
 // New builds a Server listening on addr with the given health handler mounted
 // at GET /api/v1/health, wrapped in the standard middleware chain (recovery →
-// request-ID → logging).
-func New(addr string, healthHandler http.Handler) *Server {
+// request-ID → logging → inner).
+//
+// inner are middlewares applied inside the standard chain — authentication in
+// practice. They run after logging so a rejected request still produces its
+// API-010 audit line, and they see the caller context the request-ID middleware
+// established.
+func New(addr string, healthHandler http.Handler, inner ...middleware.Middleware) *Server {
 	mux := http.NewServeMux()
 	mux.Handle("GET "+healthPath, healthHandler)
 	mux.HandleFunc("GET "+openAPIPath, serveOpenAPI)
 
-	handler := middleware.Chain(mux,
+	standard := []middleware.Middleware{
 		middleware.Recovery,
 		middleware.RequestID,
 		// Health is polled frequently; recover and correlate it, but don't emit
 		// an API-010 audit line for every poll.
 		middleware.Logging(skipHealthPolls),
-	)
+	}
+
+	handler := middleware.Chain(mux, append(standard, inner...)...)
 
 	return &Server{
 		httpServer: &http.Server{
@@ -63,6 +70,17 @@ func New(addr string, healthHandler http.Handler) *Server {
 // endpoint).
 func skipHealthPolls(r *http.Request) bool {
 	return r.URL.Path == healthPath
+}
+
+// Unauthenticated reports whether r addresses a route that must stay open:
+// health, because weave polls it to decide whether the adapter is reachable at
+// all and an auth failure there would read as an outage, and the reserved spec
+// route, which carries nothing worth protecting.
+//
+// Everything else authenticates, including paths that match no route — an
+// unauthenticated caller learns nothing about which routes exist.
+func Unauthenticated(r *http.Request) bool {
+	return r.URL.Path == healthPath || r.URL.Path == openAPIPath
 }
 
 // serveOpenAPI answers the reserved spec route. The document itself is M2

@@ -5,13 +5,6 @@ how to rotate one without dropping requests.
 
 For the bare flag list, see [cli.md](cli.md#token-management).
 
-> **Status — what ships today.** Minting, storage, listing and revocation are
-> live: you can create tokens now and they are stored as described below. The
-> adapter does **not yet check them** — the auth middleware that verifies the
-> `Authorization` header, enforces expiry, and emits auth-outcome events lands in
-> M2 Phase 2. Until then every endpoint is unauthenticated. Sections describing
-> request-time behavior are marked **(Phase 2)**.
-
 ## The short version
 
 ```console
@@ -65,8 +58,8 @@ createdAt = 2026-07-18T09:02:36Z
 expiresAt = '2026-10-16T09:02:36Z'
 ```
 
-On each request the adapter will hash the presented token and compare it
-constant-time against these **(Phase 2)**. Nothing in the file can be turned
+On each request the adapter hashes the presented token and compares it
+constant-time against these. Nothing in the file can be turned
 back into a credential, so **leaking `tokens.toml` does not leak access** — an
 attacker would have to reverse SHA-256.
 
@@ -115,7 +108,7 @@ credentials.
 ### The label is not just a comment
 
 Every label becomes the **caller subject** on every event the token's requests
-emit **(Phase 2)**. That is what makes an adapter's log answer "who did this",
+emit. That is what makes an adapter's log answer "who did this",
 and it is why a failed-auth event can name which token was rejected without ever
 logging the secret:
 
@@ -140,8 +133,14 @@ complete header value and sends it **verbatim** — it does not prepend `Bearer 
 for you. A bare token there arrives as `Authorization: wadapt_…`, which the
 adapter rejects.
 
-If that happens, the 401 will say so explicitly rather than making you guess —
-its `detail` names the expected format **(Phase 2)**. But it is easier to get
+If that happens the 401 says so explicitly rather than making you guess:
+
+```json
+{"type":"weave-adapters:unauthorized","status":401,
+ "detail":"Authorization must use the Bearer scheme, e.g. 'Authorization: Bearer <token>'."}
+```
+
+But it is easier to get
 right the first time, which is why `token gen` prints the whole header line.
 
 ## Rotating a token
@@ -164,16 +163,16 @@ does have such a window.
 
 ## Expiry
 
-Expiry is optional and opt-in per token. It is recorded today and enforced at
-request time from **Phase 2**:
+Expiry is optional and opt-in per token, and enforced at request time:
 
 ```console
 $ weave-adapter-dhcp-windows token gen --label weave-prod --expires-in-days 90
 ```
 
-An expired token will be rejected with its own distinct event — never conflated
-with an unknown token, so an operator debugging a sudden 401 sees "expired"
-rather than "no such token" **(Phase 2)**.
+An expired token is rejected with its own event, `API-023`, carrying the label
+and expiry date. The **response** is byte-identical to an unknown token: telling
+the caller "expired" would confirm that a guessed token exists, so the event is
+the only place the distinction appears.
 
 > **Know what you are opting into.** An expiry means a working deployment starts
 > failing at a date, and nothing reaches out to warn you beforehand. `token
@@ -189,11 +188,28 @@ is the safer default for a service-to-service credential nobody is watching.
 - **Back up `tokens.toml`** with your config. It holds no secrets, but losing it
   means every token is gone and weave is locked out until you mint and
   distribute a new one.
-- **A corrupt store is a hard failure**, never treated as "no tokens". The CLI
-  refuses to overwrite a file it cannot parse, and the adapter will refuse to
-  start rather than come up with an empty allow-list **(Phase 2)**.
+- **A corrupt or empty store is a hard failure**, never treated as "no tokens".
+  The CLI refuses to overwrite a file it cannot parse, and the adapter refuses
+  to start rather than come up with an empty allow-list that would reject every
+  request.
 - **`token list` output is safe to share** — no tokens, no hashes.
 - **Nothing logs a token.** Not on success, not on failure, not at debug level.
+
+## What the adapter rejects
+
+| Situation | Event | Response detail |
+|---|---|---|
+| No `Authorization` header | `API-020` | "Authentication is required. Send 'Authorization: Bearer <token>'." |
+| Wrong or missing scheme | `API-021` | "Authorization must use the Bearer scheme…" |
+| Token not configured | `API-022` | "The bearer token is not valid." |
+| Token expired | `API-023` | "The bearer token is not valid." |
+
+All four are `401` problem+json and log at WARN. Only `/api/v1/health` and
+`/openapi.yaml` skip authentication — health because weave polls it to decide
+whether the adapter is reachable at all, where a 401 would read as an outage.
+
+A path that matches no route still authenticates first, so an anonymous caller
+cannot map which routes exist.
 
 ## See also
 

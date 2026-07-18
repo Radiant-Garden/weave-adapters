@@ -20,13 +20,16 @@ import (
 )
 
 const (
-	envPrefix       = "WEAVE_ADAPTER_"
-	envPort         = envPrefix + "PORT"
-	envDisableHTTPS = envPrefix + "DISABLE_HTTPS"
-	envLogSeverity  = envPrefix + "LOG_SEVERITY"
+	envPrefix         = "WEAVE_ADAPTER_"
+	envPort           = envPrefix + "PORT"
+	envDisableHTTPS   = envPrefix + "DISABLE_HTTPS"
+	envLogSeverity    = envPrefix + "LOG_SEVERITY"
+	envAuthTokensFile = envPrefix + "AUTH_TOKENS_FILE"
+	envDisableAuth    = envPrefix + "DISABLE_AUTH"
 
-	defaultPort        = 8444
-	defaultLogSeverity = "info"
+	defaultPort           = 8444
+	defaultLogSeverity    = "info"
+	defaultAuthTokensFile = "tokens.toml"
 
 	minPort = 1
 	maxPort = 65535
@@ -45,6 +48,12 @@ type Config struct {
 	DisableHTTPS bool `koanf:"disableHttps"`
 	// LogSeverity is the log level: debug, info, warn, or error.
 	LogSeverity string `koanf:"logSeverity" validate:"oneof=debug info warn error"`
+	// AuthTokensFile is the path to the token store the `token` subcommand
+	// manages. It is read once at startup; changes need a restart.
+	AuthTokensFile string `koanf:"authTokensFile"`
+	// DisableAuth turns off bearer authentication. Development only — it leaves
+	// every route open to anyone who can reach the port.
+	DisableAuth bool `koanf:"disableAuth"`
 }
 
 // Load reads configuration from flags, environment, an optional TOML file, and
@@ -89,9 +98,11 @@ func load(args []string, environ func() []string) (*Config, error) {
 	}
 
 	cfg := &Config{
-		Port:         k.Int("port"),
-		DisableHTTPS: k.Bool("disableHttps"),
-		LogSeverity:  k.String("logSeverity"),
+		Port:           k.Int("port"),
+		DisableHTTPS:   k.Bool("disableHttps"),
+		LogSeverity:    k.String("logSeverity"),
+		AuthTokensFile: k.String("authTokensFile"),
+		DisableAuth:    k.Bool("disableAuth"),
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -104,9 +115,11 @@ func load(args []string, environ func() []string) (*Config, error) {
 // defaults returns the built-in configuration values.
 func defaults() map[string]any {
 	return map[string]any{
-		"port":         defaultPort,
-		"disableHttps": true,
-		"logSeverity":  defaultLogSeverity,
+		"port":           defaultPort,
+		"disableHttps":   true,
+		"logSeverity":    defaultLogSeverity,
+		"authTokensFile": defaultAuthTokensFile,
+		"disableAuth":    false,
 	}
 }
 
@@ -118,6 +131,8 @@ func parseFlags(args []string) (configPath string, overrides map[string]any, err
 	port := fs.Int("port", 0, "TCP listen port")
 	disableHTTPS := fs.Bool("disable-https", false, "disable HTTPS (must be true in M1)")
 	logSeverity := fs.String("log-severity", "", "log level: debug|info|warn|error")
+	authTokensFile := fs.String("auth-tokens-file", "", "path to the bearer token store")
+	disableAuth := fs.Bool("disable-auth", false, "disable bearer authentication (development only)")
 	fs.StringVar(&configPath, "config", "", "path to a TOML config file")
 
 	if err = fs.Parse(args); err != nil {
@@ -134,6 +149,10 @@ func parseFlags(args []string) (configPath string, overrides map[string]any, err
 			overrides["disableHttps"] = *disableHTTPS
 		case "log-severity":
 			overrides["logSeverity"] = *logSeverity
+		case "auth-tokens-file":
+			overrides["authTokensFile"] = *authTokensFile
+		case "disable-auth":
+			overrides["disableAuth"] = *disableAuth
 		}
 	})
 
@@ -150,6 +169,10 @@ func transformEnv(key, value string) (string, any) {
 		return "disableHttps", value
 	case envLogSeverity:
 		return "logSeverity", value
+	case envAuthTokensFile:
+		return "authTokensFile", value
+	case envDisableAuth:
+		return "disableAuth", value
 	default:
 		return "", nil
 	}
@@ -176,6 +199,12 @@ func (c *Config) Validate() error {
 
 	if !c.DisableHTTPS {
 		errs = append(errs, errors.New("disableHttps must be true: HTTPS is not implemented in M1"))
+	}
+
+	// An empty path with auth on would send the token loader looking at "", so
+	// catch it here where the message can name the key.
+	if !c.DisableAuth && c.AuthTokensFile == "" {
+		errs = append(errs, errors.New("authTokensFile must be set unless disableAuth is true"))
 	}
 
 	return errors.Join(errs...)

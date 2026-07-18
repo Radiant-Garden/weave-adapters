@@ -15,6 +15,10 @@ Tested:
 
   Validate / fieldError
     - TestValidate_ShouldReportProblems: valid and invalid configs, including all errors joined.
+    - TestLoad_ShouldDefaultAuthSettings: auth is on by default, pointing at tokens.toml.
+    - TestLoad_ShouldResolveAuthTokensFilePrecedence: flag beats env for the token path.
+    - TestValidate_ShouldRejectEmptyTokensFileWhenAuthEnabled: no silent empty allow-list.
+    - TestValidate_ShouldAllowEmptyTokensFileWhenAuthDisabled: the dev hatch needs no file.
 
 Tested elsewhere:
 
@@ -190,11 +194,11 @@ func TestValidate_ShouldReportProblems(t *testing.T) {
 	}{
 		{
 			name: "valid config",
-			cfg:  Config{Port: 8444, DisableHTTPS: true, LogSeverity: "info"},
+			cfg:  Config{Port: 8444, DisableHTTPS: true, LogSeverity: "info", AuthTokensFile: "tokens.toml"},
 		},
 		{
 			name:    "port too low",
-			cfg:     Config{Port: 0, DisableHTTPS: true, LogSeverity: "info"},
+			cfg:     Config{Port: 0, DisableHTTPS: true, LogSeverity: "info", AuthTokensFile: "tokens.toml"},
 			wantErr: []string{"port must be between"},
 		},
 		{
@@ -240,4 +244,58 @@ func TestValidate_ShouldReportProblems(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoad_ShouldDefaultAuthSettings(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE / ACT
+	cfg, err := load(nil, func() []string { return nil })
+
+	// ASSERT — auth is on by default; the token file is the one the CLI writes.
+	require.NoError(t, err)
+	assert.Equal(t, defaultAuthTokensFile, cfg.AuthTokensFile)
+	assert.False(t, cfg.DisableAuth)
+}
+
+func TestLoad_ShouldResolveAuthTokensFilePrecedence(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — env set, flag overrides it.
+	environ := func() []string { return []string{envAuthTokensFile + "=/from/env.toml"} }
+
+	// ACT
+	fromEnv, err := load(nil, environ)
+	require.NoError(t, err)
+
+	fromFlag, err := load([]string{"--auth-tokens-file", "/from/flag.toml"}, environ)
+	require.NoError(t, err)
+
+	// ASSERT
+	assert.Equal(t, "/from/env.toml", fromEnv.AuthTokensFile)
+	assert.Equal(t, "/from/flag.toml", fromFlag.AuthTokensFile)
+}
+
+func TestValidate_ShouldRejectEmptyTokensFileWhenAuthEnabled(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — auth on, but nowhere to read tokens from.
+	cfg := Config{Port: 8444, DisableHTTPS: true, LogSeverity: "info", AuthTokensFile: ""}
+
+	// ACT
+	err := cfg.Validate()
+
+	// ASSERT — caught here, where the message can name the key.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "authTokensFile must be set")
+}
+
+func TestValidate_ShouldAllowEmptyTokensFileWhenAuthDisabled(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	cfg := Config{Port: 8444, DisableHTTPS: true, LogSeverity: "info", DisableAuth: true}
+
+	// ACT / ASSERT — the dev escape hatch needs no token file.
+	require.NoError(t, cfg.Validate())
 }

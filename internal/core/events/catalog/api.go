@@ -7,8 +7,9 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 )
 
-// API event IDs. Range 010–019 is reserved for the request lifecycle; 900–999
-// for client-facing errors, each backing one problem+json response.
+// API event IDs. Range 010–019 is reserved for the request lifecycle, 020–029
+// for auth outcomes, and 900–999 for general client-facing errors — each of the
+// latter two backing one problem+json response.
 //
 // Only errors with a live emitter are registered. The rest of the taxonomy in
 // 02-shared-core.md arrives with the code that returns it: unauthorized with
@@ -19,6 +20,16 @@ const (
 	API010 events.EventID = "API-010"
 	// API011 is emitted when a handler panics and recovery returns 500.
 	API011 events.EventID = "API-011"
+
+	// API020 is emitted when a request carries no Authorization header.
+	API020 events.EventID = "API-020"
+	// API021 is emitted when the Authorization header uses a scheme other than
+	// Bearer, or is otherwise malformed.
+	API021 events.EventID = "API-021"
+	// API022 is emitted when a bearer token matches no configured token.
+	API022 events.EventID = "API-022"
+	// API023 is emitted when a bearer token is recognized but has expired.
+	API023 events.EventID = "API-023"
 
 	// API900 backs a 404 not-found response.
 	API900 events.EventID = "API-900"
@@ -40,6 +51,7 @@ var callerFields = []events.FieldDef{
 // shape, and a missing ResponseCode is impossible rather than merely caught.
 type clientError struct {
 	id       events.EventID
+	topic    string
 	level    slog.Level
 	message  string
 	detail   string // ResponseDetail: curated, client-visible, {{key}} placeholders
@@ -50,11 +62,60 @@ type clientError struct {
 	fix      string
 }
 
-// clientErrors is the API-9xx range. A 4xx cause is logged at debug (the client
-// misbehaved, not the adapter); a 5xx at error (the operator must act).
+// clientErrors covers both the auth-outcome range (020–029) and the general
+// client-error range (900–999). A rejected credential is WARN — the guideline's
+// severity table puts "auth failure/denied" there, because an operator should
+// plan corrective action — while an ordinary 4xx is DEBUG and a 5xx is ERROR.
+//
+// **The four auth failures are four events but not four bodies.** Each has its
+// own troubleshooting, so the guideline's merge test keeps them separate. Their
+// responses differ only where the difference tells the caller something it
+// already knows: that it sent no header (API-020), or the wrong scheme
+// (API-021). Unknown (API-022) and expired (API-023) return byte-identical
+// bodies on purpose — distinguishing them would confirm to an attacker that a
+// guessed token exists, turning the endpoint into a validity oracle.
 var clientErrors = []clientError{
 	{
-		id: API900, level: slog.LevelDebug, message: "request rejected: not found",
+		id: API020, topic: "Auth", level: slog.LevelWarn, message: "request rejected: no credential",
+		detail: "Authentication is required. Send 'Authorization: Bearer <token>'.", code: events.CodeUnauthorized,
+		example:  `{"eventId":"API-020","caller":{"subject":"","role":"","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/leases"},"data":{}}`,
+		describe: "A request reached an authenticated route with no Authorization header.",
+		fix: "Expected from an unconfigured client or a probe. If weave is the caller, link a credential set to " +
+			"the service; see docs/token-management.md.",
+	},
+	{
+		id: API021, topic: "Auth", level: slog.LevelWarn, message: "request rejected: malformed credential",
+		detail: "Authorization must use the Bearer scheme, e.g. 'Authorization: Bearer <token>'.", code: events.CodeUnauthorized,
+		fields: []events.FieldDef{
+			{Name: "scheme", Type: "string", Required: false, Description: "The scheme the caller presented, truncated; \"(none)\" when the header had no scheme. Never the credential."},
+		},
+		example:  `{"eventId":"API-021","caller":{"subject":"","role":"","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/leases"},"data":{"scheme":"(none)"}}`,
+		describe: "A request carried an Authorization header that is not 'Bearer <token>'.",
+		fix: "Most often weave's apiToken holds a bare token: its credential store sends the field verbatim and does " +
+			"not prepend a scheme, so the stored value must read 'Bearer <token>'. See docs/token-management.md.",
+	},
+	{
+		id: API022, topic: "Auth", level: slog.LevelWarn, message: "request rejected: unknown credential",
+		detail: "The bearer token is not valid.", code: events.CodeUnauthorized,
+		example:  `{"eventId":"API-022","caller":{"subject":"","role":"","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/leases"},"data":{}}`,
+		describe: "A bearer token was presented that matches no configured token.",
+		fix: "Check the token is listed by `weave-adapter-dhcp-windows token list` and that the adapter was restarted " +
+			"after it was added — tokens are read only at startup. Repeated hits from one address are credential probing.",
+	},
+	{
+		id: API023, topic: "Auth", level: slog.LevelWarn, message: "request rejected: expired credential",
+		detail: "The bearer token is not valid.", code: events.CodeUnauthorized,
+		fields: []events.FieldDef{
+			{Name: "label", Type: "string", Required: true, Description: "Label of the expired token."},
+			{Name: "expiredAt", Type: "string", Required: true, Description: "When the token expired (RFC 3339)."},
+		},
+		example:  `{"eventId":"API-023","caller":{"subject":"","role":"","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/leases"},"data":{"label":"weave-prod","expiredAt":"2026-10-16T09:02:36Z"}}`,
+		describe: "A recognized bearer token was rejected because its expiry has passed.",
+		fix: "Mint a replacement with `token gen --label <name> --expires-in-days N`, give it to weave, then restart. " +
+			"The response is identical to an unknown token by design, so this event is the only signal.",
+	},
+	{
+		id: API900, topic: "Errors", level: slog.LevelDebug, message: "request rejected: not found",
 		detail: "The requested {{resource}} was not found.", code: events.CodeNotFound,
 		fields:   []events.FieldDef{{Name: "resource", Type: "string", Required: true, Description: "The resource that was not found."}},
 		example:  `{"eventId":"API-900","caller":{"subject":"","role":"","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/openapi.yaml"},"data":{"resource":"openapi document"}}`,
@@ -62,7 +123,7 @@ var clientErrors = []clientError{
 		fix:      "Usually a stale client cache or a deleted resource. Confirm the identifier against a list call.",
 	},
 	{
-		id: API901, level: slog.LevelError, message: "internal error",
+		id: API901, topic: "Errors", level: slog.LevelError, message: "internal error",
 		detail: "An unexpected error occurred.", code: events.CodeInternal,
 		fields:  []events.FieldDef{{Name: "error", Type: "string", Required: true, Description: "The internal error. Never sent to the client."}},
 		example: `{"eventId":"API-901","caller":{"subject":"","role":"","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/leases"},"data":{"error":"dial tcp 10.0.0.9:445: connect: connection refused"}}`,
@@ -121,7 +182,7 @@ func init() {
 			MessageTemplate: ce.message,
 			Description:     ce.describe,
 			Category:        events.CategoryAPI.String(),
-			Topic:           "Errors",
+			Topic:           ce.topic,
 			ExternalSource:  true,
 			Fields:          append(slices.Clone(callerFields), ce.fields...),
 			Example:         ce.example,
