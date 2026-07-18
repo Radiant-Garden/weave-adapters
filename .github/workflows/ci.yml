@@ -65,13 +65,21 @@ jobs:
 
       # SHA-pinned: repository policy blocks bare tags at startup. The trailing
       # comment records the tag this SHA stood for.
+      #
+      # No token: the Codecov GitHub App is installed on the org, which is what
+      # authorizes the tokenless upload. There is deliberately no CODECOV_TOKEN
+      # fallback -- an unset secret is not a fallback, it is the failure this
+      # step spent its first weeks in. Uploads ran with an empty token and a
+      # non-blocking error for that whole time, so every push logged
+      # "Token required - not valid tokenless upload" and stayed green while
+      # the README badge read "unknown". fail_ci_if_error is true so the next
+      # such break is loud. The cost is that a Codecov outage blocks a merge;
+      # if that ever actually bites, drop the flag rather than the app.
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@04b047e8bb82a0c002c8312c1c880fbc6a999d45 # v5
         with:
           files: coverage.out
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
 
   lint:
     name: Lint
