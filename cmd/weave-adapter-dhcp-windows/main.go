@@ -69,7 +69,8 @@ func runServer(args []string) error {
 
 	err := run(ctx, args)
 
-	// Not deferred: main's os.Exit would skip it.
+	// Undeferred so the signal handler is released before the SYS-005 emit
+	// below, rather than staying installed across shutdown reporting.
 	stop()
 
 	if err != nil {
