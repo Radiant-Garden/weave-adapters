@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/knadh/koanf/parsers/toml/v2"
@@ -92,13 +93,19 @@ func load(args []string, environ func() []string) (*Config, error) {
 		}
 	}
 
+	transformer := &envTransformer{}
+
 	envProvider := env.Provider(".", env.Opt{
 		Prefix:        envPrefix,
 		EnvironFunc:   environ,
-		TransformFunc: transformEnv,
+		TransformFunc: transformer.transform,
 	})
 	if err := k.Load(envProvider, nil); err != nil {
 		return nil, fmt.Errorf("loading environment: %w", err)
+	}
+
+	if len(transformer.errs) > 0 {
+		return nil, errors.Join(transformer.errs...)
 	}
 
 	if len(overrides) > 0 {
@@ -169,23 +176,53 @@ func parseFlags(args []string) (configPath string, overrides map[string]any, err
 	return configPath, overrides, nil
 }
 
-// transformEnv maps WEAVE_ADAPTER_* environment variables onto config keys.
-// Unrecognized variables return an empty key and are ignored.
-func transformEnv(key, value string) (string, any) {
+// envTransformer maps WEAVE_ADAPTER_* environment variables onto config keys,
+// collecting the ones that cannot be read as their key's type.
+//
+// It carries state because koanf's TransformFunc cannot return an error, and
+// the boolean keys need one: koanf's k.Bool discards the parse failure and
+// answers false, so WEAVE_ADAPTER_DISABLE_AUTH=yes would silently become
+// "authentication stays on". That fails safe, but an operator who asked for
+// something and was told nothing has no way to discover the setting was ignored.
+//
+// The numeric keys are deliberately not treated the same way: a bad port
+// coerces to 0, which Validate then rejects by name, so the operator does hear
+// about it.
+type envTransformer struct {
+	errs []error
+}
+
+// transform is the koanf TransformFunc. Unrecognized variables return an empty
+// key and are ignored.
+func (t *envTransformer) transform(key, value string) (string, any) {
 	switch key {
 	case envPort:
 		return "port", value
 	case envDisableHTTPS:
-		return "disableHttps", value
+		return "disableHttps", t.parseBool(key, value)
 	case envLogSeverity:
 		return "logSeverity", value
 	case envAuthTokensFile:
 		return "authTokensFile", value
 	case envDisableAuth:
-		return "disableAuth", value
+		return "disableAuth", t.parseBool(key, value)
 	default:
 		return "", nil
 	}
+}
+
+// parseBool reads a boolean environment value, recording a failure rather than
+// letting it coerce to false.
+func (t *envTransformer) parseBool(name, value string) any {
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		t.errs = append(t.errs,
+			fmt.Errorf("%s=%q is not a boolean: use true/false, 1/0, t/f, T/F, TRUE/FALSE", name, value))
+
+		return nil
+	}
+
+	return parsed
 }
 
 // Validate reports all configuration problems at once (joined), rather than

@@ -17,6 +17,8 @@ Tested:
     - TestValidate_ShouldReportProblems: valid and invalid configs, including all errors joined.
     - TestLoad_ShouldDefaultAuthSettings: auth is on by default, pointing at tokens.toml.
     - TestLoad_ShouldResolveAuthTokensFilePrecedence: flag beats env for the token path.
+    - TestLoad_ShouldReadBooleanEnvVars: DISABLE_AUTH is applied, in every spelling ParseBool accepts.
+    - TestLoad_ShouldRejectANonBooleanEnvVar: an unreadable boolean is an error, not a silent false.
     - TestValidate_ShouldRejectEmptyTokensFileWhenAuthEnabled: no silent empty allow-list.
     - TestValidate_ShouldAllowEmptyTokensFileWhenAuthDisabled: the dev hatch needs no file.
 
@@ -109,6 +111,54 @@ func TestLoad_ShouldApplyPrecedence(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantPort, cfg.Port)
 			assert.Equal(t, tc.wantSev, cfg.LogSeverity)
+		})
+	}
+}
+
+func TestLoad_ShouldReadBooleanEnvVars(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE / ACT — DISABLE_AUTH had no env-level coverage at all, which is
+	// how a key spelled in several places goes unnoticed when one is missed. Its
+	// default is false, so reading true proves the variable was really applied.
+	spelled, err := load(nil, environ("WEAVE_ADAPTER_DISABLE_AUTH=true"))
+
+	// ASSERT
+	require.NoError(t, err)
+	assert.True(t, spelled.DisableAuth)
+
+	// ACT — every spelling ParseBool accepts, not just the word.
+	numeric, err := load(nil, environ("WEAVE_ADAPTER_DISABLE_AUTH=1"))
+
+	// ASSERT
+	require.NoError(t, err)
+	assert.True(t, numeric.DisableAuth)
+}
+
+func TestLoad_ShouldRejectANonBooleanEnvVar(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		environ string
+	}{
+		{name: "should reject a word that is not a boolean", environ: "WEAVE_ADAPTER_DISABLE_AUTH=yes"},
+		{name: "should reject an empty value", environ: "WEAVE_ADAPTER_DISABLE_AUTH="},
+		{name: "should reject it for every boolean key", environ: "WEAVE_ADAPTER_DISABLE_HTTPS=on"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT
+			_, err := load(nil, environ(tt.environ))
+
+			// ASSERT — koanf's k.Bool would answer false and discard the parse
+			// failure. That fails safe, but an operator who asked for something
+			// and was told nothing cannot discover the setting was ignored.
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "is not a boolean")
 		})
 	}
 }
