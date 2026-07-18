@@ -59,7 +59,7 @@ tasks:
       #     already scans on ubuntu.
       - task: build-windows
       - task: test:windows
-      - task: smoke:windows
+      - task: smoke
 
   test:windows:
     desc: Run tests without the race detector (the WS2022 runner has no C toolchain)
@@ -75,16 +75,17 @@ tasks:
       # exactly the kind of thing that surfaces on one platform and not another.
       - go test -shuffle=on ./...
 
-  smoke:windows:
-    desc: Run the built .exe on this Windows host and verify it serves (WS2022 only)
-    deps: [build-windows]
+  smoke:
+    desc: Build the binary, run it, and verify it serves over a real socket
     cmds:
-      # Deliberately not part of `task ci`: ci runs on macOS and Linux too,
-      # where there is no .exe to drive. The Windows runner calls this after ci.
-      # `powershell`, not `pwsh`: WS2022 ships Windows PowerShell 5.1, and
-      # PowerShell 7 is a separate install the runner does not have. The script
-      # is written to 5.1 so this needs nothing added to the infra role.
-      - powershell -NoProfile -ExecutionPolicy Bypass -File scripts/smoke-windows.ps1
+      # Behind a build tag because it compiles the binary and binds a port, so
+      # it has no place in `go test ./...`. Runs on every platform from one
+      # source: a regression surfaces on the fast ubuntu job rather than only
+      # on the serialized Windows host.
+      # -count=1 defeats the test cache. A cached pass here would mean "the
+      # inputs did not change", not "the binary still starts and serves" --
+      # which is the only claim this task exists to make.
+      - go test -count=1 -tags smoke -run TestSmoke ./cmd/...
 
   run:
     desc: Run the binary from source
@@ -190,4 +191,5 @@ tasks:
       - task: build
       - task: build-windows
       - task: test
+      - task: smoke
       - task: vulncheck

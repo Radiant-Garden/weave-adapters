@@ -57,6 +57,12 @@ jobs:
       - name: Test
         run: go test -race -shuffle=on -coverprofile=coverage.out ./...
 
+      # The same end-to-end check the Windows gate runs, from the same source.
+      # Running it here is the point: a regression in the adapter surfaces on
+      # this fast job instead of only on the single serialized WS2022 host.
+      - name: Smoke test the built binary
+        run: go test -count=1 -tags smoke -run TestSmoke ./cmd/...
+
       # SHA-pinned: repository policy blocks bare tags at startup. The trailing
       # comment records the tag this SHA stood for.
       - name: Upload coverage to Codecov

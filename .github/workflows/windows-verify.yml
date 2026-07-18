@@ -24,7 +24,9 @@ name: Windows verify
 #      network. Pin every action added to this file, and never use a tag.
 #
 # The runner is long-lived, not ephemeral, so its work directory persists
-# between jobs (see the PERSISTENCE note in bootstrap-windows-runner.ps1).
+# between jobs. The gate is written not to care: the smoke test picks a free
+# port at run time rather than a fixed one, so a process leaked by a cancelled
+# run cannot fail the next one.
 #
 # Do not add pull_request or pull_request_target here. If PR-time Windows
 # coverage is ever genuinely needed, the answer is a merge queue or a
@@ -62,13 +64,17 @@ jobs:
         # is a separate install the runner does not have, and asking infra to
         # add one would buy nothing this gate needs.
         #
-        # KEEP THIS FILE ASCII-ONLY. GitHub writes each run: block to a .ps1
-        # temp file, and 5.1 decodes a .ps1 with no BOM using the host's ANSI
-        # codepage. On the German-locale runner that is CP1252, where the third
-        # byte of a UTF-8 em dash lands on U+201D -- which PowerShell honours as
-        # a closing double quote. One em dash inside a string silently ends it
-        # and the file fails to parse. An en/em dash, arrow or curly quote in a
-        # comment is enough; the whole file is decoded, not just the strings.
+        # KEEP THE run: BLOCKS BELOW ASCII-ONLY. GitHub writes each one to a
+        # .ps1 temp file, and 5.1 decodes a .ps1 with no BOM using the host's
+        # ANSI codepage. On this German-locale runner that is CP1252, where the
+        # third byte of a UTF-8 em dash lands on U+201D -- which PowerShell
+        # honours as a closing double quote. One em dash inside a string
+        # silently ends it and the step fails to parse, with an error naming a
+        # column rather than the character.
+        #
+        # This is the last PowerShell left here. The end-to-end check used to
+        # be a .ps1 and is now a Go test, which runs on Linux too and can be
+        # run locally; what remains is the toolchain assertion below.
         shell: powershell
 
     steps:
