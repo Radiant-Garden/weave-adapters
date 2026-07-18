@@ -85,9 +85,7 @@ func (w *problemWriter) Write(b []byte) (int, error) {
 		return len(b), nil
 	}
 
-	if !w.wrote {
-		w.wrote = true
-	}
+	w.wrote = true
 
 	return w.ResponseWriter.Write(b)
 }
