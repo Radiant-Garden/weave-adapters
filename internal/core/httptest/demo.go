@@ -57,7 +57,33 @@ type Resource struct {
 }
 
 // NewResource returns a demo resource holding items, which it sorts by ID.
+//
+// It panics if any ID is empty or repeated. A keyset cursor resumes strictly
+// after a key, so the key has to be unique and non-empty or the listing loses
+// rows without erroring:
+//
+//   - A repeated ID makes a page that ends mid-run skip the rest of that run.
+//   - An empty ID mints no cursor, so a page ending on one reports itself as
+//     the last page while items remain.
+//
+// Both are silent — the walk simply returns fewer rows than exist. Adapters
+// building a real listing inherit this constraint, so it fails loudly here
+// rather than being a property this fixture happens to have.
 func NewResource(items ...Item) *Resource {
+	seen := make(map[string]bool, len(items))
+
+	for _, item := range items {
+		if item.ID == "" {
+			panic("httptest: item ID must not be empty; a cursor cannot resume after it")
+		}
+
+		if seen[item.ID] {
+			panic("httptest: duplicate item ID " + item.ID + "; a cursor cannot resume after a repeated key")
+		}
+
+		seen[item.ID] = true
+	}
+
 	sorted := slices.Clone(items)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 
@@ -107,8 +133,12 @@ func (r *Resource) list(w http.ResponseWriter, req *http.Request) {
 
 	// A next cursor only when items remain; on the last page both cursor forms
 	// are absent, which is what tells the client to stop.
+	//
+	// The key is non-empty because NewResource rejects empty IDs — without that
+	// guarantee Next would mint no cursor here and the listing would report
+	// itself complete with rows still unread.
 	var next pagination.NextPage
-	if end < len(r.items) && len(page) > 0 {
+	if end < len(r.items) {
 		next = r.pages.Next(req.URL, page[len(page)-1].ID)
 	}
 

@@ -4,16 +4,23 @@ Testing: demo.go
 Pending:
 
 Tested:
-  NewResource / Mount / Handler / list / get
+  NewResource
+    - TestNewResource_ShouldRejectAKeyACursorCannotResumeAfter: an empty or repeated ID fails loudly, not as a short walk.
+  Mount / Handler / list / get
     - TestDemo_ShouldServeAnAuthenticatedListWithAnETag: the happy path, tagged.
     - TestDemo_ShouldAnswer304OnARepoll: the polling loop weave actually runs.
     - TestDemo_ShouldWalkEveryPageByToken: the token cursor reaches the last page and stops.
     - TestDemo_ShouldWalkEveryPageByLink: the link cursor walks the same items, as weave pages.
     - TestDemo_ShouldRejectAnUnauthenticatedRequest: 401 problem+json correlated with its header.
     - TestDemo_ShouldAttributeTheRequestToTheAuthenticatedCaller: the token label reaches API-010's caller.subject.
+    - TestDemo_ShouldNotLetAConditionalRequestBypassAuth: a valid ETag replayed without credentials is 401, not 304.
     - TestDemo_ShouldRejectAMalformedPageToken: 400 problem+json, never a silent restart.
     - TestDemo_ShouldAnswer404ForAnUnknownItem: problem+json from a handler, not the router.
     - TestDemo_ShouldTagEachPageDistinctly: a stale page's ETag cannot validate a different page.
+    - TestDemo_ShouldServeAnEmptyCollectionAsAnArray: items is [] and never null, with no cursor.
+    - TestDemo_ShouldEndTheWalkForACursorPastTheEnd: a cursor beyond the last key ends the walk rather than restarting it.
+    - TestDemo_ShouldCarryFiltersAcrossPagesInTheLink: a query parameter survives into the next link.
+    - TestDemo_ShouldSpanSeveralPages: the fixture still needs more than one page, so the walks prove something.
   package placement
     - TestDemo_ShouldNotBeReachableFromTheBinary: the resource is test-only, enforced not assumed.
 
@@ -38,6 +45,11 @@ Additional Remarks:
 
   Tests that install the event recorder mutate the process-global emitter hook
   and cannot run in parallel.
+
+  TestDemo_ShouldNotBeReachableFromTheBinary shells out to `go list`, so it
+  needs the toolchain and the module source at run time. It cannot pass from a
+  prebuilt `go test -c` binary on a host without them — relevant to the Windows
+  runner, which is why that gate builds and tests from source.
 */
 
 package httptest
@@ -47,7 +59,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -67,9 +78,31 @@ import (
 // verifier, exactly as a real deployment stores it.
 const demoToken = "wadapt_demo"
 
+// demoItems is the fixture the exit tests page through. Five items at the
+// demo's page size of two spans three pages, so the last page is genuinely
+// short rather than exactly full — the boundary a walk is most likely to get
+// wrong. TestDemo_ShouldSpanSeveralPages guards that property.
+var demoItems = []Item{
+	{ID: "item-1", Name: "first"},
+	{ID: "item-2", Name: "second"},
+	{ID: "item-3", Name: "third"},
+	{ID: "item-4", Name: "fourth"},
+	{ID: "item-5", Name: "fifth"},
+}
+
+// demoItemIDs is the fixture's IDs in order, which is exactly what a complete
+// walk must return.
+func demoItemIDs() []string {
+	ids := make([]string, 0, len(demoItems))
+	for _, item := range demoItems {
+		ids = append(ids, item.ID)
+	}
+
+	return ids
+}
+
 // newTestHandler returns the demo resource behind the production chain with
-// authentication enabled, plus five items — enough to span three pages at the
-// demo's page size of two, so the last page is genuinely short.
+// authentication enabled.
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
 
@@ -79,15 +112,7 @@ func newTestHandler(t *testing.T) http.Handler {
 		CreatedAt: time.Date(2026, time.July, 18, 0, 0, 0, 0, time.UTC),
 	}})
 
-	resource := NewResource(
-		Item{ID: "item-1", Name: "first"},
-		Item{ID: "item-2", Name: "second"},
-		Item{ID: "item-3", Name: "third"},
-		Item{ID: "item-4", Name: "fourth"},
-		Item{ID: "item-5", Name: "fifth"},
-	)
-
-	return resource.Handler(auth.Bearer(verifier, httpserver.Unauthenticated))
+	return NewResource(demoItems...).Handler(auth.Bearer(verifier, httpserver.Unauthenticated))
 }
 
 // get issues an authenticated GET unless headers say otherwise.
@@ -144,6 +169,7 @@ func TestDemo_ShouldServeAnAuthenticatedListWithAnETag(t *testing.T) {
 	// ASSERT — a tagged, paginated collection, which is the shape every adapter
 	// list endpoint owes weave.
 	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, "application/json", recorder.Header().Get("Content-Type"))
 	assert.NotEmpty(t, recorder.Header().Get("ETag"))
 	assert.NotEmpty(t, recorder.Header().Get("X-Request-Id"))
 
@@ -213,8 +239,8 @@ func TestDemo_ShouldWalkEveryPageByToken(t *testing.T) {
 	}
 
 	// ASSERT — every item exactly once, in order, across three pages of 2/2/1.
-	assert.Equal(t, []string{"item-1", "item-2", "item-3", "item-4", "item-5"}, seen)
-	assert.Equal(t, 3, pages)
+	assert.Equal(t, demoItemIDs(), seen)
+	assert.Equal(t, wantPages(), pages)
 }
 
 func TestDemo_ShouldWalkEveryPageByLink(t *testing.T) {
@@ -257,8 +283,8 @@ func TestDemo_ShouldWalkEveryPageByLink(t *testing.T) {
 	}
 
 	// ASSERT — the two cursor forms address the same listing.
-	assert.Equal(t, []string{"item-1", "item-2", "item-3", "item-4", "item-5"}, seen)
-	assert.Equal(t, 3, pages)
+	assert.Equal(t, demoItemIDs(), seen)
+	assert.Equal(t, wantPages(), pages)
 }
 
 func TestDemo_ShouldCarryFiltersAcrossPagesInTheLink(t *testing.T) {
@@ -279,6 +305,91 @@ func TestDemo_ShouldCarryFiltersAcrossPagesInTheLink(t *testing.T) {
 	require.NotEmpty(t, page.NextPageURL)
 	assert.Contains(t, page.NextPageURL, "scopeId=10.0.0.0")
 	assert.Contains(t, page.NextPageURL, "pageSize=2")
+}
+
+func TestNewResource_ShouldRejectAKeyACursorCannotResumeAfter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		items []Item
+		// lost is how many of the items a full walk returned before the guard
+		// existed — recorded so the cost of removing it is on the record.
+		lost string
+	}{
+		{
+			name:  "should reject a repeated ID",
+			items: []Item{{ID: "a"}, {ID: "b"}, {ID: "b"}, {ID: "c"}},
+			lost:  "a page ending mid-run skipped the rest of it: 4 items walked as 3",
+		},
+		{
+			name:  "should reject an empty ID",
+			items: []Item{{ID: ""}, {ID: "b"}, {ID: "c"}},
+			lost:  "a page ending on it minted no cursor: 3 items walked as 1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT / ASSERT — loudly at construction beats silently at page two.
+			assert.Panics(t, func() { NewResource(tt.items...) }, tt.lost)
+		})
+	}
+}
+
+func TestDemo_ShouldServeAnEmptyCollectionAsAnArray(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a resource holding nothing, which is what a filtered listing
+	// looks like before anything matches.
+	handler := NewResource().Handler()
+
+	// ACT
+	recorder := get(t, handler, CollectionPath, nil)
+
+	// ASSERT — items is [] and never null; a client iterates it directly, and
+	// the empty listing carries no cursor to follow.
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.JSONEq(t, `{"items":[]}`, recorder.Body.String())
+}
+
+func TestDemo_ShouldEndTheWalkForACursorPastTheEnd(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name, after string
+	}{
+		{name: "should end past the last key", after: "item-9"},
+		{name: "should resume from a key that is not in the collection", after: "item-2a"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ARRANGE — a token this collection genuinely minted, for a key at
+			// or beyond the end. A cursor is a position, not an index, so it
+			// stays valid after the row it named is gone.
+			token := pagination.New("demo-items", DefaultPageSize, MaxPageSize).NextToken(tt.after)
+
+			// ACT
+			recorder := get(t, newTestHandler(t), CollectionPath+"?"+pagination.ParamPageToken+"="+token, nil)
+
+			// ASSERT — a well-formed cursor past the end is the end of the
+			// walk, not an error and not a restart from the first page.
+			require.Equal(t, http.StatusOK, recorder.Code)
+
+			page := decodePage(t, recorder.Body.Bytes())
+			assert.NotContains(t, page.Items, Item{ID: "item-1", Name: "first"})
+
+			if tt.after == "item-9" {
+				assert.Empty(t, page.Items)
+				assert.Empty(t, page.NextPageToken)
+			}
+		})
+	}
 }
 
 func TestDemo_ShouldTagEachPageDistinctly(t *testing.T) {
@@ -326,6 +437,35 @@ func TestDemo_ShouldRejectAnUnauthenticatedRequest(t *testing.T) {
 
 	// The rejection reveals nothing about the collection.
 	assert.NotContains(t, recorder.Body.String(), "item-")
+}
+
+func TestDemo_ShouldNotLetAConditionalRequestBypassAuth(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a tag obtained legitimately, then replayed without credentials.
+	handler := newTestHandler(t)
+
+	first := get(t, handler, CollectionPath, nil)
+	require.Equal(t, http.StatusOK, first.Code)
+
+	tag := first.Header().Get("ETag")
+	require.NotEmpty(t, tag)
+
+	// ACT
+	replayed := get(t, handler, CollectionPath, map[string]string{
+		"Authorization": "",
+		"If-None-Match": tag,
+	})
+
+	// ASSERT — auth sits outside the conditional wrapper, so the request is
+	// rejected before anything evaluates the tag. A 304 here would confirm to
+	// an unauthenticated caller that its cached copy is still current, which
+	// leaks the collection's state to someone with no credential.
+	require.Equal(t, http.StatusUnauthorized, replayed.Code)
+	assert.Empty(t, replayed.Header().Get("ETag"))
+
+	problem := decodeProblem(t, replayed)
+	assert.Equal(t, apierror.TypeFor("unauthorized"), problem.Type)
 }
 
 //nolint:paralleltest // installs the recorder, which mutates the global emitter hook
@@ -402,6 +542,10 @@ func TestDemo_ShouldAnswer404ForAnUnknownItem(t *testing.T) {
 	assert.Equal(t, apierror.TypeFor("not-found"), problem.Type)
 	assert.Equal(t, "/api/v1/items/item-999", problem.Instance)
 	assert.Equal(t, recorder.Header().Get("X-Request-Id"), problem.RequestID)
+
+	// An error has no stable identity to cache, and tagging one would invite a
+	// client to treat it as a cacheable representation.
+	assert.Empty(t, recorder.Header().Get("ETag"))
 }
 
 func TestDemo_ShouldNotBeReachableFromTheBinary(t *testing.T) {
@@ -423,12 +567,28 @@ func TestDemo_ShouldNotBeReachableFromTheBinary(t *testing.T) {
 	require.Greater(t, len(deps), 10, "go list should report the real dependency set, got %q", out)
 }
 
-// TestDemo_ShouldSpanSeveralPages guards the fixture itself: the walk tests
-// only prove pagination if the collection is larger than one page.
+// wantPages is how many pages the fixture must take at the demo page size.
+func wantPages() int {
+	return (len(demoItems) + DefaultPageSize - 1) / DefaultPageSize
+}
+
+// TestDemo_ShouldSpanSeveralPages guards the fixture itself. The walk tests
+// only prove pagination while the collection needs more than one page, and a
+// shrunk fixture would leave them passing without exercising a cursor at all.
 func TestDemo_ShouldSpanSeveralPages(t *testing.T) {
 	t.Parallel()
 
-	// ARRANGE / ACT / ASSERT
-	assert.Greater(t, 5, DefaultPageSize, "the fixture must not fit on one page")
-	assert.Equal(t, 3, 1+(5-1)/DefaultPageSize, "five items at size "+strconv.Itoa(DefaultPageSize)+" is three pages")
+	// ARRANGE — the collection as it is actually served, not a restatement of
+	// its size: a listing with no next cursor would mean the walks never paged.
+	recorder := get(t, newTestHandler(t), CollectionPath, nil)
+	require.Equal(t, http.StatusOK, recorder.Code)
+
+	// ACT
+	page := decodePage(t, recorder.Body.Bytes())
+
+	// ASSERT
+	require.Greater(t, wantPages(), 2, "the fixture must span at least three pages")
+	assert.Len(t, page.Items, DefaultPageSize, "the first page must be full")
+	assert.NotEmpty(t, page.NextPageToken, "a one-page fixture would prove nothing")
+	assert.NotEqual(t, 0, len(demoItems)%DefaultPageSize, "the last page must be short, not exactly full")
 }
