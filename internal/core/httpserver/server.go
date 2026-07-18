@@ -3,12 +3,15 @@
 // shutdown.
 //
 // This is the M1 form — it mounts /api/v1/health behind the standard middleware
-// chain. Later phases add /metrics, /openapi.yaml, and configurable timeouts.
+// chain and reserves /openapi.yaml. Later phases add /metrics, the real OpenAPI
+// document, and configurable timeouts.
 package httpserver
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"time"
 
@@ -21,7 +24,8 @@ const (
 	readHeaderTimeout = 10 * time.Second
 	shutdownGrace     = 15 * time.Second
 
-	healthPath = "/api/v1/health"
+	healthPath  = "/api/v1/health"
+	openAPIPath = "/openapi.yaml"
 )
 
 // Server wraps net/http.Server with the adapter's standard routes.
@@ -35,6 +39,7 @@ type Server struct {
 func New(addr string, healthHandler http.Handler) *Server {
 	mux := http.NewServeMux()
 	mux.Handle("GET "+healthPath, healthHandler)
+	mux.HandleFunc("GET "+openAPIPath, serveOpenAPI)
 
 	handler := middleware.Chain(mux,
 		middleware.Recovery,
@@ -59,20 +64,37 @@ func skipHealthPolls(r *http.Request) bool {
 	return r.URL.Path == healthPath
 }
 
-// Run starts the server and blocks until ctx is cancelled, then drains
-// in-flight requests within the shutdown grace period. It emits SYS lifecycle
-// events and returns nil on a clean shutdown.
+// serveOpenAPI answers the reserved spec route. The document itself is M2
+// (spec-first work); until then the route exists so it is owned and logged, and
+// answers the way any absent document would.
+func serveOpenAPI(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "openapi document not available in this build", http.StatusNotFound)
+}
+
+// Run binds the listen address, serves, and blocks until ctx is cancelled, then
+// drains in-flight requests within the shutdown grace period. It emits SYS
+// lifecycle events and returns nil on a clean shutdown.
 func (s *Server) Run(ctx context.Context) error {
+	// Bind before announcing: a port conflict must surface as a startup error,
+	// not as a SYS-002 "listening" line followed by a failure.
+	var lc net.ListenConfig
+
+	listener, err := lc.Listen(ctx, "tcp", s.httpServer.Addr)
+	if err != nil {
+		return fmt.Errorf("listening on %s: %w", s.httpServer.Addr, err)
+	}
+
+	// The resolved address, not the configured one — port 0 picks a real port.
+	events.Emit(ctx, catalog.SYS002, "addr", listener.Addr().String())
+
 	errCh := make(chan error, 1)
 
 	go func() {
-		events.Emit(ctx, catalog.SYS002, "addr", s.httpServer.Addr)
-
-		errCh <- s.httpServer.ListenAndServe()
+		errCh <- s.httpServer.Serve(listener)
 	}()
 
 	select {
-	case err := <-errCh:
+	case err = <-errCh:
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
@@ -86,7 +108,7 @@ func (s *Server) Run(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 		defer cancel()
 
-		err := s.httpServer.Shutdown(shutdownCtx)
+		err = s.httpServer.Shutdown(shutdownCtx)
 
 		events.Emit(shutdownCtx, catalog.SYS004)
 
