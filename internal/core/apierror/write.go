@@ -77,6 +77,23 @@ func asError(err error) *Error {
 	return Internal(err)
 }
 
+// MaxReflectedPathLen bounds how much of a request path is echoed back to the
+// client or into log storage. The path is attacker-controlled and bounded only
+// by net/http's header limit, so a multi-kilobyte one would otherwise be copied
+// into the problem body and every event line, on every request.
+const MaxReflectedPathLen = 128
+
+// TruncatePath bounds an echoed request path. It lives here, beside the Instance
+// member that is the most-copied echo of a path, so every reflection site shares
+// one limit instead of each picking its own.
+func TruncatePath(path string) string {
+	if len(path) <= MaxReflectedPathLen {
+		return path
+	}
+
+	return path[:MaxReflectedPathLen] + "…"
+}
+
 // problem renders the client-facing body. Everything in it comes from the
 // catalog entry or from fields the caller marked client-safe; the internal
 // cause is deliberately absent.
@@ -91,7 +108,7 @@ func (e *Error) problem(r *http.Request) Problem {
 			Title:     taxonomy[events.CodeInternal].title,
 			Status:    http.StatusInternalServerError,
 			Detail:    "An unexpected error occurred.",
-			Instance:  r.URL.Path,
+			Instance:  TruncatePath(r.URL.Path),
 			RequestID: events.CallerFrom(r.Context()).RequestID,
 		}
 	}
@@ -103,7 +120,7 @@ func (e *Error) problem(r *http.Request) Problem {
 		Title:        meaning.title,
 		Status:       meaning.status,
 		Detail:       render(spec.ResponseDetail, e.fields),
-		Instance:     r.URL.Path,
+		Instance:     TruncatePath(r.URL.Path),
 		RequestID:    events.CallerFrom(r.Context()).RequestID,
 		BackendError: e.backendError,
 		Errors:       e.fieldErrors,

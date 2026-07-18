@@ -8,12 +8,6 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 )
 
-// maxReflectedPathLen bounds how much of the request path is echoed into the
-// response detail and the event. The path is attacker-controlled and bounded
-// only by net/http's header limit, so a multi-kilobyte path would otherwise be
-// copied into both the body and log storage on every request.
-const maxReflectedPathLen = 128
-
 // ProblemErrors rewrites the router's own 404 and 405 responses as problem+json.
 //
 // 03-api-conventions requires every error to share one shape, "including
@@ -129,14 +123,5 @@ func (w *problemWriter) problemFor(code int) error {
 		)
 	}
 
-	return apierror.NotFound("route " + w.request.Method + " " + truncatePath(w.request.URL.Path))
-}
-
-// truncatePath bounds an echoed request path (see maxReflectedPathLen).
-func truncatePath(path string) string {
-	if len(path) <= maxReflectedPathLen {
-		return path
-	}
-
-	return path[:maxReflectedPathLen] + "…"
+	return apierror.NotFound("route " + w.request.Method + " " + apierror.TruncatePath(w.request.URL.Path))
 }

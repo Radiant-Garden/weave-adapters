@@ -329,6 +329,11 @@ func TestProblemErrors_ShouldTruncateAnOverlongPath(t *testing.T) {
 	require.NoError(t, json.Unmarshal(resp.Body.Bytes(), &problem))
 	assert.Less(t, len(problem.Detail), 200)
 	assert.Contains(t, problem.Detail, "…")
+
+	// Instance carries the path too, and truncating only the detail leaves the
+	// amplification this bound exists to prevent fully intact.
+	assert.LessOrEqual(t, len(problem.Instance), apierror.MaxReflectedPathLen+len("…"))
+	assert.Contains(t, problem.Instance, "…")
 }
 
 //nolint:paralleltest // installs the recorder, which mutates the global emitter hook
