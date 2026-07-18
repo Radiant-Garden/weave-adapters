@@ -20,11 +20,17 @@ Tested elsewhere:
   here cover only what wiring adds — that the pieces are connected in the right
   order and that every failure path returns instead of exiting.
 
+  runServer
+    - TestRunServer_ShouldTreatHelpAsSuccess: --help exits 0, matching `token gen --help`.
+
 Declined:
-  main / runServer — signal.NotifyContext plus os.Exit cannot be exercised
-  without either signalling or killing the test process. The CLI-vs-server
-  split main performs is covered by isTokenCommand, and everything downstream is
-  covered by run and runToken.
+  main — os.Exit cannot be exercised without killing the test process. The
+  CLI-vs-server split it performs is covered by isTokenCommand, and everything
+  downstream is covered by run and runToken.
+
+  runServer's signal path — signal.NotifyContext needs a real signal to
+  exercise; the smoke tests cover it. Its error-classification branches (help,
+  ErrShutdownIncomplete, SYS-005) are reachable without one.
 
 Additional Remarks:
   These tests call observability.Setup, which replaces the process-global default
@@ -299,6 +305,21 @@ func TestRun_ShouldWarnLoudlyWhenAuthIsDisabled(t *testing.T) {
 	require.NoError(t, <-errCh)
 	rec.AssertEmitted(t, catalog.SYS006)
 	rec.AssertMatchesCatalog(t)
+}
+
+//nolint:paralleltest // observability.Setup replaces the global slog logger
+func TestRunServer_ShouldTreatHelpAsSuccess(t *testing.T) {
+	// ARRANGE — the FlagSet writes usage to stderr; only the outcome matters here.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	// ACT
+	err := runServer([]string{"--help"})
+
+	// ASSERT — asking for help is not a failed startup. `token gen --help`
+	// already exits 0 out of this same binary, and the two must agree.
+	require.NoError(t, err)
+	rec.AssertNotEmitted(t, catalog.SYS005)
 }
 
 //nolint:paralleltest // observability.Setup replaces the global slog logger

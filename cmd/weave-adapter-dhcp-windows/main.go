@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -73,6 +74,14 @@ func runServer(args []string) error {
 	// Undeferred so the signal handler is released before the SYS-005 emit
 	// below, rather than staying installed across shutdown reporting.
 	stop()
+
+	// --help is a successful invocation, not a startup failure. The FlagSet has
+	// already written the usage text; without this the operator who asked for it
+	// gets a SYS-005 "startup failed: flag: help requested" and exit 1, while
+	// `token gen --help` exits 0 out of the same binary.
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
+	}
 
 	if err != nil && !errors.Is(err, httpserver.ErrShutdownIncomplete) {
 		// Startup failures are operational outcomes, not stray slog calls.
