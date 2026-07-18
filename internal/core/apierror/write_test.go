@@ -7,6 +7,7 @@ Tested:
   WriteError
     - TestWriteError_ShouldRenderProblemJSON: status, content type, and every body field.
     - TestWriteError_ShouldEmitExactlyOneEvent: one call, one log line.
+    - TestWriteError_ShouldEmitOneEventForAValidationFailure: many field failures, still one API-903 line.
     - TestWriteError_ShouldRedactUnmappedErrors: an internal message never reaches the client.
     - TestWriteError_ShouldResolveWrappedAPIErrors: fmt.Errorf("%w") keeps the taxonomy entry.
     - TestWriteError_ShouldIncludeRequestIDFromContext: responses correlate with logs.
@@ -121,6 +122,31 @@ func TestWriteError_ShouldEmitExactlyOneEvent(t *testing.T) {
 	rec.AssertData(t, catalog.API901, "error", "backend timed out")
 	rec.AssertMatchesCatalog(t)
 	assert.Len(t, rec.All(), 1, "WriteError should emit the error event and nothing else")
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestWriteError_ShouldEmitOneEventForAValidationFailure(t *testing.T) {
+	// ARRANGE — several field failures still make one response and one log
+	// line; the errors[] extension is what carries the multiplicity.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	err := Validation(
+		FieldError{Field: "pageSize", Message: "must be at least 1"},
+		FieldError{Field: "pageToken", Message: "must be a nextPageToken returned by this endpoint"},
+	)
+
+	recorder := httptest.NewRecorder()
+
+	// ACT
+	WriteError(recorder, newRequest(t, "/api/v1/leases"), err)
+
+	// ASSERT
+	require.Equal(t, http.StatusBadRequest, recorder.Code)
+	rec.AssertEmittedN(t, catalog.API903, 1)
+	rec.AssertData(t, catalog.API903, "fields", "pageSize, pageToken")
+	rec.AssertMatchesCatalog(t)
+	assert.Len(t, rec.All(), 1, "two field failures are still one event")
 }
 
 //nolint:paralleltest // installs the recorder, which mutates the global emitter hook

@@ -2,6 +2,7 @@ package apierror
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
@@ -24,9 +25,10 @@ type entry struct {
 // Entries exist only for codes something actually returns. The rest of the
 // vocabulary in 02-shared-core.md arrives with its emitter:
 // conflict/precondition (409/412) and the backend codes (502/504) with the
-// first backend client, 405/413/428 with the middleware and ETag write side
-// that produce them.
+// first backend client, 413/428 with the body-limit middleware and ETag write
+// side that produce them.
 var taxonomy = map[events.ResponseCode]entry{
+	events.CodeValidationFailed: {status: http.StatusBadRequest, title: "Validation failed"},
 	events.CodeUnauthorized:     {status: http.StatusUnauthorized, title: "Unauthorized"},
 	events.CodeNotFound:         {status: http.StatusNotFound, title: "Not found"},
 	events.CodeMethodNotAllowed: {status: http.StatusMethodNotAllowed, title: "Method not allowed"},
@@ -93,6 +95,35 @@ func pairsToMap(pairs []any) map[string]any {
 // echoed to the client, so name the kind and identifier, not internal state.
 func NotFound(resource string) *Error {
 	return newError(catalog.API900, map[string]any{"resource": resource})
+}
+
+// Validation reports rejected request parameters or body fields. Pass every
+// failure at once: the client fixes them all in one round trip rather than
+// discovering them one attempt at a time, which is why the errors[] extension
+// exists.
+//
+// Both the field name and its message reach the client, so a message must
+// describe the expectation ("must be at least 1") and never internal state.
+func Validation(fieldErrors ...FieldError) *Error {
+	fields := make([]string, 0, len(fieldErrors))
+	for _, fe := range fieldErrors {
+		fields = append(fields, fe.Field)
+	}
+
+	// The catalog declares fields as required, and a caller that passed nothing
+	// would otherwise log an empty one. "(none)" matches the placeholder API-021
+	// already uses for an absent scheme, and keeps a malformed diagnostic from
+	// taking down the request it was describing — the same call this package
+	// makes in pairsToMap.
+	named := "(none)"
+	if len(fields) > 0 {
+		named = strings.Join(fields, ", ")
+	}
+
+	// The event carries the field names only. Their messages are already in the
+	// response and are generic by construction, so repeating them in the log
+	// would add length without adding a diagnostic.
+	return newError(catalog.API903, map[string]any{"fields": named}).WithFieldErrors(fieldErrors...)
 }
 
 // Internal reports an unexpected fault. The cause is recorded for the operator

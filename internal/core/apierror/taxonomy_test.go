@@ -12,6 +12,7 @@ Tested:
     - TestTypeFor_ShouldNamespaceTheCode: types are prefixed so clients can tell them apart.
   constructors
     - TestConstructors_ShouldBindTheCatalogEventAndStatus: every constructor lands on its event and status.
+    - TestValidation_ShouldCarryEveryFailureAndNameThemForTheOperator: all field failures reach the client; the event names them.
     - TestInternal_ShouldWrapCauseForErrorsIs: errors.Is reaches the wrapped cause.
     - TestInternal_ShouldTolerateNilCause: a nil cause does not panic.
 
@@ -122,6 +123,11 @@ func TestConstructors_ShouldBindTheCatalogEventAndStatus(t *testing.T) {
 		wantStatus int
 	}{
 		{name: "should bind not found", err: NotFound("lease 10.0.0.5"), wantEvent: catalog.API900, wantStatus: http.StatusNotFound},
+		{
+			name:      "should bind validation",
+			err:       Validation(FieldError{Field: "pageSize", Message: "must be at least 1"}),
+			wantEvent: catalog.API903, wantStatus: http.StatusBadRequest,
+		},
 		{name: "should bind internal", err: Internal(errors.New("boom")), wantEvent: catalog.API901, wantStatus: http.StatusInternalServerError},
 	}
 
@@ -138,6 +144,38 @@ func TestConstructors_ShouldBindTheCatalogEventAndStatus(t *testing.T) {
 			assert.Equal(t, tt.wantStatus, lookup(spec.ResponseCode).status)
 		})
 	}
+}
+
+func TestValidation_ShouldCarryEveryFailureAndNameThemForTheOperator(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a request that got two parameters wrong at once.
+	failures := []FieldError{
+		{Field: "pageSize", Message: "must be at least 1"},
+		{Field: "pageToken", Message: "must be a nextPageToken returned by this endpoint"},
+	}
+
+	// ACT
+	err := Validation(failures...)
+
+	// ASSERT — the client gets both, so it fixes both in one round trip...
+	assert.Equal(t, failures, err.fieldErrors)
+
+	// ...and the log line names the fields without repeating their messages.
+	assert.Equal(t, []any{"fields", "pageSize, pageToken"}, err.eventData())
+}
+
+func TestValidation_ShouldStayLoggableWithNoFailures(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE / ACT — a degenerate call no current caller makes; pagination
+	// guards on len(fieldErrors) > 0. It stays reachable for future callers.
+	err := Validation()
+
+	// ASSERT — the catalog declares fields required, so an empty value would
+	// make the event's own contract false. A malformed diagnostic must not take
+	// down the request it was describing.
+	assert.Equal(t, []any{"fields", "(none)"}, err.eventData())
 }
 
 func TestInternal_ShouldWrapCauseForErrorsIs(t *testing.T) {

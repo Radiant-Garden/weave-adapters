@@ -225,6 +225,30 @@
 
 **Troubleshooting:** Client-side fault. The Allow header and the allow field list the accepted methods for that path.
 
+## API-903 — request rejected: validation failed
+
+- **Level:** DEBUG
+- **Category / Topic:** API / Errors
+- **External source:** yes
+- **Description:** A request carried parameters or body fields the endpoint rejected. Every failure is listed in one response, not just the first.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| subject | string | false | Authenticated caller (empty until auth lands). |
+| role | string | false | Caller role (empty until auth). |
+| remoteAddr | string | true | Client address. |
+| fields | string | true | Comma-separated names of the fields that failed. The per-field messages are in the response body's errors[]. |
+
+**Client response**
+
+- **Problem type:** `weave-adapters:validation-failed`
+- **Detail:** The request has invalid parameters.
+- **Impacts:** `request_rejected`
+
+**Example:** `{"eventId":"API-903","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/leases"},"data":{"fields":"pageSize, pageToken"}}`
+
+**Troubleshooting:** Client-side fault; the response body's errors[] names each field and what was expected. A recurring pageToken failure usually means the client stored a token across a listing whose scope changed — it should drop the token and list from the first page.
+
 ## HLT-001 — health status changed
 
 - **Level:** WARN

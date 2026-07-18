@@ -42,6 +42,8 @@ const (
 	// API901 backs a 500 internal response — the catch-all for an error that
 	// reached the HTTP boundary without a taxonomy entry.
 	API901 events.EventID = "API-901"
+	// API903 backs a 400 validation-failed response.
+	API903 events.EventID = "API-903"
 )
 
 // callerFields are the standard caller fields every ExternalSource event must
@@ -138,6 +140,18 @@ var clientErrors = []clientError{
 		example:  `{"eventId":"API-902","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"POST","path":"/api/v1/health"},"data":{"method":"POST","allow":"GET, HEAD"}}`,
 		describe: "A request used a method the route does not accept. The response carries an Allow header.",
 		fix:      "Client-side fault. The Allow header and the allow field list the accepted methods for that path.",
+	},
+	{
+		id: API903, topic: "Errors", level: slog.LevelDebug, message: "request rejected: validation failed",
+		detail: "The request has invalid parameters.", code: events.CodeValidationFailed,
+		fields: []events.FieldDef{
+			{Name: "fields", Type: "string", Required: true, Description: "Comma-separated names of the fields that failed. The per-field messages are in the response body's errors[]."},
+		},
+		example:  `{"eventId":"API-903","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/leases"},"data":{"fields":"pageSize, pageToken"}}`,
+		describe: "A request carried parameters or body fields the endpoint rejected. Every failure is listed in one response, not just the first.",
+		fix: "Client-side fault; the response body's errors[] names each field and what was expected. A recurring " +
+			"pageToken failure usually means the client stored a token across a listing whose scope changed — it " +
+			"should drop the token and list from the first page.",
 	},
 	{
 		id: API901, topic: "Errors", level: slog.LevelError, message: "internal error",
