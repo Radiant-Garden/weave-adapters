@@ -1,15 +1,29 @@
 # weave-adapter-dhcp-windows — example configuration
 #
-# Every key is optional; unset keys fall back to the built-in defaults shown.
+# Most keys are optional and fall back to the built-in defaults shown. The two
+# under [identity] are NOT: they have no defaults, and the adapter refuses to
+# start without them. See that section for why.
+#
 # Precedence (highest first): flags > env (WEAVE_ADAPTER_*) > this file > defaults.
 # Point the binary at a file with:  --config /path/to/config.toml
+#
+# Every key maps to one flag and one environment variable, derived mechanically
+# from its name:
+#
+#   logSeverity          -> --log-severity          -> WEAVE_ADAPTER_LOG_SEVERITY
+#   dhcp.commandTimeout  -> --dhcp-command-timeout  -> WEAVE_ADAPTER_DHCP_COMMAND_TIMEOUT
+#
+# A dotted key becomes a TOML section, as [dhcp] and [identity] are below.
 
 # TCP port the HTTP server listens on.
 port = 8444
 
-# HTTPS/TLS is not implemented in M1, so this must be true.
+# HTTPS/TLS is not implemented yet, so this must be true.
 # Setting it to false fails startup on purpose (so the flag can't silently
 # do nothing).
+#
+# The adapter therefore carries bearer tokens in clear, and is lab-only until
+# TLS lands: do not run it on a network anyone else can reach.
 disableHttps = true
 
 # Log level: debug | info | warn | error
@@ -23,3 +37,82 @@ authTokensFile = "tokens.toml"
 # Development only. Serves every route unauthenticated and says so loudly at
 # startup (SYS-006). Never set this on a host anything else can reach.
 disableAuth = false
+
+
+# ─── Identity ────────────────────────────────────────────────────────────────
+#
+# REQUIRED. Both keys have no default and are never auto-generated, and the
+# adapter will not start without them.
+#
+# Every scope the API serves carries a `wadaptID` derived from these two values
+# plus the scope's own subnet:
+#
+#   wadaptID = base32hex(HMAC-SHA256(namespaceKey, serverName || 0x00 || scopeId))
+#
+# So changing either one silently re-keys every scope in the deployment. weave
+# then sees every scope as gone and proposes to recreate each, which Windows
+# rejects because the subnet already holds a scope: sync stalls loudly rather
+# than deleting anything, but it does stall.
+#
+# That is why neither is guessed for you. An auto-generated key that regenerates
+# on reinstall *is* a fleet-wide re-key, and a server name that follows
+# os.Hostname() re-keys on a host rename. Both are startup errors instead.
+#
+# The resolved values are logged once at startup as DHCP-001 (the key only as a
+# short fingerprint, never in full) so an accidental re-key is visible
+# immediately rather than hours later.
+[identity]
+
+# Treat this like the token store: provision it once, back it up, never rotate
+# it casually. It is what makes IDs unique per installation — two sites both
+# running a server called DHCP01 would otherwise collide.
+#
+# Any string of at least 16 characters. Generate one with, for example:
+#   openssl rand -hex 32
+#
+# Prefer setting it via WEAVE_ADAPTER_IDENTITY_NAMESPACE_KEY: this file has no
+# enforced permissions, while the token store is written 0600.
+namespaceKey = "CHANGE-ME-see-the-comment-above"
+
+# The canonical identity of the DHCP server, as opposed to where to reach it
+# (that is dhcp.server below). Lower-cased and stripped of a trailing dot before
+# use, so "DHCP01.example.test." and "dhcp01.example.test" are one identity.
+#
+# Pick one spelling and keep it. Switching between the short name and the FQDN
+# is a re-key.
+serverName = "dhcp01.example.test"
+
+
+# ─── DHCP backend ────────────────────────────────────────────────────────────
+[dhcp]
+
+# The DHCP server to query, passed as -ComputerName. Empty means the local host.
+# This is a connection detail only — it is not hashed into any ID.
+server = ""
+
+# The shell used to run the DhcpServer cmdlets. Point this at pwsh, or at a
+# non-default location, without a code change.
+powershellPath = "powershell.exe"
+
+# Bounds one backend invocation. A hung powershell.exe is killed at this
+# deadline rather than holding a request open indefinitely.
+commandTimeout = "10s"
+
+# Bounds the health probe specifically, and must be SHORTER than
+# commandTimeout — startup fails otherwise.
+#
+# Health checks are cached briefly but run under a lock, so a slow backend on
+# the general timeout would serialize every health poll behind it. The tighter
+# bound here is what prevents that.
+probeTimeout = "3s"
+
+
+# ─── Scopes endpoint ─────────────────────────────────────────────────────────
+[scopes]
+
+# Page size used when a request does not ask for one.
+defaultPageSize = 50
+
+# Upper bound on pageSize; larger requests are clamped to it rather than
+# rejected. Must be >= defaultPageSize.
+maxPageSize = 500

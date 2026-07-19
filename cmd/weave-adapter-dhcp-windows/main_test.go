@@ -47,6 +47,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -58,8 +59,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows"
 	adapterevents "github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/auth"
+	"github.com/radiantgarden/weave-adapters/internal/core/config"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 	eventstest "github.com/radiantgarden/weave-adapters/internal/core/events/testing"
 	"github.com/radiantgarden/weave-adapters/internal/core/health"
@@ -341,6 +344,40 @@ func TestRun_ShouldRefuseToStartWithoutTokens(t *testing.T) {
 			rec.AssertNotEmitted(t, catalog.SYS002)
 		})
 	}
+}
+
+func TestConfigExample_ShouldLoadAndValidate(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the file an operator copies to start from. It is documentation,
+	// but it is documentation the loader can check, and it drifts silently
+	// otherwise: a renamed key or a section that no longer matches its dotted
+	// name would leave the example quietly wrong until someone tried it.
+	//
+	// This is the composed spec the binary itself uses, so the example is
+	// validated against core and adapter keys together.
+	spec := append(config.CoreKeys(), dhcpwindows.Keys()...)
+
+	// ACT
+	values, err := config.Load(spec, []string{"--config", filepath.Join("..", "..", "config.example.toml")})
+	require.NoError(t, err, "config.example.toml must parse and coerce cleanly")
+
+	core, coreErr := config.Core(values)
+	adapter, adapterErr := dhcpwindows.NewConfig(values)
+
+	// ASSERT — every documented default is a value the adapter would actually
+	// accept, including the ordering rules between probeTimeout and
+	// commandTimeout, and between the two page sizes.
+	require.NoError(t, errors.Join(coreErr, adapterErr))
+	assert.Equal(t, 8444, core.Port)
+	assert.Equal(t, "powershell.exe", adapter.PowerShellPath)
+	assert.Equal(t, 10*time.Second, adapter.CommandTimeout)
+	assert.Equal(t, 3*time.Second, adapter.ProbeTimeout)
+
+	// The example must demonstrate the required identity keys rather than omit
+	// them: without both, copying it produces a binary that refuses to start.
+	assert.NotEmpty(t, adapter.NamespaceKey, "the example must show identity.namespaceKey")
+	assert.NotEmpty(t, adapter.ServerName, "the example must show identity.serverName")
 }
 
 //nolint:paralleltest // observability.Setup replaces the global slog logger
