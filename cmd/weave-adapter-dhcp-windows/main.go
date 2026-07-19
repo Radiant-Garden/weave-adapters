@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows"
+	adapterevents "github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/auth"
 	"github.com/radiantgarden/weave-adapters/internal/core/config"
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
@@ -106,13 +108,17 @@ func run(ctx context.Context, args []string) error {
 
 	// The spec is composed here, at the one place that knows which adapter this
 	// binary is. Core owns the precedence machinery, never the key set.
-	values, err := config.Load(config.CoreKeys(), args)
+	values, err := config.Load(append(config.CoreKeys(), dhcpwindows.Keys()...), args)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	cfg, err := config.Core(values)
-	if err != nil {
+	// Both halves are built from one resolved set, and their errors are joined
+	// so an operator sees every problem in one run rather than one per restart.
+	cfg, coreErr := config.Core(values)
+	adapterCfg, adapterErr := dhcpwindows.NewConfig(values)
+
+	if err := errors.Join(coreErr, adapterErr); err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
@@ -122,13 +128,32 @@ func run(ctx context.Context, args []string) error {
 	// panics on a contract violation — so by this line the catalog is known good.
 	events.Emit(ctx, catalog.SYS001, "version", version)
 
+	// Emitted here rather than inside the adapter because startup events are
+	// owned by the binary — the same split as SYS-001, which the core catalog
+	// registers and this package emits.
+	//
+	// The read path is stateless, so nothing persists a previous identity to
+	// compare against. This one line is what makes an accidental re-key
+	// diagnosable at the moment it happens, instead of hours later from a wall
+	// of sync failures.
+	events.Emit(ctx, adapterevents.DHCP001,
+		"serverName", adapterCfg.ServerName,
+		"namespaceKeyFingerprint", dhcpwindows.NamespaceKeyFingerprint(adapterCfg.NamespaceKey),
+	)
+
 	authMiddleware, err := buildAuth(ctx, cfg)
 	if err != nil {
 		return err
 	}
 
+	// The probe issues a real scope query, so a green dhcp-server component
+	// means the DhcpServer module is present, the service account can read, and
+	// the server answers — not merely that a Windows service is running.
+	backend := dhcpwindows.NewClient(adapterCfg)
+	probe := dhcpwindows.NewProbe(backend, adapterCfg)
+
 	addr := fmt.Sprintf(":%d", cfg.Port)
-	srv := httpserver.New(addr, health.NewHandler(version, started), authMiddleware...)
+	srv := httpserver.New(addr, health.NewHandler(version, started, probe), authMiddleware...)
 
 	return srv.Run(ctx)
 }

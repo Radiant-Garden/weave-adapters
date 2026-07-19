@@ -39,8 +39,8 @@ Declined:
 	  cannot run in CI on darwin. The scripts are asserted as text here and
 	  verified against the host out of band — which is why the assertions are
 	  about the specific traps rather than about the script reading nicely.
-	versionScript's field shape: it has no consumer until the health probe lands
-	  in Phase 1, and asserting a shape nothing reads would be testing a ghost.
+	probeScript's decoded field shape: covered where it is consumed, in
+	  probe_test.go, rather than asserted twice.
 
 Additional Remarks:
 
@@ -67,7 +67,7 @@ func TestScriptPreamble_ShouldOpenEveryScriptWithBothGuards(t *testing.T) {
 
 	scripts := map[string]string{
 		"listScopesScript": listScopesScript,
-		"versionScript":    versionScript,
+		"probeScript":      probeScript,
 	}
 
 	for name, script := range scripts {
@@ -136,7 +136,7 @@ func TestListScopesScript_ShouldPassDepthExplicitly(t *testing.T) {
 	// ASSERT — -Depth defaults to 2, at which nested values silently become the
 	// literal string "System.Object[]".
 	assert.Contains(t, listScopesScript, "-Depth")
-	assert.Contains(t, versionScript, "-Depth")
+	assert.Contains(t, probeScript, "-Depth")
 }
 
 func TestListScopesScript_ShouldReadTheServerFromTheEnvironment(t *testing.T) {
@@ -170,7 +170,7 @@ func TestListScopesScript_ShouldAvoidConstructsPS51CannotParse(t *testing.T) {
 
 	scripts := map[string]string{
 		"listScopesScript": listScopesScript,
-		"versionScript":    versionScript,
+		"probeScript":      probeScript,
 	}
 
 	for name, script := range scripts {

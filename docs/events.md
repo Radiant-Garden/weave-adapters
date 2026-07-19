@@ -249,6 +249,36 @@
 
 **Troubleshooting:** Client-side fault; the response body's errors[] names each field and what was expected. A recurring pageToken failure usually means the client stored a token across a listing whose scope changed — it should drop the token and list from the first page.
 
+## BACKEND-101 — dhcp backend call failed
+
+- **Level:** ERROR
+- **Category / Topic:** BACKEND / Calls
+- **Description:** Emitted when a call to the Windows DHCP backend fails: the shell could not be run, exited non-zero, exceeded its timeout, or returned output that could not be decoded. Emitted by the backend client, which is the layer that knows which of those it was — callers above it (the health probe, resource handlers) trust this event and do not re-emit.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| operation | string | true | Which backend call failed (listScopes, probe). |
+| error | string | true | The failure, including the shell's own stderr where it produced any. |
+
+**Example:** `{"eventId":"BACKEND-101","data":{"operation":"listScopes","error":"dhcp backend unavailable: powershell exited 1: Get-DhcpServerv4Scope : Access is denied."}}`
+
+**Troubleshooting:** Scopes cannot be read, so /api/v1/scopes fails and the dhcp-server health component reports unavailable. Reproduce with: powershell.exe -NoProfile -NonInteractive -Command "Get-DhcpServerv4Scope". Likely causes: the RSAT-DHCP feature is not installed, so the DhcpServer module is missing (Install-WindowsFeature RSAT-DHCP); the service account lacks DHCP read rights (add it to the DHCP Users group); or dhcp.server names a host that is unreachable or not running the DHCP Server role. A timeout instead suggests a slow or wedged host — raise dhcp.commandTimeout only after confirming the query is slow rather than hung. Escalate to the Windows server owner.
+
+## DHCP-001 — dhcp adapter identity resolved
+
+- **Level:** INFO
+- **Category / Topic:** DHCP / Identity
+- **Description:** Emitted once at startup with the inputs every wadaptID is derived from. Registered here but emitted by the binary's wiring, which is where startup events are owned — the same split as SYS-001. Its purpose is diagnostic: because the read path is stateless, nothing persists a previous identity to compare against, so an accidental re-key is otherwise invisible until a wall of sync failures appears hours later. This turns it into one log line at startup.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| serverName | string | true | The canonicalized identity.serverName hashed into every wadaptID. |
+| namespaceKeyFingerprint | string | true | A short hash of identity.namespaceKey — never the key itself. Enough to tell two deployments apart, and to notice a key that changed. |
+
+**Example:** `{"eventId":"DHCP-001","data":{"serverName":"dhcp01.example.test","namespaceKeyFingerprint":"3f9a2c11"}}`
+
+**Troubleshooting:** Informational at startup, no action. It becomes actionable when either field changed unexpectedly between restarts: every wadaptID is then different, so weave sees every scope as gone and proposes a recreate for each, which Windows rejects because a subnet already holds a scope — sync stalls loudly rather than deleting anything. Compare both values against the previous start. A changed serverName usually means a host rename, dhcp.server being set for the first time, or a short-name/FQDN switch. A changed fingerprint means identity.namespaceKey was lost or rotated; restore it from backup rather than accepting the new one.
+
 ## HLT-001 — health status changed
 
 - **Level:** WARN

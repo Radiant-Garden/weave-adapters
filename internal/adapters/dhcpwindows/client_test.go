@@ -32,8 +32,9 @@ Tested:
 	  - TestListScopes_ShouldRejectDuplicateDerivedIDs: the converse half of the
 	    invariant — a collision is a repeated sort key, so it must be loud.
 	  - TestListScopes_ShouldClassifyBackendFailures: exit, timeout, empty stdout,
-	    undecodable output and a phantom (null / scopeId-less) element map to
-	    distinct typed errors.
+	    undecodable output, a bare null, a phantom (null / scopeId-less) element,
+	    and a scopeId that is not an IPv4 address all map to typed errors. The
+	    last is the Go-side tripwire for the -Depth trap.
 	  - TestListScopes_ShouldAttachStderrAsContext: the operator gets the shell's
 	    own words, bounded.
 	  - TestListScopes_ShouldRunTheLiteralScript: no value is interpolated in.
@@ -93,10 +94,18 @@ type fakeRunner struct {
 	// scripts records what was asked of it, so a test can assert on the script
 	// text itself — notably that nothing was interpolated into it.
 	scripts []string
+
+	// onRun observes the context the caller handed down, so a test can assert
+	// on the deadline actually applied rather than on the field it came from.
+	onRun func(ctx context.Context)
 }
 
-func (f *fakeRunner) run(_ context.Context, script string) ([]byte, []byte, error) {
+func (f *fakeRunner) run(ctx context.Context, script string) ([]byte, []byte, error) {
 	f.scripts = append(f.scripts, script)
+
+	if f.onRun != nil {
+		f.onRun(ctx)
+	}
 
 	return f.stdout, f.stderr, f.err
 }
@@ -411,6 +420,37 @@ func TestListScopes_ShouldClassifyBackendFailures(t *testing.T) {
 			// The real scope must not launder the phantom one alongside it.
 			name:    "a null element among real ones",
 			fake:    &fakeRunner{stdout: []byte(`[{"scopeId":"10.0.5.0"},null]`)},
+			wantErr: ErrBackendMalformed,
+		},
+		{
+			// A bare null unmarshals to a nil slice with no error, so it walks
+			// past the empty-stdout guard (the text is not empty) and past the
+			// per-element checks (there are no elements) to be served as "this
+			// server has zero scopes" — the same wrong answer by another door.
+			name:    "a bare null",
+			fake:    &fakeRunner{stdout: []byte(`null`)},
+			wantErr: ErrBackendMalformed,
+		},
+		{
+			// The Go-side tripwire for the -Depth trap. At the default depth of
+			// 2, PowerShell serializes nested values as this literal string,
+			// which decodes into a string field without complaint and derives a
+			// perfectly valid wadaptID.
+			name:    "a scopeId corrupted by the depth trap",
+			fake:    &fakeRunner{stdout: []byte(`[{"scopeId":"System.Object[]"}]`)},
+			wantErr: ErrBackendMalformed,
+		},
+		{
+			name:    "a scopeId that is not an address",
+			fake:    &fakeRunner{stdout: []byte(`[{"scopeId":"not-an-address"}]`)},
+			wantErr: ErrBackendMalformed,
+		},
+		{
+			// M3a is IPv4 only, and addressFamily is set from that assumption
+			// rather than read from the backend — so a v6 address arriving here
+			// would be labelled ipv4 and served as one.
+			name:    "an IPv6 scopeId",
+			fake:    &fakeRunner{stdout: []byte(`[{"scopeId":"2001:db8::"}]`)},
 			wantErr: ErrBackendMalformed,
 		},
 	}

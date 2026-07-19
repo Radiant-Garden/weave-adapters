@@ -145,12 +145,33 @@ $scopes = Get-DhcpServerv4Scope @params |
 ConvertTo-Json -InputObject @($scopes) -Depth 5
 `
 
-// versionScript reports the shell it is running in, for the health probe's
-// operator-facing fields. When a host misbehaves in a way that turns out to be
-// shell-version-dependent, this ends the investigation in one request rather
-// than a screen-share.
-const versionScript = scriptPreamble + `ConvertTo-Json -InputObject @{
-  psVersion = [string]$PSVersionTable.PSVersion
-  psEdition = [string]$PSVersionTable.PSEdition
+// probeScript is the health probe's single command: the cheapest query that
+// still proves the whole path works, plus the shell's own identity.
+//
+// It reads scopes rather than checking the service, because
+// `Get-Service DHCPServer` returning Running proves almost nothing we care
+// about. The failure modes that actually bite are the DhcpServer module being
+// absent — it ships with the RSAT-DHCP feature, which is *optional* even on a
+// host running the DHCP Server role — and the service account lacking DHCP read
+// rights. Both leave the service happily Running while every request fails. A
+// real query collapses that gap: green means the module is present, permissions
+// are right, and the server answers.
+//
+// The shell version and edition ride along because we are already running a
+// script, so they cost nothing. When a host misbehaves in a way that turns out
+// to be shell-version-dependent — PS 7's WinCompat shim returning deserialized
+// objects with methods stripped, say — this is the field that ends the
+// investigation in one request instead of a screen-share.
+//
+// Only the count is taken, not the scopes themselves: the probe runs on a timer
+// and has no use for the bodies, and serializing them would make a health poll
+// as expensive as a real request.
+const probeScript = scriptPreamble + `$params = @{}
+if ($env:` + envServerName + `) { $params['ComputerName'] = $env:` + envServerName + ` }
+$scopes = Get-DhcpServerv4Scope @params
+ConvertTo-Json -InputObject @{
+  scopeCount = @($scopes).Count
+  psVersion  = [string]$PSVersionTable.PSVersion
+  psEdition  = [string]$PSVersionTable.PSEdition
 } -Depth 3
 `

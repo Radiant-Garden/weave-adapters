@@ -64,6 +64,21 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/core/health"
 )
 
+// withIdentity appends the two identity inputs every server run now needs.
+//
+// identity.namespaceKey and identity.serverName are provisioned config with no
+// defaults and no fallbacks, by design: an auto-generated namespace key
+// regenerating on reinstall *is* a fleet-wide re-key, and a server name
+// following os.Hostname() re-keys on a host rename. The adapter refuses to
+// start without them, so every run here carries them exactly as a real
+// deployment does.
+func withIdentity(args ...string) []string {
+	return append(args,
+		"--identity-namespace-key", "main-test-namespace-key-0123456789",
+		"--identity-server-name", "dhcp01.test",
+	)
+}
+
 // freePort returns a port that is free right now, having closed the listener
 // used to discover it.
 func freePort(t *testing.T) int {
@@ -176,7 +191,7 @@ func TestRun_ShouldServeHealthUntilContextCancelled(t *testing.T) {
 	errCh := make(chan error, 1)
 
 	go func() {
-		errCh <- run(ctx, []string{"--port", strconv.Itoa(port), "--auth-tokens-file", tokensPath})
+		errCh <- run(ctx, withIdentity("--port", strconv.Itoa(port), "--auth-tokens-file", tokensPath))
 	}()
 
 	waitForListening(t, rec)
@@ -197,13 +212,31 @@ func TestRun_ShouldServeHealthUntilContextCancelled(t *testing.T) {
 
 	// ASSERT — the config port, health handler, and middleware chain are wired,
 	// and health answers without a credential even though auth is enabled.
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	//
+	// 503, not 200, and that is the correct answer rather than a broken test.
+	// The adapter now probes a real DHCP backend, and this host has no
+	// powershell.exe — so the dhcp-server component is genuinely unavailable and
+	// the overall status follows it. Asserting 200 would require the probe to
+	// report a backend it cannot reach as working, which is the exact lie the
+	// live probe exists to prevent.
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 
 	var body health.Response
 	require.NoError(t, json.Unmarshal(raw, &body))
 
-	assert.Equal(t, health.StatusHealthy, body.Status)
+	assert.Equal(t, health.StatusUnavailable, body.Status)
 	assert.Equal(t, version, body.Version)
+
+	// The per-component split is what makes that answer useful: the adapter
+	// itself is up and serving — only its backend is unreachable.
+	components := make(map[string]health.Status, len(body.Components))
+	for _, c := range body.Components {
+		components[c.Name] = c.Status
+	}
+
+	assert.Equal(t, health.StatusHealthy, components["core"])
+	assert.Equal(t, health.StatusUnavailable, components["dhcp-server"],
+		"the probe must be wired into the binary, not just constructible")
 	assert.NotEmpty(t, resp.Header.Get("X-Request-Id"))
 
 	// A protected path rejects an anonymous caller and accepts the token.
@@ -267,10 +300,10 @@ func TestRun_ShouldRefuseToStartWithoutTokens(t *testing.T) {
 			t.Cleanup(rec.Install())
 
 			// ACT
-			err := run(t.Context(), []string{
+			err := run(t.Context(), withIdentity(
 				"--port", strconv.Itoa(freePort(t)),
 				"--auth-tokens-file", tt.tokensFile,
-			})
+			))
 
 			// ASSERT — the message has to tell an operator what to do, and the
 			// server must never reach the point of announcing itself.
@@ -292,7 +325,7 @@ func TestRun_ShouldWarnLoudlyWhenAuthIsDisabled(t *testing.T) {
 	port := strconv.Itoa(freePort(t))
 
 	go func() {
-		errCh <- run(ctx, []string{"--port", port, "--disable-auth"})
+		errCh <- run(ctx, withIdentity("--port", port, "--disable-auth"))
 	}()
 
 	waitForListening(t, rec)
@@ -329,7 +362,7 @@ func TestRun_ShouldReturnErrorWhenConfigInvalid(t *testing.T) {
 	t.Cleanup(rec.Install())
 
 	// ACT — out of range, so Load fails validation.
-	err := run(t.Context(), []string{"--port", "70000"})
+	err := run(t.Context(), withIdentity("--port", "70000"))
 
 	// ASSERT — startup stops at config; nothing announces itself as running.
 	require.Error(t, err)
@@ -354,7 +387,7 @@ func TestRun_ShouldReturnErrorWhenPortUnavailable(t *testing.T) {
 	tokensPath, _ := tokenStore(t)
 
 	// ACT
-	err = run(t.Context(), []string{"--port", strconv.Itoa(port), "--auth-tokens-file", tokensPath})
+	err = run(t.Context(), withIdentity("--port", strconv.Itoa(port), "--auth-tokens-file", tokensPath))
 
 	// ASSERT — a bind conflict is a startup error, not a silent no-op.
 	require.Error(t, err)

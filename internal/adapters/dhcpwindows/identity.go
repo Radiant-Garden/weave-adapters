@@ -4,6 +4,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base32"
+	"encoding/hex"
 	"strings"
 )
 
@@ -63,6 +64,33 @@ func deriveWadaptID(namespaceKey []byte, serverName, scopeID string) string {
 	return wadaptIDEncoding.EncodeToString(mac.Sum(nil)[:wadaptIDBytes])
 }
 
+// fingerprintBytes is how much of the namespace key's hash the startup event
+// reports: 4 bytes, 8 hex characters. Enough to tell two deployments apart and
+// to notice a key that changed, far too little to attack the key with.
+const fingerprintBytes = 4
+
+// NamespaceKeyFingerprint returns a short, non-reversible hash of the namespace
+// key, for the startup identity event.
+//
+// It exists so an accidental re-key is diagnosable. The read path is stateless
+// by design, so nothing persists a previous key to compare against — without
+// this, losing or rotating the key is invisible until every scope reads as gone
+// to weave, hours later and far from the cause.
+//
+// It is a hash and never the key. The key's job is per-installation uniqueness
+// rather than secrecy, but it is backup-critical and printing it into a log
+// that gets shipped, pasted into a ticket, or indexed by a SIEM would be a
+// gratuitous way to leak it.
+func NamespaceKeyFingerprint(namespaceKey string) string {
+	if namespaceKey == "" {
+		return ""
+	}
+
+	sum := sha256.Sum256([]byte(namespaceKey))
+
+	return hex.EncodeToString(sum[:fingerprintBytes])
+}
+
 // canonicalServerName normalizes the provisioned server identity before it is
 // hashed: lowercased, trailing dot stripped, surrounding space removed.
 //
@@ -72,5 +100,8 @@ func deriveWadaptID(namespaceKey []byte, serverName, scopeID string) string {
 // the drift risk the plan mitigates by requiring the key to be provisioned in
 // the first place.
 func canonicalServerName(name string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(name)), ".")
+	// TrimRight rather than TrimSuffix: the job is that every spelling of one
+	// name folds to one identity, and TrimSuffix would leave
+	// "dhcp01.example.test.." as a second identity from the same host.
+	return strings.TrimRight(strings.ToLower(strings.TrimSpace(name)), ".")
 }

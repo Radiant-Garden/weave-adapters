@@ -97,11 +97,14 @@ func (r execRunner) runArgs(ctx context.Context, args ...string) ([]byte, []byte
 	// timeout on a healthy host. A process killed by the context always reports
 	// an error, so nothing real is missed by gating on one.
 	if err != nil {
-		// The operator needs to know a timeout was a timeout rather than a shell
-		// fault: the two have different fixes (raise dhcp.commandTimeout, versus
-		// repair the host).
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return stdout.Bytes(), stderr.Bytes(), errors.Join(ErrBackendTimeout, ctxErr)
+		// Only an expired *deadline* is a timeout. ctx.Err() is also non-nil for
+		// context.Canceled, which is what a graceful shutdown or a disconnected
+		// client produces — telling an operator draining the server that "the
+		// dhcp backend timed out" would send them to raise dhcp.commandTimeout
+		// for a problem that was a shutdown. A cancellation falls through and is
+		// reported as what it is.
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return stdout.Bytes(), stderr.Bytes(), errors.Join(ErrBackendTimeout, ctx.Err())
 		}
 
 		return stdout.Bytes(), stderr.Bytes(), err

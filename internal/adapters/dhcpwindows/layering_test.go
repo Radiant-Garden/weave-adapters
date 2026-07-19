@@ -9,8 +9,9 @@ Tested:
     internal/core imports internal/adapters. This is the CLAUDE.md rule that
     core stays adapter-agnostic, and dhcpwindows is the first package that
     could ever break it.
-  - TestLayering_ShouldKeepTheAdapterOffTheCoreCatalog: the adapter does not
-    register events in the core catalog package.
+  - TestLayering_ShouldPartitionTheBackendEventRange: every registered BACKEND
+    event sits in this adapter's 1xx partition, so a second adapter can share the
+    category without breaking the single-owner rule.
 
 Tested elsewhere:
 
@@ -22,8 +23,11 @@ Declined:
 
 	Asserting the reverse direction (that the adapter *may* import core): it does,
 	  visibly, in config.go — a test would restate an import statement.
-	Enforcing that the binary links the adapter: it does not yet, and will from
-	  Phase 1. Asserting it now would fail for a correct tree.
+	Enforcing that the binary links the adapter: covered by the wiring itself once
+	  Phase 1 lands; asserting the dependency edge adds nothing the build does not.
+	Asserting the adapter does not import internal/core/events/catalog: it reaches
+	  it transitively through core/health, which is legitimate. The invariant that
+	  matters is which IDs exist and who owns them, asserted on the registry.
 
 Additional Remarks:
 
@@ -46,16 +50,27 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	adapterevents "github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows/events"
+	coreevents "github.com/radiantgarden/weave-adapters/internal/core/events"
+	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 )
 
 const modulePath = "github.com/radiantgarden/weave-adapters"
 
-// deps returns every package the given pattern transitively depends on.
+// deps returns every package the given pattern transitively depends on,
+// including the imports of its test files.
+//
+// -test is load bearing: without it `go list -deps` reports only the production
+// import graph, so a core _test.go importing the adapter would sail past the
+// one mechanical guard on this repo's headline layering rule. Test code is
+// still core code for this purpose — a core package that needs an adapter to
+// test itself is a core package that knows about an adapter.
 func deps(t *testing.T, pattern string) []string {
 	t.Helper()
 
 	//nolint:gosec // G204: pattern is a compile-time constant from this file.
-	out, err := exec.CommandContext(t.Context(), "go", "list", "-deps", pattern).CombinedOutput()
+	out, err := exec.CommandContext(t.Context(), "go", "list", "-deps", "-test", pattern).CombinedOutput()
 	require.NoError(t, err, "go list failed: %s", out)
 
 	list := strings.Split(strings.TrimSpace(string(out)), "\n")
@@ -91,21 +106,41 @@ func TestLayering_ShouldKeepCoreFreeOfAdapterImports(t *testing.T) {
 	assert.Empty(t, leaked, "internal/core must not import internal/adapters")
 }
 
-func TestLayering_ShouldKeepTheAdapterOffTheCoreCatalog(t *testing.T) {
+func TestLayering_ShouldPartitionTheBackendEventRange(t *testing.T) {
 	t.Parallel()
 
-	// ARRANGE
-	all := deps(t, modulePath+"/internal/adapters/dhcpwindows")
+	// ARRANGE — importing the core catalog and this adapter's events package
+	// registers both sets from init(), so the registry holds everything a real
+	// binary would.
+	_ = catalog.SYS001
+	_ = adapterevents.BACKEND101
 
-	// ASSERT — the adapter registers its own events in its own package. The
-	// BACKEND *category* constant is shared and lives in core, but each adapter
-	// owns a partitioned ID range (BACKEND-1xx here), because the single-owner
-	// rule breaks the moment a second adapter wants to emit a backend failure
-	// from an ID registered in the core catalog.
+	// ACT
+	registered := coreevents.GetAll()
+
+	// ASSERT — the category constant is shared and lives in core, but every
+	// BACKEND *event* belongs to an adapter, in a partitioned ID range. This is
+	// forced by the single-owner rule: a BACKEND-001 registered in the core
+	// catalog would break it the moment a second adapter wanted to emit a
+	// backend failure, since both would have to emit an ID core owns.
 	//
-	// Nothing is registered yet: the client returns typed errors and no emitter
-	// exists until the probe lands, and registering an event nothing emits
-	// would be a ghost event.
-	assert.NotContains(t, all, modulePath+"/internal/core/events/catalog",
-		"the adapter must register its own events, not extend the core catalog")
+	// Asserting on the registry rather than on the import graph is deliberate.
+	// The adapter reaches internal/core/events/catalog transitively through
+	// core/health, which is legitimate and unavoidable, so an import-edge
+	// assertion would forbid something harmless while missing the thing that
+	// actually matters — which IDs exist and who may emit them.
+	var backend []string
+
+	for id, event := range registered {
+		if event.Category == coreevents.CategoryBackend.String() {
+			backend = append(backend, string(id))
+		}
+	}
+
+	require.NotEmpty(t, backend, "the BACKEND category must have at least one live event, or it is a ghost category")
+
+	for _, id := range backend {
+		assert.Regexp(t, `^BACKEND-1\d\d$`, id,
+			"BACKEND events must sit in this adapter's 1xx partition; the next adapter takes 2xx")
+	}
 }

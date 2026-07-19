@@ -13,8 +13,19 @@ import (
 
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 
-	// Blank import so the catalog's init() registers every event before we
-	// walk the registry.
+	// Blank imports so every init() has registered before we walk the registry.
+	// One per catalog: core's, and each adapter's own.
+	//
+	// This is why docgen does not live under internal/core. The generated
+	// reference documents the whole repo's catalog, so the generator has to see
+	// adapter events too — and a core package importing internal/adapters is
+	// exactly what CLAUDE.md forbids. docgen is a build tool rather than part of
+	// the reusable core, so it sits outside it and may import both.
+	//
+	// A new adapter adds its line here. Forgetting to is a silent gap:
+	// generate-check would still pass, because it only diffs the output against
+	// git and an unregistered event produces no diff at all.
+	_ "github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows/events"
 	_ "github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 )
 

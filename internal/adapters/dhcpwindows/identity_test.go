@@ -189,6 +189,8 @@ func TestCanonicalServerName_ShouldFoldTheFormsOfOneName(t *testing.T) {
 		{name: "uppercase", in: "DHCP01.EXAMPLE.TEST", want: "dhcp01.example.test"},
 		{name: "mixed case", in: "Dhcp01.Example.Test", want: "dhcp01.example.test"},
 		{name: "trailing dot", in: "dhcp01.example.test.", want: "dhcp01.example.test"},
+		// TrimSuffix would leave this as a second identity for the same host.
+		{name: "several trailing dots", in: "dhcp01.example.test..", want: "dhcp01.example.test"},
 		{name: "surrounding space", in: "  dhcp01.example.test  ", want: "dhcp01.example.test"},
 		{name: "all at once", in: "  DHCP01.Example.TEST.  ", want: "dhcp01.example.test"},
 		{name: "empty stays empty", in: "", want: ""},

@@ -132,6 +132,13 @@ const (
 	CategoryCache   EventCategory = "CACHE"
 	CategoryJob     EventCategory = "JOB"
 	CategoryBackend EventCategory = "BACKEND"
+
+	// CategoryDHCP is the DHCP-Windows adapter's own domain category. It is
+	// declared here only so every category prefix is visible in one list; the
+	// events themselves are registered by the adapter, in
+	// internal/adapters/dhcpwindows/events. Core neither emits nor depends on
+	// them — see .claude/guidelines/event-logging.md.
+	CategoryDHCP EventCategory = "DHCP"
 )
 
 // String returns the category prefix as a string.

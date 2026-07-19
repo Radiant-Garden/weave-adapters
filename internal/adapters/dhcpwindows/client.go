@@ -23,10 +23,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os/exec"
 	"slices"
 	"strings"
 	"unicode/utf8"
+
+	adapterevents "github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows/events"
+	"github.com/radiantgarden/weave-adapters/internal/core/events"
 )
 
 // Backend failure modes, kept distinct so a handler can map "the backend is
@@ -86,16 +90,16 @@ func NewClient(cfg Config) *Client {
 func (c *Client) ListScopes(ctx context.Context) ([]Scope, error) {
 	stdout, stderr, err := c.runner.run(ctx, listScopesScript)
 	if err != nil {
-		return nil, runError(err, stderr)
+		return nil, c.backendError(ctx, opListScopes, runError(err, stderr))
 	}
 
 	scopes, err := decodeScopes(stdout, stderr)
 	if err != nil {
-		return nil, err
+		return nil, c.backendError(ctx, opListScopes, err)
 	}
 
 	if err := c.identify(scopes); err != nil {
-		return nil, err
+		return nil, c.backendError(ctx, opListScopes, err)
 	}
 
 	// One comparator, on the encoded string, matching the resume comparison.
@@ -104,6 +108,31 @@ func (c *Client) ListScopes(ctx context.Context) ([]Scope, error) {
 	})
 
 	return scopes, nil
+}
+
+// Operation labels carried by BACKEND-101, so an operator can tell a failing
+// health poll from a failing request in the log.
+const (
+	opListScopes = "listScopes"
+	opProbe      = "probe"
+)
+
+// backendError emits BACKEND-101 and returns the error unchanged.
+//
+// Every backend failure funnels through here, which is what makes the client
+// the single owner of that ID: it is the layer that knows whether the shell
+// could not start, exited non-zero, timed out, or spoke nonsense. Callers above
+// — the health probe, and resource handlers once they exist — trust this event
+// and never re-emit, so one failure produces one log line rather than one per
+// layer it passes through.
+//
+// It returns the error rather than swallowing it: handlers still return errors,
+// and apierror.WriteError remains the one place that logs *and* responds. This
+// logs the backend fact; that logs the client-facing outcome.
+func (c *Client) backendError(ctx context.Context, operation string, err error) error {
+	events.Emit(ctx, adapterevents.BACKEND101, "operation", operation, "error", err.Error())
+
+	return err
 }
 
 // identify derives each scope's wadaptID and rejects a collision.
@@ -155,31 +184,61 @@ func decodeScopes(stdout, stderr []byte) ([]Scope, error) {
 		return nil, fmt.Errorf("%w: %w%s", ErrBackendMalformed, err, stderrContext(stderr))
 	}
 
-	// A scope with no scopeId is not a scope, and must not be served as one.
+	// A bare "null" is not an empty list.
 	//
-	// This is the last silent-decode path left open. "[null]" unmarshals into
-	// one zero-valued Scope with no error, and a zero-valued Scope still
-	// derives a perfectly well-formed wadaptID — so without this check the
-	// adapter would serve a phantom scope that exists nowhere, and weave would
-	// reconcile against it. The path is reachable: PowerShell's @($x) on a null
-	// $x yields a one-element array containing $null, which is what the script
-	// produces if the pipeline is ever empty in a way that leaves $scopes null.
-	//
-	// The zero-scope case verified on the host emits "[ ]" and decodes to an
-	// empty slice, so this rejects only genuinely malformed output — the same
-	// trade as the empty-stdout rule above.
-	//
-	// Only scopeId is required. It is the derivation input and the natural key,
-	// so its absence makes the record unusable; the remaining fields are data,
-	// and inventing required-ness for them would be validation nobody asked for.
+	// json.Unmarshal("null", &scopes) leaves a nil slice and returns no error,
+	// so it walks past the empty-stdout guard above (the text is not empty) and
+	// past the per-element loop below (there are no elements) to be served as
+	// "this server has zero scopes" — the precise wrong answer the empty-stdout
+	// rule exists to prevent, arriving by a different door. A server with no
+	// scopes emits "[ ]", which decodes to a non-nil empty slice.
+	if scopes == nil {
+		return nil, fmt.Errorf("%w: output was null%s", ErrBackendMalformed, stderrContext(stderr))
+	}
+
 	for i, s := range scopes {
-		if s.ScopeID == "" {
-			return nil, fmt.Errorf("%w: scope at index %d has no scopeId%s",
-				ErrBackendMalformed, i, stderrContext(stderr))
+		if err := validateScope(i, s); err != nil {
+			return nil, fmt.Errorf("%w%s", err, stderrContext(stderr))
 		}
 	}
 
 	return scopes, nil
+}
+
+// validateScope rejects an element that decoded cleanly but cannot be a scope.
+//
+// Two distinct failures, both of which produce a *well-formed* wadaptID if left
+// alone, which is what makes them dangerous rather than merely wrong:
+//
+//   - No scopeId. "[null]" unmarshals into one zero-valued Scope with no error,
+//     and a zero-valued Scope derives a perfectly valid ID, so the adapter would
+//     serve a phantom scope that exists nowhere and weave would reconcile
+//     against it.
+//   - A scopeId that is not an IPv4 address. This is the Go-side tripwire for
+//     the plan's -Depth trap: at the default depth of 2, PowerShell serializes
+//     nested values as the literal string "System.Object[]", which decodes into
+//     a string field without complaint and derives an ID just as happily. The
+//     script passes -Depth explicitly so it should never arrive, but a future
+//     projection edit that reintroduces the trap would otherwise fail silently.
+//
+// Only scopeId is validated. It is the derivation input and the natural key, so
+// a wrong value there is a wrong *identity* rather than a wrong attribute — and
+// because a depth regression corrupts every IPAddress field at once, checking
+// the one that matters most also catches the class. The remaining fields are
+// data, and inventing required-ness for them would be validation nobody asked
+// for.
+func validateScope(index int, s Scope) error {
+	if s.ScopeID == "" {
+		return fmt.Errorf("%w: scope at index %d has no scopeId", ErrBackendMalformed, index)
+	}
+
+	addr, err := netip.ParseAddr(s.ScopeID)
+	if err != nil || !addr.Is4() {
+		return fmt.Errorf("%w: scope at index %d has scopeId %q, which is not an IPv4 address",
+			ErrBackendMalformed, index, s.ScopeID)
+	}
+
+	return nil
 }
 
 // runError classifies a runner failure and attaches stderr as context.
