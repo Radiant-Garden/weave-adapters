@@ -18,18 +18,22 @@ Tested:
 	ListScopes
 	  - TestListScopes_ShouldDecodeTheCapturedFixture: the canonical host capture
 	    round-trips into the ten-field model, byte-for-byte as PS 5.1 emitted it.
-	  - TestListScopes_ShouldDecodeASingleElementResult: the PS 5.1 unrolling trap.
+	  - TestListScopes_ShouldRejectAnUnwrappedSingleResult: if the script ever loses
+	    its @() wrapper, a one-scope server fails loudly rather than silently.
 	  - TestListScopes_ShouldReturnEmptyForAServerWithNoScopes: "[\n\n]" is a valid
 	    empty list, distinct from no output at all.
 	  - TestListScopes_ShouldPreserveNonASCIIText: trap 6 on the Go side.
 	  - TestListScopes_ShouldSortByWadaptID: the sort the pagination resume depends on.
+	  - TestListScopes_ShouldReadAFixtureThatIsNotAlreadySorted: guards the fixture,
+	    so the sort assertion above cannot decay into a tautology.
 	  - TestListScopes_ShouldDeriveAnIDForEveryScope: the omission half of the invariant.
 	  - TestListScopes_ShouldSetTheAddressFamily: constant ipv4 in M3a.
 	  - TestListScopes_ShouldTolerateStderrOnASuccessfulRun: stderr alone is not fatal.
 	  - TestListScopes_ShouldRejectDuplicateDerivedIDs: the converse half of the
 	    invariant — a collision is a repeated sort key, so it must be loud.
-	  - TestListScopes_ShouldClassifyBackendFailures: exit, timeout, empty stdout
-	    and undecodable output map to distinct typed errors.
+	  - TestListScopes_ShouldClassifyBackendFailures: exit, timeout, empty stdout,
+	    undecodable output and a phantom (null / scopeId-less) element map to
+	    distinct typed errors.
 	  - TestListScopes_ShouldAttachStderrAsContext: the operator gets the shell's
 	    own words, bounded.
 	  - TestListScopes_ShouldRunTheLiteralScript: no value is interpolated in.
@@ -63,10 +67,12 @@ package dhcpwindows
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -148,21 +154,32 @@ func TestListScopes_ShouldDecodeTheCapturedFixture(t *testing.T) {
 	assert.Equal(t, 691200, got.LeaseDurationSeconds)
 }
 
-func TestListScopes_ShouldDecodeASingleElementResult(t *testing.T) {
+func TestListScopes_ShouldRejectAnUnwrappedSingleResult(t *testing.T) {
 	t.Parallel()
 
-	// ARRANGE — PS 5.1 unrolls a one-element pipeline into a bare object, which
-	// would break the decoder. The script wraps in @() to prevent it; this
-	// asserts the resulting shape still decodes as a list.
-	client := clientReading(t, "scopes_single.json")
+	// ARRANGE — what the host emits if @() is ever dropped from the script: PS
+	// 5.1 unrolls a one-element pipeline into a bare object rather than an
+	// array. Taken from the captured fixture so it is the real shape, minus the
+	// brackets.
+	unwrapped := `{
+    "scopeId":  "192.168.178.0",
+    "subnetMask":  "255.255.255.0",
+    "name":  "manual_test_01",
+    "state":  "Active"
+}`
+
+	client := clientWith(&fakeRunner{stdout: []byte(unwrapped)})
 
 	// ACT
-	scopes, err := client.ListScopes(context.Background())
+	_, err := client.ListScopes(context.Background())
 
-	// ASSERT — a silent-corruption regression, not a loud one, so it stays
-	// covered even though the workaround is verified on the host.
-	require.NoError(t, err)
-	assert.Len(t, scopes, 1)
+	// ASSERT — this is the half of the trap Go can actually guard. The script's
+	// @() wrapper is asserted as text in scope_test.go, and the wrapped shape
+	// decoding correctly is covered by the capture test; what matters here is
+	// that if the wrapper is ever lost, a one-scope server fails loudly instead
+	// of returning nothing.
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrBackendMalformed)
 }
 
 func TestListScopes_ShouldReturnEmptyForAServerWithNoScopes(t *testing.T) {
@@ -220,6 +237,40 @@ func TestListScopes_ShouldSortByWadaptID(t *testing.T) {
 	}
 
 	assert.IsIncreasing(t, ids)
+
+	// The fixture is deliberately stored out of ID order, so this assertion can
+	// actually fail. Ordered by wadaptID the lab scope sorts last; if it still
+	// leads, the returned slice is in document order and nothing sorted it.
+	// Without this the test passed with slices.SortFunc deleted.
+	assert.NotEqual(t, "10.0.5.0", scopes[0].ScopeID,
+		"scopes came back in document order: the sort did not run")
+}
+
+func TestListScopes_ShouldReadAFixtureThatIsNotAlreadySorted(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — guards the fixture itself, in the same spirit as the demo
+	// resource's page-span test. A future edit that happens to store
+	// scopes_multi.json in wadaptID order would quietly turn the sort assertion
+	// above into a tautology, and nothing else would notice.
+	raw := fixture(t, "scopes_multi.json")
+
+	var documentOrder []Scope
+	require.NoError(t, json.Unmarshal(raw, &documentOrder))
+	require.Len(t, documentOrder, 3)
+
+	// ACT — derive without sorting, exactly as the file lists them.
+	client := clientWith(&fakeRunner{})
+	require.NoError(t, client.identify(documentOrder))
+
+	ids := make([]string, 0, len(documentOrder))
+	for _, s := range documentOrder {
+		ids = append(ids, s.WadaptID)
+	}
+
+	// ASSERT
+	assert.False(t, slices.IsSorted(ids),
+		"scopes_multi.json is stored in wadaptID order, which makes the sort test vacuous")
 }
 
 func TestListScopes_ShouldDeriveAnIDForEveryScope(t *testing.T) {
@@ -340,6 +391,26 @@ func TestListScopes_ShouldClassifyBackendFailures(t *testing.T) {
 			// valid JSON of the wrong shape.
 			name:    "JSON of the wrong shape",
 			fake:    &fakeRunner{stdout: []byte(`{"CimClass":"root/microsoft/windows/dhcp"}`)},
+			wantErr: ErrBackendMalformed,
+		},
+		{
+			// PowerShell's @($null) is a one-element array containing $null.
+			// This unmarshals into one zero-valued Scope with no error, and a
+			// zero-valued Scope derives a well-formed wadaptID — so untrapped it
+			// would serve a scope that exists nowhere.
+			name:    "a null element",
+			fake:    &fakeRunner{stdout: []byte(`[null]`)},
+			wantErr: ErrBackendMalformed,
+		},
+		{
+			name:    "an element with no scopeId",
+			fake:    &fakeRunner{stdout: []byte(`[{"name":"nameless"}]`)},
+			wantErr: ErrBackendMalformed,
+		},
+		{
+			// The real scope must not launder the phantom one alongside it.
+			name:    "a null element among real ones",
+			fake:    &fakeRunner{stdout: []byte(`[{"scopeId":"10.0.5.0"},null]`)},
 			wantErr: ErrBackendMalformed,
 		},
 	}

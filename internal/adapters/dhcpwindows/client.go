@@ -155,6 +155,30 @@ func decodeScopes(stdout, stderr []byte) ([]Scope, error) {
 		return nil, fmt.Errorf("%w: %w%s", ErrBackendMalformed, err, stderrContext(stderr))
 	}
 
+	// A scope with no scopeId is not a scope, and must not be served as one.
+	//
+	// This is the last silent-decode path left open. "[null]" unmarshals into
+	// one zero-valued Scope with no error, and a zero-valued Scope still
+	// derives a perfectly well-formed wadaptID — so without this check the
+	// adapter would serve a phantom scope that exists nowhere, and weave would
+	// reconcile against it. The path is reachable: PowerShell's @($x) on a null
+	// $x yields a one-element array containing $null, which is what the script
+	// produces if the pipeline is ever empty in a way that leaves $scopes null.
+	//
+	// The zero-scope case verified on the host emits "[ ]" and decodes to an
+	// empty slice, so this rejects only genuinely malformed output — the same
+	// trade as the empty-stdout rule above.
+	//
+	// Only scopeId is required. It is the derivation input and the natural key,
+	// so its absence makes the record unusable; the remaining fields are data,
+	// and inventing required-ness for them would be validation nobody asked for.
+	for i, s := range scopes {
+		if s.ScopeID == "" {
+			return nil, fmt.Errorf("%w: scope at index %d has no scopeId%s",
+				ErrBackendMalformed, i, stderrContext(stderr))
+		}
+	}
+
 	return scopes, nil
 }
 

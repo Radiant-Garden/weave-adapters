@@ -75,8 +75,13 @@ func (r execRunner) runArgs(ctx context.Context, args ...string) ([]byte, []byte
 	// call, only the process.
 	cmd.WaitDelay = waitDelayGrace
 
-	// The child inherits nothing but what it is given. The script reads the
-	// target from here rather than from interpolated text.
+	// The child inherits the parent environment and adds the target to it.
+	// Inheriting is deliberate rather than lax: powershell.exe needs PATH,
+	// SystemRoot and PSModulePath to locate itself and the DhcpServer module at
+	// all, so a curated environment would have to reconstruct most of one and
+	// would break on the first host that keeps its modules somewhere unusual.
+	// What matters for injection is the other direction — that the target
+	// travels here instead of being built into the command text.
 	cmd.Env = append(cmd.Environ(), envServerName+"="+r.server)
 
 	var stdout, stderr bytes.Buffer
@@ -85,13 +90,22 @@ func (r execRunner) runArgs(ctx context.Context, args ...string) ([]byte, []byte
 	cmd.Stderr = &stderr
 
 	err := cmd.Run()
+	// Only a *failed* run is examined for a deadline. A run that returned
+	// cleanly produced complete output, and reclassifying it because the clock
+	// happened to pass the deadline between Run returning and this line would
+	// discard a good answer — a race that would surface as a rare, unreproducible
+	// timeout on a healthy host. A process killed by the context always reports
+	// an error, so nothing real is missed by gating on one.
+	if err != nil {
+		// The operator needs to know a timeout was a timeout rather than a shell
+		// fault: the two have different fixes (raise dhcp.commandTimeout, versus
+		// repair the host).
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return stdout.Bytes(), stderr.Bytes(), errors.Join(ErrBackendTimeout, ctxErr)
+		}
 
-	// A context that expired reports as an exec error, but the operator needs
-	// to know it was a timeout rather than a shell fault — the two have
-	// different fixes (raise dhcp.commandTimeout, versus repair the host).
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return stdout.Bytes(), stderr.Bytes(), errors.Join(ErrBackendTimeout, ctxErr)
+		return stdout.Bytes(), stderr.Bytes(), err
 	}
 
-	return stdout.Bytes(), stderr.Bytes(), err
+	return stdout.Bytes(), stderr.Bytes(), nil
 }

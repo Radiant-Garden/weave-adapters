@@ -1,5 +1,17 @@
 [
     {
+        "scopeId":  "10.0.5.0",
+        "subnetMask":  "255.255.254.0",
+        "startRange":  "10.0.5.10",
+        "endRange":  "10.0.6.250",
+        "name":  "lab",
+        "description":  "lab range",
+        "state":  "Active",
+        "type":  "Dhcp",
+        "superscopeName":  "",
+        "leaseDurationSeconds":  3600
+    },
+    {
         "scopeId":  "192.168.178.0",
         "subnetMask":  "255.255.255.0",
         "startRange":  "192.168.178.10",
@@ -22,17 +34,5 @@
         "type":  "Both",
         "superscopeName":  "campus",
         "leaseDurationSeconds":  86400
-    },
-    {
-        "scopeId":  "10.0.5.0",
-        "subnetMask":  "255.255.254.0",
-        "startRange":  "10.0.5.10",
-        "endRange":  "10.0.6.250",
-        "name":  "lab",
-        "description":  "lab range",
-        "state":  "Active",
-        "type":  "Dhcp",
-        "superscopeName":  "",
-        "leaseDurationSeconds":  3600
     }
 ]

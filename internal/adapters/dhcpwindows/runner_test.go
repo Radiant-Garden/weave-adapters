@@ -30,6 +30,14 @@ Tested elsewhere:
 
 Declined:
 
+	That a *successful* run is never reclassified as a timeout. runArgs examines
+	  ctx.Err() only when Run returned an error, so a clean run whose deadline
+	  passes a moment later keeps its output — but the window is the few
+	  instructions between those two statements, and no test can land inside it
+	  without a clock seam in production code. Injecting one to observe a
+	  nanosecond race would be more machinery than the bug is worth, so the
+	  behaviour is argued in a comment at the site instead of asserted here.
+
 	Running actual powershell.exe: CI is darwin and the point of the runner seam is
 	  that the package needs no Windows host and no build tags. These tests drive
 	  /bin/sh instead, which exercises the same exec.Cmd plumbing — process
