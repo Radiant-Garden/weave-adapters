@@ -1,0 +1,14 @@
+[
+    {
+        "scopeId":  "192.168.178.0",
+        "subnetMask":  "255.255.255.0",
+        "startRange":  "192.168.178.10",
+        "endRange":  "192.168.178.210",
+        "name":  "Standort München",
+        "description":  "Büro Gebäude 3 – Süd",
+        "state":  "Active",
+        "type":  "Dhcp",
+        "superscopeName":  "",
+        "leaseDurationSeconds":  691200
+    }
+]

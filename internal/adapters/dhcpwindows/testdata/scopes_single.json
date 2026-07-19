@@ -1,0 +1,14 @@
+[
+    {
+        "scopeId":  "192.168.178.0",
+        "subnetMask":  "255.255.255.0",
+        "startRange":  "192.168.178.10",
+        "endRange":  "192.168.178.210",
+        "name":  "manual_test_01",
+        "description":  "created by hand",
+        "state":  "Active",
+        "type":  "Dhcp",
+        "superscopeName":  "",
+        "leaseDurationSeconds":  691200
+    }
+]
