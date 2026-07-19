@@ -4,233 +4,122 @@ Testing: config.go
 Pending:
 
 Tested:
-  Load
-    - TestLoad_ShouldReturnDefaultsWhenNoSourcesSet: defaults apply when nothing is set.
-    - TestLoad_ShouldApplyPrecedence: flags > env > defaults ordering.
-    - TestLoad_ShouldOverrideFileWithEnv: env wins over a TOML file; unset file keys survive.
-    - TestLoad_ShouldErrorWhenConfigFileMissing: a missing --config path is an error.
-    - TestLoad_ShouldErrorWhenConfigFileMalformed: an existing but invalid TOML file errors.
-    - TestLoad_ShouldErrorWhenFlagInvalid: a flag-parse failure propagates from parseFlags.
-    - TestLoad_ShouldRejectWhenHTTPSEnabled: disableHttps=false fails validation (also covers env string->bool).
 
-  Validate / fieldError
-    - TestValidate_ShouldReportProblems: valid and invalid configs, including all errors joined.
-    - TestLoad_ShouldDefaultAuthSettings: auth is on by default, pointing at tokens.toml.
-    - TestLoad_ShouldResolveAuthTokensFilePrecedence: flag beats env for the token path.
-    - TestLoad_ShouldReadBooleanEnvVars: DISABLE_AUTH is applied, in every spelling ParseBool accepts.
-    - TestLoad_ShouldRejectANonBooleanEnvVar: an unreadable boolean is an error, not a silent false.
-    - TestValidate_ShouldRejectEmptyTokensFileWhenAuthEnabled: no silent empty allow-list.
-    - TestValidate_ShouldAllowEmptyTokensFileWhenAuthDisabled: the dev hatch needs no file.
+	CoreKeys
+	  - TestCoreKeys_ShouldPreserveTheEstablishedFlagAndEnvNames: the compatibility
+	    constraint on the loader restructure — every core key still resolves to the
+	    flag and environment variable it had before key registration existed.
+	  - TestCoreKeys_ShouldDeclareEveryKeyItsStructReads: Core reads exactly the
+	    keys CoreKeys registers, so neither half can drift without failing.
+
+	Core
+	  - TestCore_ShouldBuildFromResolvedValues: a resolved Values becomes a Config.
+	  - TestCore_ShouldReturnTheValidationError: Core validates, so an invalid
+	    combination never reaches a caller as a usable struct.
+
+	Validate / fieldError
+	  - TestValidate_ShouldReportProblems: valid and invalid configs, including all errors joined.
+	  - TestValidate_ShouldRejectEmptyTokensFileWhenAuthEnabled: no silent empty allow-list.
+	  - TestValidate_ShouldAllowEmptyTokensFileWhenAuthDisabled: the dev hatch needs no file.
 
 Tested elsewhere:
 
+	Precedence, type coercion and the environment/flag plumbing: loader_test.go.
+	Name derivation and per-type parse errors: key_test.go.
+
 Declined:
-  Non-numeric WEAVE_ADAPTER_PORT coerced to 0: koanf's k.Int swallows the parse
-    error, so Validate reports "got 0" rather than naming the bad input. Left as
-    is — surfacing the raw value means bypassing the typed getter with a manual
-    pre-parse for marginal message quality, and the error still points at the port.
-  Fuzzing Load: the TOML/env parsing is koanf's (pelletier) provider — we don't
-    fuzz what we don't own — and our transform/validation is trivial.
-  Validate's non-ValidationErrors branch and fieldError's default case: defensive
-    and unreachable today (only *Config is validated; only Port/LogSeverity carry
-    tags), so they are documented in-code rather than tested.
+
+	Validate's non-ValidationErrors branch and fieldError's default case: defensive
+	  and unreachable today (only *Config is validated; only Port/LogSeverity carry
+	  tags), so they are documented in-code rather than tested.
 
 Additional Remarks:
-  Tests drive the unexported load(args, environ) so environment precedence can be
-  exercised through an injected EnvironFunc, keeping every test parallel-safe.
-*/
 
+	TestCoreKeys_ShouldPreserveTheEstablishedFlagAndEnvNames is the regression the
+	restructure most needed: flag and environment names are now *derived* from the
+	key name rather than written out per key, so a change to the derivation rule
+	would silently rename every operator-facing flag at once.
+*/
 package config
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// environ returns an EnvironFunc yielding the given KEY=VALUE pairs, so tests
-// inject environment variables without touching the real OS environment.
-func environ(pairs ...string) func() []string {
-	return func() []string { return pairs }
-}
-
-func TestLoad_ShouldReturnDefaultsWhenNoSourcesSet(t *testing.T) {
+func TestCoreKeys_ShouldPreserveTheEstablishedFlagAndEnvNames(t *testing.T) {
 	t.Parallel()
 
-	// ACT
-	cfg, err := load(nil, environ())
+	// ARRANGE — the names as they were hand-written before key registration.
+	want := map[string]struct{ flag, env string }{
+		KeyPort:           {"port", "WEAVE_ADAPTER_PORT"},
+		KeyDisableHTTPS:   {"disable-https", "WEAVE_ADAPTER_DISABLE_HTTPS"},
+		KeyLogSeverity:    {"log-severity", "WEAVE_ADAPTER_LOG_SEVERITY"},
+		KeyAuthTokensFile: {"auth-tokens-file", "WEAVE_ADAPTER_AUTH_TOKENS_FILE"},
+		KeyDisableAuth:    {"disable-auth", "WEAVE_ADAPTER_DISABLE_AUTH"},
+	}
 
-	// ASSERT
+	// ACT / ASSERT
+	keys := CoreKeys()
+	require.Len(t, keys, len(want))
+
+	for _, k := range keys {
+		names, known := want[k.Name]
+		require.True(t, known, "unexpected core key %q", k.Name)
+
+		assert.Equal(t, names.flag, FlagName(k.Name))
+		assert.Equal(t, names.env, EnvName(k.Name))
+	}
+}
+
+func TestCoreKeys_ShouldDeclareEveryKeyItsStructReads(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — Core panics on an unregistered key, so resolving the core spec
+	// and building from it proves the two halves agree.
+	values, err := load(CoreKeys(), nil, environ())
 	require.NoError(t, err)
-	assert.Equal(t, defaultPort, cfg.Port)
-	assert.True(t, cfg.DisableHTTPS)
-	assert.Equal(t, defaultLogSeverity, cfg.LogSeverity)
-}
 
-func TestLoad_ShouldApplyPrecedence(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name     string
-		args     []string
-		env      []string
-		wantPort int
-		wantSev  string
-	}{
-		{
-			name:     "defaults when nothing set",
-			wantPort: defaultPort,
-			wantSev:  defaultLogSeverity,
-		},
-		{
-			name:     "env over defaults",
-			env:      []string{"WEAVE_ADAPTER_PORT=9100", "WEAVE_ADAPTER_LOG_SEVERITY=warn"},
-			wantPort: 9100,
-			wantSev:  "warn",
-		},
-		{
-			name:     "flags over env",
-			args:     []string{"-port", "9200"},
-			env:      []string{"WEAVE_ADAPTER_PORT=9100"},
-			wantPort: 9200,
-			wantSev:  defaultLogSeverity,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			// ACT
-			cfg, err := load(tc.args, environ(tc.env...))
-
-			// ASSERT
-			require.NoError(t, err)
-			assert.Equal(t, tc.wantPort, cfg.Port)
-			assert.Equal(t, tc.wantSev, cfg.LogSeverity)
-		})
-	}
-}
-
-func TestLoad_ShouldReadBooleanEnvVars(t *testing.T) {
-	t.Parallel()
-
-	// ARRANGE / ACT — DISABLE_AUTH had no env-level coverage at all, which is
-	// how a key spelled in several places goes unnoticed when one is missed. Its
-	// default is false, so reading true proves the variable was really applied.
-	spelled, err := load(nil, environ("WEAVE_ADAPTER_DISABLE_AUTH=true"))
-
-	// ASSERT
+	// ACT / ASSERT
+	cfg, err := Core(values)
 	require.NoError(t, err)
-	assert.True(t, spelled.DisableAuth)
-
-	// ACT — every spelling ParseBool accepts, not just the word.
-	numeric, err := load(nil, environ("WEAVE_ADAPTER_DISABLE_AUTH=1"))
-
-	// ASSERT
-	require.NoError(t, err)
-	assert.True(t, numeric.DisableAuth)
+	assert.NotNil(t, cfg)
 }
 
-func TestLoad_ShouldRejectANonBooleanEnvVar(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name    string
-		environ string
-	}{
-		{name: "should reject a word that is not a boolean", environ: "WEAVE_ADAPTER_DISABLE_AUTH=yes"},
-		{name: "should reject an empty value", environ: "WEAVE_ADAPTER_DISABLE_AUTH="},
-		{name: "should reject it for every boolean key", environ: "WEAVE_ADAPTER_DISABLE_HTTPS=on"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			// ACT
-			_, err := load(nil, environ(tt.environ))
-
-			// ASSERT — koanf's k.Bool would answer false and discard the parse
-			// failure. That fails safe, but an operator who asked for something
-			// and was told nothing cannot discover the setting was ignored.
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "is not a boolean")
-		})
-	}
-}
-
-func TestLoad_ShouldOverrideFileWithEnv(t *testing.T) {
+func TestCore_ShouldBuildFromResolvedValues(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE
-	path := filepath.Join(t.TempDir(), "config.toml")
-	body := "port = 9000\ndisableHttps = true\nlogSeverity = \"debug\"\n"
-	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+	values, err := load(CoreKeys(), []string{"-port", "9100", "-log-severity", "warn"}, environ())
+	require.NoError(t, err)
 
-	// ACT — file supplies all values
-	fromFile, err := load([]string{"-config", path}, environ())
+	// ACT
+	cfg, err := Core(values)
 
 	// ASSERT
 	require.NoError(t, err)
-	assert.Equal(t, 9000, fromFile.Port)
-	assert.Equal(t, "debug", fromFile.LogSeverity)
+	assert.Equal(t, 9100, cfg.Port)
+	assert.Equal(t, "warn", cfg.LogSeverity)
+	assert.True(t, cfg.DisableHTTPS)
+	assert.Equal(t, DefaultAuthTokensFile, cfg.AuthTokensFile)
+	assert.False(t, cfg.DisableAuth)
+}
 
-	// ACT — env overrides the file's port; the file's logSeverity survives
-	withEnv, err := load([]string{"-config", path}, environ("WEAVE_ADAPTER_PORT=9500"))
+func TestCore_ShouldReturnTheValidationError(t *testing.T) {
+	t.Parallel()
 
-	// ASSERT
+	// ARRANGE — loads cleanly (it is a well-formed boolean) but does not validate.
+	values, err := load(CoreKeys(), nil, environ("WEAVE_ADAPTER_DISABLE_HTTPS=false"))
 	require.NoError(t, err)
-	assert.Equal(t, 9500, withEnv.Port)
-	assert.Equal(t, "debug", withEnv.LogSeverity)
-}
-
-func TestLoad_ShouldErrorWhenConfigFileMissing(t *testing.T) {
-	t.Parallel()
 
 	// ACT
-	_, err := load([]string{"-config", "/no/such/file.toml"}, environ())
+	cfg, err := Core(values)
 
 	// ASSERT
 	require.Error(t, err)
-}
-
-func TestLoad_ShouldErrorWhenConfigFileMalformed(t *testing.T) {
-	t.Parallel()
-
-	// ARRANGE — an existing file whose contents are not valid TOML.
-	path := filepath.Join(t.TempDir(), "bad.toml")
-	require.NoError(t, os.WriteFile(path, []byte("@@@ not toml @@@\n"), 0o600))
-
-	// ACT
-	_, err := load([]string{"-config", path}, environ())
-
-	// ASSERT
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "loading config file")
-}
-
-func TestLoad_ShouldErrorWhenFlagInvalid(t *testing.T) {
-	t.Parallel()
-
-	// ACT — a non-numeric -port makes flag.Parse fail inside parseFlags.
-	_, err := load([]string{"-port", "notanumber"}, environ())
-
-	// ASSERT
-	require.Error(t, err)
-}
-
-func TestLoad_ShouldRejectWhenHTTPSEnabled(t *testing.T) {
-	t.Parallel()
-
-	// ACT — also exercises env string->bool parsing ("false" -> false)
-	_, err := load(nil, environ("WEAVE_ADAPTER_DISABLE_HTTPS=false"))
-
-	// ASSERT
-	require.Error(t, err)
+	assert.Nil(t, cfg)
 	assert.Contains(t, err.Error(), "disableHttps must be true")
 }
 
@@ -294,36 +183,6 @@ func TestValidate_ShouldReportProblems(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestLoad_ShouldDefaultAuthSettings(t *testing.T) {
-	t.Parallel()
-
-	// ARRANGE / ACT
-	cfg, err := load(nil, func() []string { return nil })
-
-	// ASSERT — auth is on by default; the token file is the one the CLI writes.
-	require.NoError(t, err)
-	assert.Equal(t, DefaultAuthTokensFile, cfg.AuthTokensFile)
-	assert.False(t, cfg.DisableAuth)
-}
-
-func TestLoad_ShouldResolveAuthTokensFilePrecedence(t *testing.T) {
-	t.Parallel()
-
-	// ARRANGE — env set, flag overrides it.
-	environ := func() []string { return []string{envAuthTokensFile + "=/from/env.toml"} }
-
-	// ACT
-	fromEnv, err := load(nil, environ)
-	require.NoError(t, err)
-
-	fromFlag, err := load([]string{"--auth-tokens-file", "/from/flag.toml"}, environ)
-	require.NoError(t, err)
-
-	// ASSERT
-	assert.Equal(t, "/from/env.toml", fromEnv.AuthTokensFile)
-	assert.Equal(t, "/from/flag.toml", fromFlag.AuthTokensFile)
 }
 
 func TestValidate_ShouldRejectEmptyTokensFileWhenAuthEnabled(t *testing.T) {

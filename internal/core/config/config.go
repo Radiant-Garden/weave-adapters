@@ -1,38 +1,46 @@
 // Package config loads and validates the adapter's runtime configuration.
 //
 // Precedence is flags > environment (WEAVE_ADAPTER_*) > TOML file > defaults.
-// The common struct holds only what M1 consumes; it grows per milestone as new
-// consumers land. Validate() fails fast at startup with all errors joined.
+// The package is adapter-agnostic: it owns the precedence machinery and the
+// key-registration primitives, but not the key set. CoreKeys declares the
+// adapter-agnostic keys; each adapter registers its own and builds its own
+// struct from the same Values, so one precedence pass serves both.
+//
+// The naming convention is derived rather than declared: a dotted camelCase key
+// maps to one flag and one environment variable, mechanically.
+//
+//	dhcp.commandTimeout  ->  -dhcp-command-timeout  ->  WEAVE_ADAPTER_DHCP_COMMAND_TIMEOUT
+//
+// Validate() fails fast at startup with all errors joined.
 package config
 
 import (
 	"errors"
-	"flag"
 	"fmt"
-	"os"
-	"strconv"
 
 	"github.com/go-playground/validator/v10"
-	"github.com/knadh/koanf/parsers/toml/v2"
-	"github.com/knadh/koanf/providers/confmap"
-	"github.com/knadh/koanf/providers/env/v2"
-	"github.com/knadh/koanf/providers/file"
-	"github.com/knadh/koanf/v2"
 )
 
 const (
-	envPrefix         = "WEAVE_ADAPTER_"
-	envPort           = envPrefix + "PORT"
-	envDisableHTTPS   = envPrefix + "DISABLE_HTTPS"
-	envLogSeverity    = envPrefix + "LOG_SEVERITY"
-	envAuthTokensFile = envPrefix + "AUTH_TOKENS_FILE"
-	envDisableAuth    = envPrefix + "DISABLE_AUTH"
+	envPrefix = "WEAVE_ADAPTER_"
 
 	defaultPort        = 8444
 	defaultLogSeverity = "info"
 
 	minPort = 1
 	maxPort = 65535
+)
+
+// Core configuration key names. Exported so a binary's wiring and its tests
+// refer to a key by constant rather than by a string literal that a rename
+// would leave behind.
+const (
+	KeyPort         = "port"
+	KeyDisableHTTPS = "disableHttps"
+	KeyLogSeverity  = "logSeverity"
+	//nolint:gosec // G101: a config key name, not a credential — it names the path to the store.
+	KeyAuthTokensFile = "authTokensFile"
+	KeyDisableAuth    = "disableAuth"
 )
 
 // DefaultAuthTokensFile is the token store both the server and the token CLI
@@ -50,8 +58,45 @@ const DefaultAuthTokensFile = "tokens.toml"
 // struct metadata).
 var validate = validator.New(validator.WithRequiredStructEnabled())
 
-// Config is the adapter's runtime configuration. Field rules are expressed as
-// validator struct tags and checked by Validate.
+// CoreKeys returns the adapter-agnostic keys every binary registers. An adapter
+// appends its own to this spec; it never edits it.
+func CoreKeys() Spec {
+	return Spec{
+		{
+			Name:    KeyPort,
+			Type:    TypeInt,
+			Default: defaultPort,
+			Usage:   "TCP listen port",
+		},
+		{
+			Name:    KeyDisableHTTPS,
+			Type:    TypeBool,
+			Default: true,
+			Usage:   "disable HTTPS (must be true in M1)",
+		},
+		{
+			Name:    KeyLogSeverity,
+			Type:    TypeString,
+			Default: defaultLogSeverity,
+			Usage:   "log level: debug|info|warn|error",
+		},
+		{
+			Name:    KeyAuthTokensFile,
+			Type:    TypeString,
+			Default: DefaultAuthTokensFile,
+			Usage:   "path to the bearer token store",
+		},
+		{
+			Name:    KeyDisableAuth,
+			Type:    TypeBool,
+			Default: false,
+			Usage:   "disable bearer authentication (development only)",
+		},
+	}
+}
+
+// Config is the adapter-agnostic runtime configuration. Field rules are
+// expressed as validator struct tags and checked by Validate.
 type Config struct {
 	// Port is the TCP port the HTTP server listens on.
 	Port int `koanf:"port" validate:"min=1,max=65535"`
@@ -67,59 +112,16 @@ type Config struct {
 	DisableAuth bool `koanf:"disableAuth"`
 }
 
-// Load reads configuration from flags, environment, an optional TOML file, and
-// built-in defaults, then validates the result. args are the CLI arguments
-// without the program name (e.g. os.Args[1:]).
-func Load(args []string) (*Config, error) {
-	return load(args, os.Environ)
-}
-
-// load is the testable core of Load with an injectable environment source.
-func load(args []string, environ func() []string) (*Config, error) {
-	configPath, overrides, err := parseFlags(args)
-	if err != nil {
-		return nil, err
-	}
-
-	k := koanf.New(".")
-
-	if err := k.Load(confmap.Provider(defaults(), "."), nil); err != nil {
-		return nil, fmt.Errorf("loading defaults: %w", err)
-	}
-
-	if configPath != "" {
-		if err := k.Load(file.Provider(configPath), toml.Parser()); err != nil {
-			return nil, fmt.Errorf("loading config file %q: %w", configPath, err)
-		}
-	}
-
-	transformer := &envTransformer{}
-
-	envProvider := env.Provider(".", env.Opt{
-		Prefix:        envPrefix,
-		EnvironFunc:   environ,
-		TransformFunc: transformer.transform,
-	})
-	if err := k.Load(envProvider, nil); err != nil {
-		return nil, fmt.Errorf("loading environment: %w", err)
-	}
-
-	if len(transformer.errs) > 0 {
-		return nil, errors.Join(transformer.errs...)
-	}
-
-	if len(overrides) > 0 {
-		if err := k.Load(confmap.Provider(overrides, "."), nil); err != nil {
-			return nil, fmt.Errorf("loading flags: %w", err)
-		}
-	}
-
+// Core builds and validates the core configuration from resolved values. It
+// panics if the core keys were not registered, which is a wiring mistake: every
+// binary composes its spec from CoreKeys.
+func Core(v *Values) (*Config, error) {
 	cfg := &Config{
-		Port:           k.Int("port"),
-		DisableHTTPS:   k.Bool("disableHttps"),
-		LogSeverity:    k.String("logSeverity"),
-		AuthTokensFile: k.String("authTokensFile"),
-		DisableAuth:    k.Bool("disableAuth"),
+		Port:           v.Int(KeyPort),
+		DisableHTTPS:   v.Bool(KeyDisableHTTPS),
+		LogSeverity:    v.String(KeyLogSeverity),
+		AuthTokensFile: v.String(KeyAuthTokensFile),
+		DisableAuth:    v.Bool(KeyDisableAuth),
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -127,102 +129,6 @@ func load(args []string, environ func() []string) (*Config, error) {
 	}
 
 	return cfg, nil
-}
-
-// defaults returns the built-in configuration values.
-func defaults() map[string]any {
-	return map[string]any{
-		"port":           defaultPort,
-		"disableHttps":   true,
-		"logSeverity":    defaultLogSeverity,
-		"authTokensFile": DefaultAuthTokensFile,
-		"disableAuth":    false,
-	}
-}
-
-// parseFlags parses CLI flags and returns the config file path and the set of
-// keys the user explicitly overrode (only visited flags win, so unset flags
-// don't clobber file/env values).
-func parseFlags(args []string) (configPath string, overrides map[string]any, err error) {
-	fs := flag.NewFlagSet("weave-adapter-dhcp-windows", flag.ContinueOnError)
-	port := fs.Int("port", 0, "TCP listen port")
-	disableHTTPS := fs.Bool("disable-https", false, "disable HTTPS (must be true in M1)")
-	logSeverity := fs.String("log-severity", "", "log level: debug|info|warn|error")
-	authTokensFile := fs.String("auth-tokens-file", "", "path to the bearer token store")
-	disableAuth := fs.Bool("disable-auth", false, "disable bearer authentication (development only)")
-	fs.StringVar(&configPath, "config", "", "path to a TOML config file")
-
-	if err = fs.Parse(args); err != nil {
-		return "", nil, err
-	}
-
-	overrides = make(map[string]any)
-
-	fs.Visit(func(f *flag.Flag) {
-		switch f.Name {
-		case "port":
-			overrides["port"] = *port
-		case "disable-https":
-			overrides["disableHttps"] = *disableHTTPS
-		case "log-severity":
-			overrides["logSeverity"] = *logSeverity
-		case "auth-tokens-file":
-			overrides["authTokensFile"] = *authTokensFile
-		case "disable-auth":
-			overrides["disableAuth"] = *disableAuth
-		}
-	})
-
-	return configPath, overrides, nil
-}
-
-// envTransformer maps WEAVE_ADAPTER_* environment variables onto config keys,
-// collecting the ones that cannot be read as their key's type.
-//
-// It carries state because koanf's TransformFunc cannot return an error, and
-// the boolean keys need one: koanf's k.Bool discards the parse failure and
-// answers false, so WEAVE_ADAPTER_DISABLE_AUTH=yes would silently become
-// "authentication stays on". That fails safe, but an operator who asked for
-// something and was told nothing has no way to discover the setting was ignored.
-//
-// The numeric keys are deliberately not treated the same way: a bad port
-// coerces to 0, which Validate then rejects by name, so the operator does hear
-// about it.
-type envTransformer struct {
-	errs []error
-}
-
-// transform is the koanf TransformFunc. Unrecognized variables return an empty
-// key and are ignored.
-func (t *envTransformer) transform(key, value string) (string, any) {
-	switch key {
-	case envPort:
-		return "port", value
-	case envDisableHTTPS:
-		return "disableHttps", t.parseBool(key, value)
-	case envLogSeverity:
-		return "logSeverity", value
-	case envAuthTokensFile:
-		return "authTokensFile", value
-	case envDisableAuth:
-		return "disableAuth", t.parseBool(key, value)
-	default:
-		return "", nil
-	}
-}
-
-// parseBool reads a boolean environment value, recording a failure rather than
-// letting it coerce to false.
-func (t *envTransformer) parseBool(name, value string) any {
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		t.errs = append(t.errs,
-			fmt.Errorf("%s=%q is not a boolean: use true/false, 1/0, t/f, T/F, TRUE/FALSE", name, value))
-
-		return nil
-	}
-
-	return parsed
 }
 
 // Validate reports all configuration problems at once (joined), rather than

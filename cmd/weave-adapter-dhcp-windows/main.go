@@ -104,7 +104,14 @@ func run(ctx context.Context, args []string) error {
 	// Taken before any work so uptime measures the process, not the server.
 	started := time.Now()
 
-	cfg, err := config.Load(args)
+	// The spec is composed here, at the one place that knows which adapter this
+	// binary is. Core owns the precedence machinery, never the key set.
+	values, err := config.Load(config.CoreKeys(), args)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	cfg, err := config.Core(values)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
