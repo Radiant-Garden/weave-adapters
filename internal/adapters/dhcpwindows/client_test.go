@@ -38,6 +38,10 @@ Tested:
 	  - TestListScopes_ShouldAttachStderrAsContext: the operator gets the shell's
 	    own words, bounded.
 	  - TestListScopes_ShouldRunTheLiteralScript: no value is interpolated in.
+	  - TestListScopes_ShouldApplyTheCommandTimeout: dhcp.commandTimeout actually
+	    bounds a call, rather than being validated and then ignored.
+	  - TestListScopes_ShouldNotExpireImmediatelyWithoutATimeout: zero means
+	    unbounded, not already-expired.
 
 	stderrContext
 	  - TestStderrContext_ShouldTruncateOnARuneBoundary: bounded without corrupting
@@ -76,6 +80,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -507,6 +512,54 @@ func TestListScopes_ShouldRunTheLiteralScript(t *testing.T) {
 
 	assert.Equal(t, listScopesScript, fake.scripts[0])
 	assert.NotContains(t, fake.scripts[0], "dhcp01.example.test")
+}
+
+func TestListScopes_ShouldApplyTheCommandTimeout(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a runner that reports the deadline it was handed.
+	var seen time.Duration
+
+	fake := &fakeRunner{
+		stdout: fixture(t, "scopes_single.json"),
+		onRun: func(ctx context.Context) {
+			if dl, ok := ctx.Deadline(); ok {
+				seen = time.Until(dl)
+			}
+		},
+	}
+
+	client := clientWith(fake)
+	client.commandTimeout = 250 * time.Millisecond
+
+	// ACT — a caller with no deadline at all, which is what a background or
+	// long-lived request context looks like.
+	_, err := client.ListScopes(context.Background())
+
+	// ASSERT — dhcp.commandTimeout was validated and documented but applied
+	// nowhere: ListScopes handed the caller's context straight to the runner. An
+	// operator raising the key (which BACKEND-101's troubleshooting advises)
+	// changed nothing, and exec.CommandContext cannot reclaim a hung
+	// powershell.exe without a deadline to act on.
+	require.NoError(t, err)
+	assert.Positive(t, seen, "the client must impose its own deadline, not rely on the caller's")
+	assert.LessOrEqual(t, seen, 250*time.Millisecond)
+}
+
+func TestListScopes_ShouldNotExpireImmediatelyWithoutATimeout(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a Client built directly, as the tests do, with no timeout set.
+	client := clientWith(&fakeRunner{stdout: fixture(t, "scopes_single.json")})
+
+	// ACT
+	scopes, err := client.ListScopes(context.Background())
+
+	// ASSERT — zero must mean unbounded, not already-expired. Config validation
+	// rejects a non-positive value so the binary never sees one, but treating
+	// zero as a deadline would cancel every call before it started.
+	require.NoError(t, err)
+	assert.Len(t, scopes, 1)
 }
 
 func TestStderrContext_ShouldTruncateOnARuneBoundary(t *testing.T) {

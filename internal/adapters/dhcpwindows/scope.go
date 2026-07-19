@@ -163,15 +163,24 @@ ConvertTo-Json -InputObject @($scopes) -Depth 5
 // objects with methods stripped, say — this is the field that ends the
 // investigation in one request instead of a screen-share.
 //
-// Only the count is taken, not the scopes themselves: the probe runs on a timer
-// and has no use for the bodies, and serializing them would make a health poll
-// as expensive as a real request.
+// Only each scope's id is projected, not the whole object: the probe wants to
+// know the query works, not what it returned, and the ids keep the payload small
+// while staying countable.
+//
+// The count is taken in Go rather than in PowerShell, deliberately. Whether
+// `@($x).Count` is 0 or 1 when a pipeline produced nothing turns on whether the
+// assignment left AutomationNull or $null in $x — a distinction two careful
+// readings of the same shell disagreed about. Go has no such ambiguity: both
+// `null` and `[]` unmarshal to a slice of length zero. A freshly provisioned
+// server with no scopes yet is the case that would otherwise report one scope
+// that does not exist, to an operator checking whether provisioning worked.
 const probeScript = scriptPreamble + `$params = @{}
 if ($env:` + envServerName + `) { $params['ComputerName'] = $env:` + envServerName + ` }
-$scopes = Get-DhcpServerv4Scope @params
+$scopeIds = Get-DhcpServerv4Scope @params |
+  Select-Object @{n='scopeId';e={$_.ScopeId.IPAddressToString}}
 ConvertTo-Json -InputObject @{
-  scopeCount = @($scopes).Count
+  scopes     = @($scopeIds)
   psVersion  = [string]$PSVersionTable.PSVersion
   psEdition  = [string]$PSVersionTable.PSEdition
-} -Depth 3
+} -Depth 5
 `

@@ -17,9 +17,9 @@ Tested:
       binary, mints a token through its own CLI, runs it as a subprocess and
       drives it over a real socket: health answers unauthenticated, a non-exempt
       route is 401 anonymous and 404 with the token, and the process exits 0 on
-      an interrupt. Health answers 503 rather than 200 because no CI runner has
-      a DHCP backend to probe -- see the assertion for why that is the honest
-      result rather than a broken test.
+      an interrupt. The backend component's verdict is deliberately not pinned:
+      it depends on whether the host running this gate has a reachable DHCP
+      server, and the WS2022 sign-off host does.
 
 Tested elsewhere:
   freePort: declared in main_test.go, which compiles alongside this file since
@@ -99,16 +99,10 @@ func TestSmoke_ShouldServeHealthAndEnforceAuthWhenRunAsABinary(t *testing.T) {
 	// See httpserver.Unauthenticated. This is also M1's sign-off criterion.
 	status, body := get(t, base+healthPath, "")
 
-	// 503, and deliberately so. The binary now probes a real DHCP backend, and
-	// no CI runner has one -- so an honest health response reports the
-	// dhcp-server component unavailable, and the overall status follows the
-	// worst component. What this still proves is everything the smoke test is
-	// for: the artifact runs, reads its configuration, serves health without a
-	// credential, and answers with a well-formed body.
-	//
-	// Asserting 200 here would mean asserting that a backend nobody can reach
-	// looks fine, which is the failure the live probe exists to prevent.
-	require.Equal(t, http.StatusServiceUnavailable, status,
+	// The status code is whatever this host's backend justifies, so it is
+	// checked against the body below rather than pinned here. What matters at
+	// this point is that health answered at all, and without a credential.
+	require.Contains(t, []int{http.StatusOK, http.StatusServiceUnavailable}, status,
 		"health must answer without credentials: %s", body)
 
 	var health struct {
@@ -122,14 +116,24 @@ func TestSmoke_ShouldServeHealthAndEnforceAuthWhenRunAsABinary(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(body, &health), "health payload: %s", body)
 
-	assert.Equal(t, "unavailable", health.Status)
 	assert.NotEmpty(t, health.Version, "version is empty -- check that -ldflags reached the build")
 
-	// The per-component split is what makes that answer useful: the adapter
-	// itself is serving, only its backend is out of reach. Both components must
-	// be present, or the probe is not actually wired into the shipped binary.
+	// Both components must be present, or the probe is not wired into the
+	// shipped binary. Their verdicts are deliberately not pinned: this runner
+	// has no powershell.exe and reports unavailable, while the WS2022 sign-off
+	// host has the DHCP role and reports healthy. Asserting either would make
+	// this gate test the environment rather than the artifact, and would fail
+	// on the one host the milestone exists to validate against.
 	assert.Contains(t, componentNames(health.Components), "core")
 	assert.Contains(t, componentNames(health.Components), "dhcp-server")
+
+	// Environment-independent, and the adapter's own rule: only unavailable
+	// withholds a 200, because only unavailable means "stop routing here".
+	if health.Status == "unavailable" {
+		assert.Equal(t, http.StatusServiceUnavailable, status, "unavailable must be served as 503")
+	} else {
+		assert.Equal(t, http.StatusOK, status, "a serving adapter must answer 200")
+	}
 
 	// Health being open says nothing about whether auth is wired, so drive a
 	// route that is not exempt. An unmatched path is the honest choice:

@@ -6,6 +6,16 @@ import (
 	coreevents "github.com/radiantgarden/weave-adapters/internal/core/events"
 )
 
+// CategoryDHCP is this adapter's own domain category, declared here rather than
+// in core.
+//
+// The distinction from CategoryBackend is the whole point of the split: BACKEND
+// is shared by every adapter, so its constant lives in core to stop a second
+// one being invented. DHCP belongs to this adapter alone, so core has no reason
+// to know the prefix exists — putting it there would make the adapter-agnostic
+// package name a specific backend, which is the rule CLAUDE.md exists to hold.
+const CategoryDHCP coreevents.EventCategory = "DHCP"
+
 // DHCP event IDs — this adapter's own domain category. Range 001–009 is
 // reserved for adapter lifecycle.
 const (
@@ -23,7 +33,7 @@ func init() {
 			"SYS-001. Its purpose is diagnostic: because the read path is stateless, nothing persists a previous " +
 			"identity to compare against, so an accidental re-key is otherwise invisible until a wall of sync " +
 			"failures appears hours later. This turns it into one log line at startup.",
-		Category: coreevents.CategoryDHCP.String(),
+		Category: CategoryDHCP.String(),
 		Topic:    "Identity",
 
 		Fields: []coreevents.FieldDef{

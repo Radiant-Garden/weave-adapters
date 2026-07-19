@@ -16,10 +16,14 @@ import (
 const ComponentName = "dhcp-server"
 
 // probeResult is what probeScript emits.
+//
+// Scopes is a slice rather than a count so the counting happens here: `null`
+// and `[]` both unmarshal to length zero, which removes the PowerShell
+// ambiguity described on probeScript.
 type probeResult struct {
-	ScopeCount int    `json:"scopeCount"`
-	PSVersion  string `json:"psVersion"`
-	PSEdition  string `json:"psEdition"`
+	Scopes    []struct{} `json:"scopes"`
+	PSVersion string     `json:"psVersion"`
+	PSEdition string     `json:"psEdition"`
 }
 
 // Probe reports whether the DHCP backend can actually be read. It satisfies
@@ -63,6 +67,17 @@ func (p *Probe) Name() string { return ComponentName }
 // definitions (unhealthy is "degraded but reachable") make unavailable the
 // right member for "cannot read at all".
 func (p *Probe) Check(ctx context.Context) health.Result {
+	// Detached from the caller's cancellation, then given our own deadline.
+	//
+	// health.refresh passes the *request* context down and caches whatever comes
+	// back for probeCacheTTL. Without this, an operator pressing ^C on a health
+	// poll cancels the probe, the cancellation is classified as a backend
+	// failure, and that verdict is cached — so the next unrelated poll within
+	// the TTL is served 503, weave stops routing, and the log shows a health
+	// transition caused by nothing but a disconnected client. Values and
+	// deadlines are inherited; only the cancellation is dropped.
+	ctx = context.WithoutCancel(ctx)
+
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
@@ -82,7 +97,7 @@ func (p *Probe) Check(ctx context.Context) health.Result {
 		Detail: "dhcp server reachable and scopes readable",
 		Fields: map[string]string{
 			"server":     p.serverLabel(),
-			"scopeCount": strconv.Itoa(result.ScopeCount),
+			"scopeCount": strconv.Itoa(len(result.Scopes)),
 			"psVersion":  result.PSVersion,
 			"psEdition":  result.PSEdition,
 		},
@@ -116,6 +131,19 @@ func (c *Client) probe(ctx context.Context) (probeResult, error) {
 	if err := json.Unmarshal(stdout, &result); err != nil {
 		return probeResult{}, c.backendError(ctx, opProbe,
 			fmt.Errorf("%w: %w%s", ErrBackendMalformed, err, stderrContext(stderr)))
+	}
+
+	// A payload that decodes but says nothing is not a successful probe.
+	//
+	// "null", "{}", or any object without the expected keys unmarshals into a
+	// zero probeResult with no error — and reporting *healthy* off that is
+	// precisely the lie Check exists to prevent: green would mean "something
+	// answered" rather than "we can read scopes". psVersion is the guard because
+	// probeScript always emits it, on every host, whatever the scope count. This
+	// mirrors the same strictness decodeScopes applies on the list path.
+	if result.PSVersion == "" {
+		return probeResult{}, c.backendError(ctx, opProbe,
+			fmt.Errorf("%w: no psVersion in the probe payload%s", ErrBackendMalformed, stderrContext(stderr)))
 	}
 
 	return result, nil

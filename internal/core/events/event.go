@@ -125,20 +125,20 @@ type EventCategory string
 // Core (adapter-agnostic) categories. Adapters register their own categories in
 // their own packages; the registry just accumulates them.
 const (
-	CategorySystem  EventCategory = "SYS" // Lifecycle / shutdown
-	CategoryAPI     EventCategory = "API" // HTTP request/response, auth outcomes
-	CategoryHealth  EventCategory = "HLT" // Health transitions
-	CategoryConfig  EventCategory = "CFG" // Config load/validate
-	CategoryCache   EventCategory = "CACHE"
-	CategoryJob     EventCategory = "JOB"
-	CategoryBackend EventCategory = "BACKEND"
+	CategorySystem EventCategory = "SYS" // Lifecycle / shutdown
+	CategoryAPI    EventCategory = "API" // HTTP request/response, auth outcomes
+	CategoryHealth EventCategory = "HLT" // Health transitions
+	CategoryConfig EventCategory = "CFG" // Config load/validate
+	CategoryCache  EventCategory = "CACHE"
+	CategoryJob    EventCategory = "JOB"
 
-	// CategoryDHCP is the DHCP-Windows adapter's own domain category. It is
-	// declared here only so every category prefix is visible in one list; the
-	// events themselves are registered by the adapter, in
-	// internal/adapters/dhcpwindows/events. Core neither emits nor depends on
-	// them — see .claude/guidelines/event-logging.md.
-	CategoryDHCP EventCategory = "DHCP"
+	// CategoryBackend is shared by every adapter's backend client. It is the one
+	// category core declares without owning any of its events: the constant
+	// lives here so nobody defines a second one, while each adapter registers
+	// its own BACKEND-xxx in a partitioned ID range. An adapter's *own* domain
+	// category is declared in that adapter's package, not here — see
+	// .claude/guidelines/event-logging.md.
+	CategoryBackend EventCategory = "BACKEND"
 )
 
 // String returns the category prefix as a string.

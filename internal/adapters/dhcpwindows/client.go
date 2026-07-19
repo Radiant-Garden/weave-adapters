@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	adapterevents "github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows/events"
@@ -52,9 +53,14 @@ var (
 // Client reads scopes from a Windows DHCP server. It is safe for concurrent
 // use: it holds only configuration, and each call spawns its own process.
 type Client struct {
-	runner       runner
-	serverName   string
-	namespaceKey []byte
+	runner runner
+	// commandTimeout bounds one backend invocation. It is applied here rather
+	// than left to callers: exec.CommandContext only honours a deadline that
+	// exists, so a caller passing a plain context would spawn a powershell.exe
+	// nothing can reclaim, and cmd.WaitDelay would never come into play.
+	commandTimeout time.Duration
+	serverName     string
+	namespaceKey   []byte
 }
 
 // NewClient returns a client reading from the configured server.
@@ -71,9 +77,31 @@ func NewClient(cfg Config) *Client {
 			path:   cfg.PowerShellPath,
 			server: cfg.Server,
 		},
-		serverName:   cfg.ServerName,
-		namespaceKey: []byte(cfg.NamespaceKey),
+		commandTimeout: cfg.CommandTimeout,
+		serverName:     cfg.ServerName,
+		namespaceKey:   []byte(cfg.NamespaceKey),
 	}
+}
+
+// bounded applies the per-invocation timeout to a call.
+//
+// Every backend call goes through here, so dhcp.commandTimeout is actually
+// enforced rather than merely validated. It was neither applied nor reachable
+// before: ListScopes handed the caller's context straight to the runner, so an
+// operator raising the key — which BACKEND-101's own troubleshooting text
+// advises — changed nothing at all, and a hung shell was bounded only by
+// whatever deadline the caller happened to carry.
+//
+// A zero timeout means unbounded rather than instantly-expired. Config
+// validation rejects a non-positive value, so the binary never sees one; this
+// is for a Client built directly in a test, where a deadline of zero would
+// otherwise cancel every call before it began.
+func (c *Client) bounded(ctx context.Context) (context.Context, context.CancelFunc) {
+	if c.commandTimeout <= 0 {
+		return ctx, func() {}
+	}
+
+	return context.WithTimeout(ctx, c.commandTimeout)
 }
 
 // ListScopes returns every IPv4 scope on the server, each carrying its derived
@@ -88,6 +116,9 @@ func NewClient(cfg Config) *Client {
 // It is one PowerShell spawn, and the whole read path: read, derive, serve. No
 // writes, no re-read, no verification, no singleflight.
 func (c *Client) ListScopes(ctx context.Context) ([]Scope, error) {
+	ctx, cancel := c.bounded(ctx)
+	defer cancel()
+
 	stdout, stderr, err := c.runner.run(ctx, listScopesScript)
 	if err != nil {
 		return nil, c.backendError(ctx, opListScopes, runError(err, stderr))
@@ -129,6 +160,17 @@ const (
 // It returns the error rather than swallowing it: handlers still return errors,
 // and apierror.WriteError remains the one place that logs *and* responds. This
 // logs the backend fact; that logs the client-facing outcome.
+//
+// A persistently unreachable backend therefore logs one ERROR per failed call,
+// including one per health poll that misses the probe cache. That repetition is
+// accepted rather than overlooked. The rate is bounded — the probe runs at most
+// once per health.probeCacheTTL, and only when someone actually polls health —
+// and the line carries the shell's own stderr, which is the single most useful
+// diagnostic and otherwise reaches the log nowhere: HLT-001 fires once on the
+// status transition and names no cause, and the health response carries the
+// detail only to whoever polled it. Suppressing the repeat would need
+// last-failure state in a package that is deliberately stateless, to save an
+// operator from log lines that are telling them the truth.
 func (c *Client) backendError(ctx context.Context, operation string, err error) error {
 	events.Emit(ctx, adapterevents.BACKEND101, "operation", operation, "error", err.Error())
 

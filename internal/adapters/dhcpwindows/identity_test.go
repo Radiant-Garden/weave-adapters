@@ -18,9 +18,18 @@ Tested:
 	  - TestDeriveWadaptID_ShouldPreserveByteOrderInEncodedOrder: the base32hex
 	    property the standard alphabet does not have.
 
+	NamespaceKeyFingerprint
+	  - TestNamespaceKeyFingerprint_ShouldNeverRevealTheKey: it goes into a log line
+	    at every startup, so it must be one-way rather than a shortened copy.
+	  - TestNamespaceKeyFingerprint_ShouldIdentifyAKeyAcrossRestarts: stable for one
+	    key, different for another — otherwise it cries re-key every restart, or
+	    stays silent through a real one.
+	  - TestNamespaceKeyFingerprint_ShouldReturnNothingForNoKey: an absent key is a
+	    startup failure, not a value to fingerprint.
+
 	canonicalServerName
-	  - TestCanonicalServerName_ShouldFoldTheFormsOfOneName: case, trailing dot and
-	    surrounding space are one identity, not four.
+	  - TestCanonicalServerName_ShouldFoldTheFormsOfOneName: case, trailing dots and
+	    surrounding space are one identity, not several.
 
 Tested elsewhere:
 
@@ -175,6 +184,53 @@ func TestDeriveWadaptID_ShouldPreserveByteOrderInEncodedOrder(t *testing.T) {
 	// cannot diverge even if a later change compares the wrong one.
 	assert.Greater(t, standardLow, standardHigh, "the standard alphabet is expected to invert this order")
 	assert.Less(t, hexLow, hexHigh, "base32hex must preserve byte order in encoded order")
+}
+
+func TestNamespaceKeyFingerprint_ShouldNeverRevealTheKey(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a key with a recognisable substring, so leakage is detectable
+	// rather than merely improbable.
+	const key = "supersecret-namespace-key-0123456789"
+
+	// ACT
+	got := NamespaceKeyFingerprint(key)
+
+	// ASSERT — this value goes into a log line at every startup, which gets
+	// shipped, pasted into tickets and indexed by a SIEM. The key is
+	// backup-critical, so the fingerprint must be a one-way function of it and
+	// not merely a shortened copy.
+	assert.NotContains(t, got, "supersecret")
+	assert.NotContains(t, got, key)
+	assert.NotContains(t, key, got)
+	assert.Len(t, got, fingerprintBytes*2, "a fingerprint is %d bytes of hex", fingerprintBytes)
+	assert.Regexp(t, `^[0-9a-f]+$`, got)
+}
+
+func TestNamespaceKeyFingerprint_ShouldIdentifyAKeyAcrossRestarts(t *testing.T) {
+	t.Parallel()
+
+	// ACT
+	first := NamespaceKeyFingerprint(fixedKey)
+	second := NamespaceKeyFingerprint(fixedKey)
+	other := NamespaceKeyFingerprint(fixedKey + "-rotated")
+
+	// ASSERT — the whole point is comparing one startup against the previous
+	// one, so it has to be stable for a key and different for another. A
+	// fingerprint that drifted would cry re-key on every restart; one that
+	// collided would stay silent through a real one.
+	assert.Equal(t, first, second)
+	assert.NotEqual(t, first, other)
+}
+
+func TestNamespaceKeyFingerprint_ShouldReturnNothingForNoKey(t *testing.T) {
+	t.Parallel()
+
+	// ACT / ASSERT — an absent key is a startup failure, not a value to
+	// fingerprint. Hashing "" would put a fixed, real-looking fingerprint in the
+	// log for a configuration that cannot run, and that constant would be
+	// identical across every broken deployment.
+	assert.Empty(t, NamespaceKeyFingerprint(""))
 }
 
 func TestCanonicalServerName_ShouldFoldTheFormsOfOneName(t *testing.T) {

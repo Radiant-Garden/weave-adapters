@@ -74,9 +74,21 @@ import (
 	adapterevents "github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows/events"
 )
 
-// healthyProbeOutput is what probeScript emits against a working host.
+// healthyProbeOutput is what probeScript emits against a working host with
+// three scopes.
 const healthyProbeOutput = `{
-    "scopeCount":  3,
+    "scopes":  [
+        { "scopeId": "192.168.178.0" },
+        { "scopeId": "192.168.2.0" },
+        { "scopeId": "10.0.5.0" }
+    ],
+    "psVersion":  "5.1.20348.558",
+    "psEdition":  "Desktop"
+}`
+
+// emptyProbeOutput is a working host that simply has no scopes yet.
+const emptyProbeOutput = `{
+    "scopes":  [],
     "psVersion":  "5.1.20348.558",
     "psEdition":  "Desktop"
 }`
@@ -119,6 +131,47 @@ func TestProbeCheck_ShouldReportHealthyWithOperatorFields(t *testing.T) {
 	assert.Equal(t, "Desktop", result.Fields["psEdition"])
 }
 
+func TestProbeCheck_ShouldReportZeroScopesForAFreshlyProvisionedServer(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the role is installed and readable, but nothing is configured
+	// yet. A working server, not a broken one.
+	probe := probeWith(&fakeRunner{stdout: []byte(emptyProbeOutput)})
+
+	// ACT
+	result := probe.Check(context.Background())
+
+	// ASSERT — healthy, and honestly zero. Counting in PowerShell risked
+	// reporting 1 here, depending on whether an empty pipeline leaves
+	// AutomationNull or $null behind — so the count is taken in Go, where both
+	// "null" and "[]" are unambiguously length zero. An operator verifying
+	// provisioning would otherwise be shown a scope that does not exist.
+	assert.Equal(t, health.StatusHealthy, result.Status)
+	assert.Equal(t, "0", result.Fields["scopeCount"])
+}
+
+func TestProbeCheck_ShouldSurviveACancelledCaller(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a caller who has already gone away, which is what an operator
+	// pressing ^C on a health poll produces.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	probe := probeWith(&fakeRunner{stdout: []byte(healthyProbeOutput)})
+
+	// ACT
+	result := probe.Check(ctx)
+
+	// ASSERT — the probe must not inherit that cancellation. health.refresh
+	// caches whatever the probe returns for its whole TTL, so treating a
+	// disconnected client as a backend failure would serve 503 to the next
+	// unrelated poll, stop weave routing, and log a health transition caused by
+	// nothing but a dropped connection.
+	assert.Equal(t, health.StatusHealthy, result.Status,
+		"a caller disconnecting must not mark the backend unavailable")
+}
+
 func TestProbeCheck_ShouldReportUnavailableWhenTheBackendFails(t *testing.T) {
 	t.Parallel()
 
@@ -151,6 +204,19 @@ func TestProbeCheck_ShouldReportUnavailableWhenTheBackendFails(t *testing.T) {
 			name:       "the shell speaks nonsense",
 			fake:       &fakeRunner{stdout: []byte("not json at all")},
 			wantDetail: "malformed",
+		},
+		{
+			// Decodes cleanly into a zero probeResult. Reporting healthy off
+			// this would make green mean "something answered" rather than "we
+			// can read scopes".
+			name:       "an empty object",
+			fake:       &fakeRunner{stdout: []byte(`{}`)},
+			wantDetail: "no psVersion",
+		},
+		{
+			name:       "a bare null",
+			fake:       &fakeRunner{stdout: []byte(`null`)},
+			wantDetail: "no psVersion",
 		},
 	}
 

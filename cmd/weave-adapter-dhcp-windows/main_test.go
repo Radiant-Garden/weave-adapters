@@ -58,6 +58,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	adapterevents "github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/auth"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 	eventstest "github.com/radiantgarden/weave-adapters/internal/core/events/testing"
@@ -213,30 +214,42 @@ func TestRun_ShouldServeHealthUntilContextCancelled(t *testing.T) {
 	// ASSERT — the config port, health handler, and middleware chain are wired,
 	// and health answers without a credential even though auth is enabled.
 	//
-	// 503, not 200, and that is the correct answer rather than a broken test.
-	// The adapter now probes a real DHCP backend, and this host has no
-	// powershell.exe — so the dhcp-server component is genuinely unavailable and
-	// the overall status follows it. Asserting 200 would require the probe to
-	// report a backend it cannot reach as working, which is the exact lie the
-	// live probe exists to prevent.
-	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
-
 	var body health.Response
 	require.NoError(t, json.Unmarshal(raw, &body))
 
-	assert.Equal(t, health.StatusUnavailable, body.Status)
 	assert.Equal(t, version, body.Version)
 
-	// The per-component split is what makes that answer useful: the adapter
-	// itself is up and serving — only its backend is unreachable.
+	// Deliberately NOT asserting a particular verdict for the backend.
+	//
+	// This host decides that, not the code: a dev machine and a Linux runner
+	// have no powershell.exe, so the component is unavailable, while the WS2022
+	// sign-off host has the DHCP role and reports healthy. Pinning either would
+	// make the gate assert a property of the environment under a test named for
+	// a property of the adapter — and would turn the first genuinely working
+	// run on WS2022 red, reading as "the probe broke" precisely when it finally
+	// worked.
+	//
+	// What *is* environment-independent, and is asserted: both components are
+	// present, the adapter's own core is healthy, and the status code agrees
+	// with the status in the body.
 	components := make(map[string]health.Status, len(body.Components))
 	for _, c := range body.Components {
 		components[c.Name] = c.Status
 	}
 
 	assert.Equal(t, health.StatusHealthy, components["core"])
-	assert.Equal(t, health.StatusUnavailable, components["dhcp-server"],
+	assert.Contains(t, components, "dhcp-server",
 		"the probe must be wired into the binary, not just constructible")
+
+	// The mapping is the adapter's own rule: only unavailable withholds a 200,
+	// because only unavailable means "stop routing here".
+	wantCode := http.StatusOK
+	if body.Status == health.StatusUnavailable {
+		wantCode = http.StatusServiceUnavailable
+	}
+
+	require.Equal(t, wantCode, resp.StatusCode,
+		"the status code must agree with the status in the body")
 	assert.NotEmpty(t, resp.Header.Get("X-Request-Id"))
 
 	// A protected path rejects an anonymous caller and accepts the token.
@@ -252,6 +265,22 @@ func TestRun_ShouldServeHealthUntilContextCancelled(t *testing.T) {
 	rec.AssertEmitted(t, catalog.SYS001)
 	rec.AssertData(t, catalog.SYS001, "version", version)
 	rec.AssertEmitted(t, catalog.SYS004)
+
+	// The identity inputs are logged once at startup, and this is what keeps
+	// DHCP-001 from being a ghost event: it is registered by the adapter but
+	// emitted here, so only a test of the real wiring proves anything emits it.
+	//
+	// The fingerprint is asserted to be present and *not* the key. That value
+	// travels into shipped logs and pasted tickets, so a change that started
+	// logging identity.namespaceKey directly has to fail here.
+	rec.AssertEmitted(t, adapterevents.DHCP001)
+	rec.AssertData(t, adapterevents.DHCP001, "serverName", "dhcp01.test")
+
+	fingerprint := rec.FindByID(adapterevents.DHCP001)[0].Data("namespaceKeyFingerprint")
+	assert.NotEmpty(t, fingerprint)
+	assert.NotEqual(t, "main-test-namespace-key-0123456789", fingerprint,
+		"the startup event must log a fingerprint, never the namespace key")
+
 	rec.AssertMatchesCatalog(t)
 }
 
@@ -310,6 +339,59 @@ func TestRun_ShouldRefuseToStartWithoutTokens(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 			rec.AssertNotEmitted(t, catalog.SYS002)
+		})
+	}
+}
+
+//nolint:paralleltest // observability.Setup replaces the global slog logger
+func TestRun_ShouldReportCoreAndAdapterConfigProblemsTogether(t *testing.T) {
+	// ARRANGE — one problem from each half: a port core rejects, and identity
+	// inputs the adapter requires and has no default for.
+	//
+	// ACT
+	err := run(t.Context(), []string{"--port", "70000"})
+
+	// ASSERT — the two configurations are validated separately and joined, so
+	// an operator fixing a misconfigured deployment sees everything in one run
+	// rather than one problem per restart. Returning on the first error would
+	// hide the identity keys behind the port.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "port must be between")
+	assert.Contains(t, err.Error(), "identity.namespaceKey is required")
+	assert.Contains(t, err.Error(), "identity.serverName is required")
+}
+
+//nolint:paralleltest // observability.Setup replaces the global slog logger
+func TestRun_ShouldRefuseToStartWithoutTheIdentityInputs(t *testing.T) {
+	tests := []struct {
+		name        string
+		args        []string
+		wantMessage string
+	}{
+		{
+			name:        "no namespace key",
+			args:        []string{"--identity-server-name", "dhcp01.test"},
+			wantMessage: "identity.namespaceKey is required",
+		},
+		{
+			name:        "no server name",
+			args:        []string{"--identity-namespace-key", "main-test-namespace-key-0123456789"},
+			wantMessage: "identity.serverName is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) { //nolint:paralleltest // observability.Setup is global
+			// ACT
+			err := run(t.Context(), append(tt.args, "--port", strconv.Itoa(freePort(t)), "--disable-auth"))
+
+			// ASSERT — neither input may be defaulted or guessed: an
+			// auto-generated namespace key regenerating on reinstall, and a
+			// server name following os.Hostname(), are both fleet-wide re-keys.
+			// Refusing to start is the mitigation, so it is asserted on the
+			// binary rather than only on the config package.
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantMessage)
 		})
 	}
 }
