@@ -260,6 +260,28 @@ Single-scope test server, 2026-07-18.
 | `State` / `Type` cast cleanly | ✅ `[string]` → `"Active"` / `"Dhcp"` |
 | Full projection round-trips | ✅ ten flat fields, no CIM leakage |
 
+### The create path, 2026-07-20
+
+The `e2e` gate on the same host, first run, no iteration. Everything below had
+until then been asserted only against a hand-written fixture.
+
+| Assumption | Result |
+|---|---|
+| `Add-DhcpServerv4Scope -PassThru` emits the read projection | ✅ decoded by the same `decodeScopes` the read path uses |
+| Go and Windows agree on the derived `scopeId` | ✅ the created scope came back on the subnet the adapter computed |
+| **`exec.Cmd.Env` carries more than one value** | ✅ eight, with per-field omission — see below |
+| The conflict marker survives a real round trip | ✅ a duplicate subnet is a `409`, not a `502` |
+| `Location` resolves | ✅ the URL the `201` returned served the scope |
+| Validation precedes the backend | ✅ four rejected bodies, subnet still empty afterwards |
+| Cleanup leaves the host as found | ✅ `scopeCount` was `1` before, between and after |
+
+**The env row is the one that was actually load-bearing.** Every read command
+passes exactly one value that way, so the read path only ever proved the
+mechanism works for one. Create passes up to eight and decides per field whether
+to splat at all — and a dropped optional does not error, it comes back as a
+Windows default and reads as a successful create. `description` and
+`leaseDurationSeconds` are asserted on the way back out for that reason.
+
 **Still unverified**, and worth closing at sign-off:
 
 - The non-ASCII fixture is hand-written, not captured from the host. It guards
@@ -268,4 +290,15 @@ Single-scope test server, 2026-07-18.
   and description.
 - Whether stderr is silent across a *successful* run.
 - `ListScopes` latency at a representative scope count, which is the input the
-  cache decision is gated on.
+  cache decision is gated on. The e2e timings do **not** answer this: each case
+  builds the binary and starts a process, so its 5–11s covers far more than a
+  query, and the host holds one scope.
+- **Attribute drift (`DHCP-002`) against a real delete-and-recreate.** The
+  ledger is proven against constructed scopes only. Asserting it end to end
+  needs the harness to capture and parse the adapter's own stderr, which no test
+  here does yet — so the guard on the milestone's one accepted silent failure is
+  the least-verified thing in the write path.
+- The **single-scope host** leaves the ordering, uniqueness and pagination-walk
+  assertions passing vacuously, which `TestE2E_ShouldServeScopes` says in its own
+  output. A second scope would make seven read assertions mean something; it
+  costs one `Add-DhcpServerv4Scope`.
