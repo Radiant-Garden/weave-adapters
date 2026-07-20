@@ -105,9 +105,12 @@ components:
         The problem types this version of core defines. An adapter may add its
         own, but never a second error shape.
 
-        Entries exist only for codes something actually returns; the rest of the
-        taxonomy in 02-shared-core.md (conflict, precondition-failed, the
-        backend codes) arrives with the code that emits it.
+        Entries exist only for codes something actually returns. The backend
+        codes are live: an adapter maps its backend'''s failures onto them, so a
+        client sees backend-unavailable or backend-error with a 502 and
+        backend-timeout with a 504 rather than one indistinguishable 500. The
+        rest of the taxonomy in 02-shared-core.md (conflict,
+        precondition-failed) still arrives with the code that emits it.
       enum:
         - weave-adapters:validation-failed
         - weave-adapters:unauthorized

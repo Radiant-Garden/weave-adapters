@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"slices"
 
 	adapterevents "github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows/events"
@@ -82,9 +83,7 @@ func (h *ScopesHandler) list(w http.ResponseWriter, r *http.Request) error {
 	// Filter before paging, so pageSize counts matching scopes rather than
 	// scanned ones. Filtering after would return short pages — or an empty one
 	// with a next cursor — for a filter that excludes most of the collection.
-	if filter != "" {
-		scopes = slices.DeleteFunc(scopes, func(s Scope) bool { return s.ScopeID != filter })
-	}
+	scopes = filterByScopeID(scopes, filter)
 
 	page, next := h.paginate(scopes, params, r)
 
@@ -98,13 +97,48 @@ func (h *ScopesHandler) list(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
+// filterByScopeID returns the scopes matching filter, or all of them when no
+// filter was given.
+//
+// It builds a new slice rather than compacting in place, and that is the whole
+// point of the function existing. slices.DeleteFunc would filter the caller's
+// slice: it moves matches to the front, zeroes the tail, and returns a shorter
+// header over the *same* array — so the listing the backend handed us comes
+// back with its remaining entries blanked. Today Client.ListScopes allocates
+// fresh on every call, so nothing shares that array and the damage is invisible;
+// the moment anything caches a listing (which the cache phase is specified to
+// do — it holds the last read) one filtered request would poison it, and every
+// later request would serve scopes with an empty scopeId and an empty wadaptId.
+//
+// A scope with no identity is exactly what this milestone's central invariant
+// forbids, and an empty scopeId is what decodeScopes rejects on the way in. It
+// is not worth leaving a landmine that produces one, to save an allocation on a
+// path that has just spawned a PowerShell process.
+func filterByScopeID(scopes []Scope, filter string) []Scope {
+	if filter == "" {
+		return scopes
+	}
+
+	// At most one match: Windows permits exactly one scope per subnet, and
+	// scopeId *is* the subnet.
+	matched := make([]Scope, 0, 1)
+
+	for _, s := range scopes {
+		if s.ScopeID == filter {
+			matched = append(matched, s)
+		}
+	}
+
+	return matched
+}
+
 // parseQuery resolves both query concerns, reporting every failure at once.
 //
 // Both are validated before either is rejected, because this API's rule is that
 // a client fixes all its mistakes in one round trip rather than discovering
 // them one attempt at a time. Returning pagination's error the moment it
 // appeared would hide a bad scopeId behind a bad pageSize.
-func (h *ScopesHandler) parseQuery(query map[string][]string) (pagination.Params, string, error) {
+func (h *ScopesHandler) parseQuery(query url.Values) (pagination.Params, string, error) {
 	var fieldErrors []apierror.FieldError
 
 	params, pageErr := h.pages.Parse(query)
@@ -118,10 +152,8 @@ func (h *ScopesHandler) parseQuery(query map[string][]string) (pagination.Params
 		return pagination.Params{}, "", pageErr
 	}
 
-	filter, filterErr := parseScopeIDFilter(query)
-	if filterErr != nil {
-		fieldErrors = append(fieldErrors, *filterErr)
-	}
+	filter, filterErrs := parseScopeIDFilter(query)
+	fieldErrors = append(fieldErrors, filterErrs...)
 
 	if len(fieldErrors) > 0 {
 		return pagination.Params{}, "", apierror.Validation(fieldErrors...)
@@ -139,21 +171,20 @@ func (h *ScopesHandler) parseQuery(query map[string][]string) (pagination.Params
 // address — the client validates that on decode — so a malformed one can never
 // match, and answering 200 with an empty list would tell a client its filter
 // worked and the server has no such scope.
-func parseScopeIDFilter(query map[string][]string) (string, *apierror.FieldError) {
-	// First value, as net/http does for a repeated parameter.
-	values := query[ParamScopeID]
-	if len(values) == 0 || values[0] == "" {
+func parseScopeIDFilter(query url.Values) (string, []apierror.FieldError) {
+	// Get takes the first value of a repeated parameter, which is what net/http
+	// does everywhere else.
+	raw := query.Get(ParamScopeID)
+	if raw == "" {
 		return "", nil
 	}
 
-	raw := values[0]
-
 	addr, err := netip.ParseAddr(raw)
 	if err != nil || !addr.Is4() {
-		return "", &apierror.FieldError{
+		return "", []apierror.FieldError{{
 			Field:   ParamScopeID,
 			Message: "must be an IPv4 address, e.g. 192.168.178.0",
-		}
+		}}
 	}
 
 	// The parsed form, so the comparison can only ever see a spelling the

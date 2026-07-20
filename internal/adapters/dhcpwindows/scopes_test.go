@@ -19,6 +19,7 @@ Tested:
 	  - TestScopes_ShouldClampPageSizeToTheConfiguredMaximum: over the max is clamped, not rejected.
 	parseScopeIDFilter / the ?scopeId= filter
 	  - TestScopes_ShouldFilterByScopeId: exact equality on the subnet address.
+	  - TestScopes_ShouldNotMutateTheCollectionWhenFiltering: filtering never writes through to the backend's slice.
 	  - TestScopes_ShouldCarryQueryParametersIntoNextPageUrl: pageSize survives the link, pageToken is replaced not appended.
 	  - TestScopes_ShouldRejectAnAmbiguouslySpelledFilter: a leading-zero address is a 400, not a guess.
 	  - TestScopes_ShouldRejectAMalformedScopeIdFilter: 400 with a field error, not an empty 200.
@@ -379,6 +380,48 @@ func TestScopes_ShouldFilterByScopeId(t *testing.T) {
 	// exists, and it has no member on that subnet.
 	empty := getPage(t, handler, "scopeId=10.0.9.0")
 	assert.Empty(t, empty.Items)
+}
+
+func TestScopes_ShouldNotMutateTheCollectionWhenFiltering(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the fake hands back the same slice on every call, which is what
+	// a cache would do, and what the cache phase is specified to do: it holds
+	// the last read. Filtering in place would compact that array and zero its
+	// tail, so the damage lands on every *later* request rather than on the one
+	// that caused it.
+	scopes := scopesFor(t, "10.0.1.0", "10.0.2.0", "10.0.3.0")
+	backend := &fakeLister{scopes: scopes}
+	handler := NewScopesHandler(backend, testPageConfig(50, 500))
+
+	before := make([]string, len(backend.scopes))
+	for i, s := range backend.scopes {
+		before[i] = s.ScopeID
+	}
+
+	// ACT — one filtered request, then read the whole collection back.
+	filtered := getPage(t, handler, "scopeId=10.0.2.0")
+	require.Len(t, filtered.Items, 1)
+
+	// ASSERT — the backend's own listing is untouched...
+	after := make([]string, len(backend.scopes))
+	for i, s := range backend.scopes {
+		after[i] = s.ScopeID
+	}
+
+	assert.Equal(t, before, after, "filtering must not write through to the caller's slice")
+
+	// ...and an unfiltered request still sees every scope, each with an
+	// identity. Before this was fixed, the two scopes the filter excluded came
+	// back with an empty scopeId and an empty wadaptId — a scope with no
+	// identity, which is the one thing this milestone's invariant forbids.
+	all := getPage(t, handler, "")
+	require.Len(t, all.Items, 3)
+
+	for _, item := range all.Items {
+		assert.NotEmpty(t, item.ScopeID)
+		assert.Len(t, item.WadaptID, WadaptIDLength)
+	}
 }
 
 func TestScopes_ShouldCarryQueryParametersIntoNextPageUrl(t *testing.T) {

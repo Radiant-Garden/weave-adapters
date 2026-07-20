@@ -45,10 +45,17 @@ draining in-flight requests first.
 |---|---|---|
 | `GET /api/v1/health` | none | Status, version, uptime, per-component detail |
 | `GET /openapi.yaml` | none | The served API contract, as YAML |
+| `GET /api/v1/scopes` | bearer | The server's IPv4 DHCP scopes: cursor-paginated, strong `ETag`, `?scopeId=` filter |
 | everything else | bearer | `401` without a valid token — including paths that match no route |
 
 `/api/v1/health` returns `200` when healthy or unhealthy and `503` when
 unavailable, so a readiness probe can key on the status code alone.
+
+`/api/v1/scopes` reads the DHCP server on every request — the read path is
+stateless, so a walk of P pages costs P backend calls. A failure there is `502`
+(unreachable, or unusable output) or `504` (timed out), never `500`: the adapter
+is a gateway, and a `500` would claim the adapter itself is broken. See
+[dhcp-backend.md](dhcp-backend.md).
 
 ## Token management
 
