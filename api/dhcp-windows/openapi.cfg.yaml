@@ -1,0 +1,18 @@
+# oapi-codegen config for openapi.yaml. See spec.go for why these options.
+package: dhcpwindows
+output: openapi.gen.go
+generate:
+  models: true
+output-options:
+  # Render optional fields as T with omitempty rather than *T, so the generated
+  # Scope is the same shape as the hand-written one in
+  # internal/adapters/dhcpwindows and the conformance test can compare them
+  # directly.
+  prefer-skip-optional-pointer: true
+# The spec $refs Problem and the page parameters out of ../common/. Mapping
+# those documents to the package already generated from them means the output
+# reuses common.Problem instead of redeclaring a second copy of the one error
+# shape every adapter returns.
+import-mapping:
+  "../common/errors.yaml": "github.com/radiantgarden/weave-adapters/api/common"
+  "../common/pagination.yaml": "github.com/radiantgarden/weave-adapters/api/common"

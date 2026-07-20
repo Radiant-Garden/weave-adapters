@@ -44,7 +44,7 @@ draining in-flight requests first.
 | Path | Auth | Purpose |
 |---|---|---|
 | `GET /api/v1/health` | none | Status, version, uptime, per-component detail |
-| `GET /openapi.yaml` | none | Reserved; returns 404 until the spec lands |
+| `GET /openapi.yaml` | none | The served API contract, as YAML |
 | everything else | bearer | `401` without a valid token — including paths that match no route |
 
 `/api/v1/health` returns `200` when healthy or unhealthy and `503` when

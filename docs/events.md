@@ -172,7 +172,7 @@
 - **Detail:** The requested {{resource}} was not found.
 - **Impacts:** `request_rejected`
 
-**Example:** `{"eventId":"API-900","caller":{"subject":"","role":"","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/openapi.yaml"},"data":{"resource":"openapi document"}}`
+**Example:** `{"eventId":"API-900","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/leases"},"data":{"resource":"route GET /api/v1/leases"}}`
 
 **Troubleshooting:** Usually a stale client cache or a deleted resource. Confirm the identifier against a list call.
 

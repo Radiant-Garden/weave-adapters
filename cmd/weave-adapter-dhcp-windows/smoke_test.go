@@ -16,8 +16,9 @@ Tested:
     - TestSmoke_ShouldServeHealthAndEnforceAuthWhenRunAsABinary: builds the
       binary, mints a token through its own CLI, runs it as a subprocess and
       drives it over a real socket: health answers unauthenticated, a non-exempt
-      route is 401 anonymous and 404 with the token, and the process exits 0 on
-      an interrupt. The backend component's verdict is deliberately not pinned:
+      route is 401 anonymous and 404 with the token, /openapi.yaml serves the
+      embedded contract verbatim without a credential, and the process exits 0
+      on an interrupt. The backend component's verdict is deliberately not pinned:
       it depends on whether the host running this gate has a reachable DHCP
       server, and the WS2022 sign-off host does.
 
@@ -70,11 +71,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	apispec "github.com/radiantgarden/weave-adapters/api/dhcp-windows"
 )
 
 const (
 	healthPath  = "/api/v1/health"
 	guardedPath = "/api/v1/does-not-exist"
+	openAPIPath = "/openapi.yaml"
 )
 
 // bearerLine matches the line the token CLI prints for pasting into weave. It
@@ -148,6 +152,16 @@ func TestSmoke_ShouldServeHealthAndEnforceAuthWhenRunAsABinary(t *testing.T) {
 
 	status, body = get(t, base+guardedPath, token)
 	assert.Equal(t, http.StatusNotFound, status, "a valid token must reach the router: %s", body)
+
+	// The served contract, which only this gate can prove reaches the wire. The
+	// httpserver tests pass stand-in bytes and never see the real document, and
+	// api/dhcp-windows checks the embed with no server involved -- so main.go
+	// dropping WithOpenAPISpec, or the go:generate directive drifting from its
+	// var, would leave every other test green while the shipped binary answered
+	// 404 here.
+	status, body = get(t, base+openAPIPath, "")
+	require.Equal(t, http.StatusOK, status, "the spec must be served, unauthenticated: %s", body)
+	assert.Equal(t, apispec.Spec(), body, "the binary must serve the embedded document verbatim")
 
 	// The adapter is a console exe on Windows Server 2022, where main.go
 	// assumes os.Interrupt arrives. Nothing verified that until this test.

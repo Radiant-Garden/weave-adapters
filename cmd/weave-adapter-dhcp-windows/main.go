@@ -1,8 +1,10 @@
 // Command weave-adapter-dhcp-windows is the REST adapter that will expose
 // Windows Server DHCP behind the uniform weave-adapters HTTP API.
 //
-// It serves GET /api/v1/health, whose dhcp-server component runs a real scope
-// query against the backend. The spec document and the scopes resource follow.
+// It serves GET /api/v1/health — whose dhcp-server component runs a real scope
+// query against the backend — and GET /openapi.yaml, which returns the
+// contract the resource endpoints are being built to satisfy. The scopes
+// resource itself is the next phase.
 //
 // Logging goes through the cataloged events system (see internal/core/events);
 // the HTTP server emits its own lifecycle events, so main only marks startup.
@@ -18,6 +20,9 @@ import (
 	"syscall"
 	"time"
 
+	// Aliased: the served spec and the adapter implementation are both package
+	// dhcpwindows, one describing the contract and one honouring it.
+	apispec "github.com/radiantgarden/weave-adapters/api/dhcp-windows"
 	"github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows"
 	adapterevents "github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/auth"
@@ -153,9 +158,13 @@ func run(ctx context.Context, args []string) error {
 	backend := dhcpwindows.NewClient(adapterCfg)
 	probe := dhcpwindows.NewProbe(backend, adapterCfg)
 
+	// The spec is supplied here for the same reason the config spec is: this is
+	// the one place that knows which adapter this binary is. httpserver is core
+	// and must never import an adapter, so the document arrives as bytes.
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	srv := httpserver.New(addr, health.NewHandler(version, started, probe),
 		httpserver.WithInnerMiddleware(authMiddleware...),
+		httpserver.WithOpenAPISpec(apispec.Spec()),
 	)
 
 	return srv.Run(ctx)

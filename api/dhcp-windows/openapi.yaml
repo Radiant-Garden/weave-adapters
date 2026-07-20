@@ -1,0 +1,495 @@
+openapi: 3.0.3
+
+# The served contract for weave-adapter-dhcp-windows.
+#
+# Hand-written, and deliberately so: it is the source the handlers are built to
+# satisfy, not a description generated from them afterwards. The binary embeds
+# this exact file and serves it at GET /openapi.yaml, so what a client reads is
+# byte-for-byte what a reviewer reads here.
+#
+# Shared components are $ref'd out of ../common/ rather than copied. An adapter
+# that restated Problem or the page parameters would drift from every other one,
+# and the uniform API is the whole point of this repo.
+info:
+  title: weave-adapter-dhcp-windows
+  version: 1.0.0
+  description: >-
+    REST adapter exposing a Windows Server DHCP server behind the uniform
+    weave-adapters HTTP API.
+
+    Read-only. Every operation here is a GET, and the adapter issues no writes
+    to the DHCP server on any path, so a read-only service account is
+    sufficient. Mutations arrive in a later milestone.
+
+    ⚠️ TLS is not implemented. Bearer tokens cross the wire in clear, so this
+    adapter is lab-only until that changes — it must not carry traffic on a
+    network anyone else can reach.
+
+servers:
+  # Path-relative, because the adapter never derives its own external base URL
+  # from Host or X-Forwarded-* headers. The same reasoning makes nextPageUrl a
+  # relative reference.
+  - url: /
+
+tags:
+  - name: scopes
+    description: >-
+      DHCP scopes, as Windows itself names them. The vendor noun is kept rather
+      than normalized to "prefix", "pool" or "subnet": those are NetBox, ISC and
+      Kea words respectively, so there is no neutral term to reach for — only
+      three other vendors' terms. A Windows scope also bundles state, lease
+      duration, exclusions, options and reservations into one object, so a
+      shared name across adapters would promise a compatibility we cannot honor.
+  - name: standard
+    description: The endpoints every weave adapter serves.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /openapi.yaml:
+    get:
+      tags: [standard]
+      operationId: getOpenAPISpec
+      summary: This document
+      description: >-
+        Serves this specification. Unauthenticated, like health: it describes
+        the API rather than exposing any of its data, and a client that cannot
+        read the contract without a credential cannot discover how to present
+        one.
+      security: []
+      responses:
+        '200':
+          description: The specification.
+          content:
+            application/yaml:
+              schema:
+                type: string
+
+  /api/v1/health:
+    get:
+      tags: [standard]
+      operationId: getHealth
+      summary: Adapter health, version and uptime
+      description: >-
+        Reports the adapter's overall status and one entry per component.
+        Unauthenticated, because weave polls it to decide whether the adapter is
+        reachable at all and a 401 here would read as an outage.
+
+        Two components are reported. `core` is the adapter process itself.
+        `dhcp-server` runs a real scope query against the backend on each check
+        (cached briefly), so a healthy verdict means the DhcpServer PowerShell
+        module is present, the service account can read, and the server
+        answered — not merely that a Windows service is running.
+      security: []
+      responses:
+        '200':
+          description: >-
+            The adapter is serving. Both `healthy` and `unhealthy` answer 200:
+            unhealthy means degraded but reachable, which is not a reason to
+            stop routing to us.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: >-
+            At least one component is `unavailable`, so the adapter is not ready
+            to serve. On a host with no reachable DHCP backend this is the
+            honest answer rather than a fault — the body names which component.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /api/v1/scopes:
+    get:
+      tags: [scopes]
+      operationId: listScopes
+      summary: List the server's DHCP scopes
+      description: >-
+        Returns every IPv4 scope on the configured DHCP server, ordered by
+        `wadaptId` and paginated with an opaque cursor.
+
+        The ordering is by `wadaptId` rather than by `scopeId` because the
+        cursor resumes after a key and the two orders differ: as strings,
+        "192.168.178.0" sorts before "192.168.2.0", while as addresses it sorts
+        after. Sorting and resuming by different comparators would skip and
+        repeat pages silently.
+      parameters:
+        - $ref: '../common/pagination.yaml#/components/parameters/PageSize'
+        - $ref: '../common/pagination.yaml#/components/parameters/PageToken'
+        - $ref: '#/components/parameters/ScopeIdFilter'
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: A page of scopes.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ScopeList'
+        '304':
+          description: >-
+            The representation is unchanged since the ETag in `If-None-Match`.
+            No body.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/Internal'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >-
+        A static service-to-service token, minted by the adapter's own
+        `token gen` command. Rotation is restart-only: the store is read once at
+        startup.
+
+  parameters:
+    ScopeIdFilter:
+      name: scopeId
+      in: query
+      required: false
+      description: >-
+        Returns only the scope with this subnet address. Exact equality — there
+        is no filter DSL in v1.
+
+        `scopeId` is a filter and not the resource key. It is Windows' own
+        identifier and unique per server, but private network addresses repeat
+        across installations, so it does not identify a scope across a fleet.
+        `wadaptId` does, and is what the item path will use.
+      schema:
+        type: string
+        format: ipv4
+      example: 192.168.178.0
+
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      required: false
+      description: >-
+        An ETag this endpoint previously returned. Matching it yields 304 with
+        no body.
+
+        Authentication runs outside the conditional wrapper, so a valid
+        If-None-Match presented without credentials is a 401, never a 304.
+      schema:
+        type: string
+      example: '"a3f1c0de9b8477215e6d0c4b2a19f8e3"'
+
+  headers:
+    ETag:
+      description: >-
+        A strong validator over the exact response bytes, never a backend
+        version field. Echo it back in If-None-Match to get a 304.
+      schema:
+        type: string
+      example: '"a3f1c0de9b8477215e6d0c4b2a19f8e3"'
+
+    RequestId:
+      description: >-
+        Correlates this response with the adapter's logs. Echoed from the
+        request when the client supplied one, otherwise generated. The same
+        value appears as `requestId` in any problem+json body.
+      schema:
+        type: string
+      example: 9f1c2d3e4a5b6c7d
+
+  responses:
+    # Only the codes something actually returns are declared. The rest of the
+    # taxonomy — 409, 412, 428, and the backend codes — arrives with the code
+    # that emits it, the same rule the event catalog applies to ghost events.
+    ValidationFailed:
+      description: >-
+        A query parameter was rejected. Every failing parameter is reported at
+        once in `errors[]`, so a client fixes them all in one round trip.
+
+        A `pageSize` above the endpoint maximum is clamped rather than rejected;
+        only a value that is not a positive integer is a 400. A `pageToken` this
+        collection did not mint is also a 400, never a silent restart from the
+        first page.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../common/errors.yaml#/components/schemas/Problem'
+
+    Unauthorized:
+      description: >-
+        The bearer token was absent, malformed, unknown, or expired. The body
+        does not distinguish them — which of the four it was is in the
+        adapter's log, not in a response an unauthenticated caller can read.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../common/errors.yaml#/components/schemas/Problem'
+
+    Internal:
+      description: >-
+        An unexpected fault, including a failure to read from the DHCP server.
+        `detail` is curated for clients and never carries the underlying error
+        message; correlate with the log via `requestId` for the cause.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../common/errors.yaml#/components/schemas/Problem'
+
+  schemas:
+    ScopeList:
+      type: object
+      description: >-
+        A page of scopes. Mirrors the shared PageEnvelope with a concrete item
+        type, which is how every adapter's list schema is built: the envelope
+        fixes the field names and their optionality, the adapter supplies the
+        item.
+      required:
+        - items
+      properties:
+        items:
+          type: array
+          description: >-
+            The page's scopes. Always present and always an array — an empty
+            collection is [], never null.
+          items:
+            $ref: '#/components/schemas/Scope'
+        nextPageToken:
+          type: string
+          description: >-
+            The cursor as an opaque token, echoed back as ?pageToken=. Absent on
+            the last page; its presence — not a full page of items — is what
+            tells a client to request the next one.
+        nextPageUrl:
+          type: string
+          format: uri-reference
+          description: >-
+            The same cursor as a ready-to-fetch link, for clients that follow
+            links rather than echo tokens. Present exactly when nextPageToken
+            is, and never instead of it.
+
+            Always relative, and carries every query parameter of the request
+            that produced it with only pageToken replaced — a link-following
+            client sends nothing but this link, so a dropped scopeId filter
+            would widen every later page.
+          example: /api/v1/scopes?pageSize=50&pageToken=eyJ2IjoxLCJzIjoic2NvcGVzIn0
+
+    Scope:
+      type: object
+      description: >-
+        One Windows DHCP scope.
+
+        The field set is deliberately narrower than the cmdlet's. NapEnable and
+        NapProfile are omitted because Network Access Protection was removed
+        from Windows Server in 2016 and surfacing a dead technology would put it
+        in this contract permanently; the Cim* and PSComputerName properties are
+        transport metadata rather than scope data; and ActivatePolicies, Delay
+        and MaxBootpClients have no consumer yet.
+      required:
+        - wadaptId
+        - scopeId
+        - subnetMask
+        - startRange
+        - endRange
+        - name
+        - state
+        - type
+        - leaseDurationSeconds
+        - addressFamily
+      properties:
+        wadaptId:
+          type: string
+          pattern: '^[0-9a-v]{13}$'
+          description: >-
+            The scope's stable identity, and the key the item path will use.
+
+            Derived by the adapter, never stored on the DHCP server:
+            base32hex(HMAC-SHA256(namespaceKey, serverName || 0x00 || scopeId))
+            truncated to 8 bytes, which always encodes to 13 characters in the
+            RFC 4648 §7 extended-hex alphabet. Lowercase, unpadded, and never
+            reformatted.
+
+            Stable for as long as the provisioned namespaceKey, the provisioned
+            serverName and the scope's own subnet all hold still. Changing any
+            of the three re-keys every scope it covers.
+          example: 8k2f5r9tc0hqm
+        scopeId:
+          type: string
+          format: ipv4
+          description: >-
+            The scope's subnet address — Windows' own key, and immutable. Unique
+            per server but not across a fleet, which is why it is a filter here
+            rather than the identity.
+          example: 192.168.178.0
+        subnetMask:
+          type: string
+          format: ipv4
+          example: 255.255.255.0
+        startRange:
+          type: string
+          format: ipv4
+          description: First address the scope may lease.
+          example: 192.168.178.10
+        endRange:
+          type: string
+          format: ipv4
+          description: Last address the scope may lease.
+          example: 192.168.178.210
+        name:
+          type: string
+          description: The scope's administrative name.
+          example: manual_test_01
+        description:
+          type: string
+          description: >-
+            Free-text description. Omitted when the server holds none — the
+            convention is that absent fields are omitted rather than nulled.
+          example: created by hand
+        state:
+          $ref: '#/components/schemas/ScopeState'
+        type:
+          $ref: '#/components/schemas/ScopeType'
+        superscopeName:
+          type: string
+          description: >-
+            The superscope this scope belongs to, omitted when it belongs to
+            none. Read-only: reporting the name a scope already carries is not
+            the same as modelling superscopes as a resource, which is deferred.
+          example: site-a
+        leaseDurationSeconds:
+          type: integer
+          description: >-
+            Lease duration in whole seconds. Windows carries a TimeSpan; the
+            convention across every adapter is integer seconds with the unit in
+            the field name.
+          example: 691200
+        addressFamily:
+          $ref: '#/components/schemas/AddressFamily'
+
+    ScopeState:
+      type: string
+      description: Whether the scope is currently leasing addresses.
+      enum:
+        - Active
+        - Inactive
+      example: Active
+
+    ScopeType:
+      type: string
+      description: >-
+        Which protocol the scope serves. Windows' own vocabulary, passed through
+        unchanged.
+      enum:
+        - Dhcp
+        - Bootp
+        - Both
+      example: Dhcp
+
+    AddressFamily:
+      type: string
+      description: >-
+        Always `ipv4` for now. The field exists so IPv6 lands additively rather
+        than as a breaking change: Windows models v6 scopes as a prefix rather
+        than a start/end range, so folding both into one schema now would be a
+        guess.
+      enum:
+        - ipv4
+      example: ipv4
+
+    HealthResponse:
+      type: object
+      description: >-
+        Deliberately shaped like weave's own daemon health response rather than
+        like /healthz or /readyz, so weave's generic health client works against
+        an adapter unchanged.
+      required:
+        - status
+        - version
+        - uptimeSeconds
+        - components
+      properties:
+        status:
+          allOf:
+            - $ref: '#/components/schemas/HealthStatus'
+          description: >-
+            The worst status across all components. Read the HTTP status code
+            for a routing decision; read this for what to tell an operator.
+        version:
+          type: string
+          description: The adapter version, stamped at build time.
+          example: 1.4.0
+        uptimeSeconds:
+          type: integer
+          format: int64
+          description: >-
+            Seconds since the process started — measured from process start, not
+            from the moment the listener bound.
+          example: 86400
+        components:
+          type: array
+          description: One entry per checked component. Always present.
+          items:
+            $ref: '#/components/schemas/HealthComponent'
+
+    HealthComponent:
+      type: object
+      required:
+        - name
+        - status
+      properties:
+        name:
+          type: string
+          description: >-
+            Stable identifier for the component. `core` is the adapter process;
+            `dhcp-server` is the DHCP backend.
+          example: dhcp-server
+        status:
+          $ref: '#/components/schemas/HealthStatus'
+        detail:
+          type: string
+          description: >-
+            Human-readable explanation, present when there is something to say
+            beyond the status.
+          example: 'scope query failed: the DhcpServer module is not installed'
+        fields:
+          type: object
+          additionalProperties:
+            type: string
+          description: >-
+            Operator-useful detail about this component, as flat strings. The
+            keys are diagnostic rather than contractual — a client must not
+            switch on them.
+          example:
+            scopeCount: '3'
+            psVersion: 5.1.20348.558
+            psEdition: Desktop
+
+    HealthStatus:
+      type: string
+      description: >-
+        Ordered healthy < unhealthy < unavailable; the overall status is the
+        worst of the components. `unhealthy` means degraded but reachable and
+        answers 200; only `unavailable` answers 503.
+      enum:
+        - healthy
+        - unhealthy
+        - unavailable
+      example: healthy

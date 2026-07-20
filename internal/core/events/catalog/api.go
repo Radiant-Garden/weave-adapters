@@ -126,7 +126,7 @@ var clientErrors = []clientError{
 		id: API900, topic: "Errors", level: slog.LevelDebug, message: "request rejected: not found",
 		detail: "The requested {{resource}} was not found.", code: events.CodeNotFound,
 		fields:   []events.FieldDef{{Name: "resource", Type: "string", Required: true, Description: "The resource that was not found."}},
-		example:  `{"eventId":"API-900","caller":{"subject":"","role":"","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/openapi.yaml"},"data":{"resource":"openapi document"}}`,
+		example:  `{"eventId":"API-900","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/leases"},"data":{"resource":"route GET /api/v1/leases"}}`,
 		describe: "A request addressed a resource that does not exist.",
 		fix:      "Usually a stale client cache or a deleted resource. Confirm the identifier against a list call.",
 	},
