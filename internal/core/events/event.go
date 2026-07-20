@@ -65,9 +65,8 @@ type ResponseCode string
 // meaning in internal/core/apierror.
 //
 // Only codes with a live emitter exist. The rest of the taxonomy documented in
-// 02-shared-core.md (conflict, precondition-failed, backend-*) lands with the
-// code that returns it — the backend codes with the first backend client. A
-// registered code nobody emits is a ghost event, which
+// 02-shared-core.md (conflict, precondition-failed) lands with the code that
+// returns it. A registered code nobody emits is a ghost event, which
 // .claude/guidelines/event-logging.md rules out.
 const (
 	// CodeValidationFailed — the request's parameters or body were rejected (400).
@@ -80,6 +79,28 @@ const (
 	CodeMethodNotAllowed ResponseCode = "method-not-allowed"
 	// CodeInternal — an unexpected adapter fault (500).
 	CodeInternal ResponseCode = "internal"
+)
+
+// The backend codes. An adapter maps its backend's failures onto these; the
+// events that carry them are the adapter's own, in its own category, because
+// only the adapter knows which failure it hit.
+//
+// They are separate codes rather than one generic 502 because the distinction
+// is the only part of the failure weave can act on. Its response classifier
+// reads the status code and nothing else — it never decodes an error body — so
+// anything it must distinguish has to be expressible there. "The backend is
+// unreachable" and "the backend answered with nonsense" want different
+// operator responses and plausibly different retry behaviour; collapsing them
+// into 500 would put both, plus every adapter bug, behind one code.
+const (
+	// CodeBackendUnavailable — the backend could not be reached or refused the
+	// call (502).
+	CodeBackendUnavailable ResponseCode = "backend-unavailable"
+	// CodeBackendTimeout — the backend did not answer within its timeout (504).
+	CodeBackendTimeout ResponseCode = "backend-timeout"
+	// CodeBackendError — the backend answered, but with something the adapter
+	// could not use (502).
+	CodeBackendError ResponseCode = "backend-error"
 )
 
 // FieldDef documents an expected field carried by an event.

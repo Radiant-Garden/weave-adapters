@@ -19,7 +19,28 @@ var globalRegistry = &registry{
 
 // standardCallerFields are the fields an ExternalSource event must declare, so
 // the catalog documents the caller identity that Emit attaches at runtime.
+//
+// The names are the contract Register enforces; CallerFields is the declaration
+// that satisfies it. Both live here so they cannot drift apart.
 var standardCallerFields = []string{"subject", "role", "remoteAddr"}
+
+// CallerFields returns the standard caller fields every ExternalSource event
+// must declare. Prepend them to an event's own fields:
+//
+//	Fields: append(events.CallerFields(), myFields...)
+//
+// Exported because every adapter registering a client-facing error needs them,
+// and the alternative is each one copying four FieldDefs that Register then
+// validates against a list it owns privately — a rename here would leave the
+// copies documenting a field the runtime no longer attaches. Returns a fresh
+// slice, so appending to the result cannot reach the shared definition.
+func CallerFields() []FieldDef {
+	return []FieldDef{
+		{Name: "subject", Type: "string", Required: false, Description: "Authenticated caller, empty when auth is disabled."},
+		{Name: "role", Type: "string", Required: false, Description: "Caller role, empty when auth is disabled."},
+		{Name: "remoteAddr", Type: "string", Required: true, Description: "Client address."},
+	}
+}
 
 // Register adds an event to the global registry. It is called from init() in
 // the catalog packages and panics on contract violations so they surface at

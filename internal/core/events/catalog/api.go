@@ -2,7 +2,6 @@ package catalog
 
 import (
 	"log/slog"
-	"slices"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 )
@@ -45,14 +44,6 @@ const (
 	// API903 backs a 400 validation-failed response.
 	API903 events.EventID = "API-903"
 )
-
-// callerFields are the standard caller fields every ExternalSource event must
-// declare; Register panics without them.
-var callerFields = []events.FieldDef{
-	{Name: "subject", Type: "string", Required: false, Description: "Authenticated caller (empty until auth lands)."},
-	{Name: "role", Type: "string", Required: false, Description: "Caller role (empty until auth)."},
-	{Name: "remoteAddr", Type: "string", Required: true, Description: "Client address."},
-}
 
 // clientError describes one entry in the client-facing error range. Declaring
 // them as data keeps the registrations honest: every one carries the same
@@ -174,7 +165,7 @@ func init() {
 		Category:        events.CategoryAPI.String(),
 		Topic:           "Request",
 		ExternalSource:  true,
-		Fields: append(slices.Clone(callerFields), []events.FieldDef{
+		Fields: append(events.CallerFields(), []events.FieldDef{
 			{Name: "requestId", Type: "string", Required: true, Description: "Correlation ID (X-Request-Id)."},
 			{Name: "method", Type: "string", Required: true, Description: "HTTP method."},
 			{Name: "path", Type: "string", Required: true, Description: "Request path."},
@@ -232,7 +223,7 @@ func init() {
 			Category:        events.CategoryAPI.String(),
 			Topic:           ce.topic,
 			ExternalSource:  true,
-			Fields:          append(slices.Clone(callerFields), ce.fields...),
+			Fields:          append(events.CallerFields(), ce.fields...),
 			Example:         ce.example,
 			Troubleshooting: ce.fix,
 			ResponseDetail:  ce.detail,

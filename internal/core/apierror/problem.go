@@ -147,3 +147,17 @@ func (e *Error) WithFieldErrors(fieldErrors ...FieldError) *Error {
 
 	return next
 }
+
+// FieldErrors returns the validation failures this error carries, as a copy.
+//
+// It exists so a handler that validates in more than one place can report every
+// failure in one response, which is this API's rule: a client fixes all of them
+// in one round trip rather than discovering them one attempt at a time. A
+// handler calling both pagination.Parse and its own filter validation would
+// otherwise have to pick one error to return and silently drop the other.
+//
+// Copied rather than exposed, so a caller merging two sets cannot append into
+// the error it read them from.
+func (e *Error) FieldErrors() []FieldError {
+	return slices.Clone(e.fieldErrors)
+}
