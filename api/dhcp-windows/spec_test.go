@@ -16,6 +16,8 @@ Tested:
 	  - TestSpec_ShouldBeAServableDocumentWithPaths: unlike api/common, this one carries paths.
 	openapi.yaml -> openapi.gen.go
 	  - TestScope_ShouldMatchTheHandWrittenStruct: generated Scope and dhcpwindows.Scope carry the same JSON fields.
+	  - TestScopeCreate_ShouldNotAcceptDerivedFields: a client cannot assert scopeId, wadaptId, addressFamily or superscopeName.
+	  - TestScopeCreate_ShouldBeASubsetOfTheServedScope: every field a client may send comes back under the same name and shape.
 	  - TestScope_ShouldRoundTripThroughTheHandWrittenStruct: a populated scope survives both types byte-identically.
 	  - TestScopeList_ShouldMatchTheSharedPageEnvelope: the adapter's list schema is the shared envelope with a concrete item.
 	  - TestHealthResponse_ShouldMatchTheHandWrittenStruct: same for the health shape, including its component entries.
@@ -140,8 +142,59 @@ func TestSpec_ShouldBeAServableDocumentWithPaths(t *testing.T) {
 	// models, while describing an API with no operations in it.
 	assert.Contains(t, doc.Paths, "/api/v1/health")
 	assert.Contains(t, doc.Paths, "/api/v1/scopes")
+	assert.Contains(t, doc.Paths, "/api/v1/scopes/{wadaptId}",
+		"a create's Location header points here, so it has to exist")
 	assert.Contains(t, doc.Paths, "/openapi.yaml",
 		"the spec route is served, so it is documented like any other")
+}
+
+func TestScopeCreate_ShouldNotAcceptDerivedFields(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE / ACT
+	create := jsonshape.Of(t, ScopeCreate{})
+
+	// ASSERT — the request body must not carry anything the server derives.
+	// Accepting scopeId would let a client assert an identity the server is
+	// about to compute from the range and mask, and disagree with it; accepting
+	// wadaptId would let a client choose an identity derived from a provisioned
+	// server name it cannot see. Both are the kind of field that gets added
+	// "for convenience" and then has to be honoured forever.
+	for _, derived := range []string{"scopeId", "wadaptId", "addressFamily", "superscopeName"} {
+		assert.NotContains(t, create, derived,
+			"%s is derived or unsupported; a client must not be able to assert it", derived)
+	}
+
+	// The fields Windows actually requires on Add-DhcpServerv4Scope, and nothing
+	// optional masquerading as required.
+	for _, required := range []string{"name", "startRange", "endRange", "subnetMask"} {
+		require.Contains(t, create, required)
+		assert.False(t, create[required].OmitEmpty, "%s is required by the cmdlet", required)
+	}
+
+	// Everything else is optional, so an omitted value stays the DHCP server's
+	// default rather than one the adapter substituted.
+	for _, optional := range []string{"description", "leaseDurationSeconds", "state", "type"} {
+		require.Contains(t, create, optional)
+		assert.True(t, create[optional].OmitEmpty, "%s must be omissible", optional)
+	}
+}
+
+func TestScopeCreate_ShouldBeASubsetOfTheServedScope(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — every field a client may send must exist on the representation
+	// it gets back, under the same name and shape. A create input that named a
+	// field differently from the read model would make round-tripping a scope
+	// through this API silently lossy.
+	create := jsonshape.Of(t, ScopeCreate{})
+	served := jsonshape.Of(t, Scope{})
+
+	// ACT / ASSERT
+	for name, field := range create {
+		require.Contains(t, served, name, "ScopeCreate.%s has no counterpart on Scope", name)
+		assert.Equal(t, served[name].Kind, field.Kind, "%s changes type between create and read", name)
+	}
 }
 
 func TestScope_ShouldMatchTheHandWrittenStruct(t *testing.T) {

@@ -151,6 +151,107 @@ paths:
         '504':
           $ref: '#/components/responses/BackendTimeout'
 
+    post:
+      tags: [scopes]
+      operationId: createScope
+      summary: Create a DHCP scope
+      description: >-
+        Creates a scope and returns it, with `Location` pointing at the new
+        resource. Completes inline — there is no job to poll.
+
+        **`scopeId` is not accepted.** Windows derives it from the range and the
+        mask (it is the network address), so sending one would let a client
+        assert an identity the server is going to compute anyway, and disagree
+        with it. The adapter computes the same value, which is what makes
+        `wadaptId` known at create time with no read-back.
+
+        **`wadaptId` is not accepted either.** It is derived from the server
+        identity and the subnet; a client cannot choose it.
+
+        Windows permits exactly one scope per subnet, so creating a second on the
+        same subnet is a `409`, not a second resource.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScopeCreate'
+      responses:
+        '201':
+          description: >-
+            The scope was created. The body is the scope as it now exists,
+            including the derived `scopeId` and `wadaptId`.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Scope'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '502':
+          $ref: '#/components/responses/BackendFailed'
+        '504':
+          $ref: '#/components/responses/BackendTimeout'
+
+  /api/v1/scopes/{wadaptId}:
+    get:
+      tags: [scopes]
+      operationId: getScope
+      summary: Fetch one scope by its adapter identity
+      description: >-
+        The path key is `wadaptId`, never `scopeId`. Private network addresses
+        repeat across installations, so `scopeId` identifies a scope on one
+        server but not across a fleet — it is available as a filter on the
+        collection instead.
+
+        This is the URL a create's `Location` header points at.
+      parameters:
+        - $ref: '#/components/parameters/WadaptIdPath'
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: The scope.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Scope'
+        '304':
+          description: >-
+            The representation is unchanged since the ETag in `If-None-Match`.
+            No body.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '502':
+          $ref: '#/components/responses/BackendFailed'
+        '504':
+          $ref: '#/components/responses/BackendTimeout'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -179,6 +280,24 @@ components:
         format: ipv4
       example: 192.168.178.0
 
+    WadaptIdPath:
+      name: wadaptId
+      in: path
+      required: true
+      description: >-
+        The scope's adapter-derived identity, as returned by the collection or by
+        a create's Location header.
+
+        A value that is not 13 characters of the base32hex alphabet cannot be an
+        identity this adapter minted, and answers 404 like any other scope that
+        does not exist — rather than 400. "No scope with that id" is the honest
+        answer either way, and one response for one question keeps a client from
+        having to distinguish two flavours of absence.
+      schema:
+        type: string
+        pattern: '^[0-9a-v]{13}$'
+      example: 8k2f5r9tc0hqm
+
     IfNoneMatch:
       name: If-None-Match
       in: header
@@ -201,6 +320,19 @@ components:
       schema:
         type: string
       example: '"a3f1c0de9b8477215e6d0c4b2a19f8e3"'
+
+    Location:
+      description: >-
+        Where the newly created scope lives. Always a relative reference, and the
+        trailing path segment is the new `wadaptId`.
+
+        That segment is the create handshake: a consumer reads the identity of
+        what it just created from this header rather than from the body. So the
+        URL must resolve — it is served by GET /api/v1/scopes/{wadaptId}.
+      schema:
+        type: string
+        format: uri-reference
+      example: /api/v1/scopes/8k2f5r9tc0hqm
 
     RequestId:
       description: >-
@@ -254,6 +386,61 @@ components:
 
         `detail` is curated for clients and never carries the underlying error
         message; correlate with the log via `requestId` for the cause.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../common/errors.yaml#/components/schemas/Problem'
+
+    NotFound:
+      description: >-
+        No scope with that identity. Also the answer for a `wadaptId` that could
+        never have been minted — see the parameter description.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../common/errors.yaml#/components/schemas/Problem'
+
+    Conflict:
+      description: >-
+        A scope already exists on that subnet. Windows permits exactly one scope
+        per subnet, and the subnet is a function of the range and the mask — so
+        two creates with different ranges inside one subnet collide, which is not
+        obvious from the request alone.
+
+        The existing scope is not modified, and its identity is stable, so a
+        client that meant to change it can fetch it and update it instead.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../common/errors.yaml#/components/schemas/Problem'
+
+    PayloadTooLarge:
+      description: >-
+        The request body exceeded the adapter's limit. Nothing legitimate for
+        this resource approaches it; the limit exists so an unbounded body cannot
+        be read into memory before it is rejected.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../common/errors.yaml#/components/schemas/Problem'
+
+    UnsupportedMediaType:
+      description: >-
+        The request did not carry `Content-Type: application/json`. Rejected
+        rather than sniffed: guessing at a body's format is how a client's
+        mistake becomes a scope with surprising contents.
       headers:
         X-Request-Id:
           $ref: '#/components/headers/RequestId'
@@ -333,6 +520,87 @@ components:
             client sends nothing but this link, so a dropped scopeId filter
             would widen every later page.
           example: /api/v1/scopes?pageSize=50&pageToken=eyJ2IjoxLCJzIjoic2NvcGVzIn0
+
+    ScopeCreate:
+      type: object
+      description: >-
+        What a client supplies to create a scope. Deliberately narrower than
+        Scope: it carries only what Windows accepts on `Add-DhcpServerv4Scope`,
+        and nothing the server derives.
+
+        Absent by design, and rejected if sent rather than ignored — silently
+        dropping a field a client believed in is how two systems come to disagree
+        about what was created:
+
+        - `scopeId` — Windows derives it as the network address of
+          `startRange` masked by `subnetMask`. A client that sent one could
+          disagree with the value the server is about to compute.
+        - `wadaptId` — derived from the provisioned server identity and the
+          subnet. Not a client's to choose.
+        - `addressFamily` — IPv4 is the only family this version serves, so the
+          field would be a constant a client could get wrong.
+        - `superscopeName` — assigning a scope to a superscope is a separate
+          operation on a resource this version does not model.
+      required:
+        - name
+        - startRange
+        - endRange
+        - subnetMask
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: >-
+            Administrative name. Required by Windows, and the field an operator
+            will actually recognise the scope by in the DHCP console.
+          example: lab-vlan-30
+        startRange:
+          type: string
+          format: ipv4
+          description: First address the scope may lease.
+          example: 10.0.30.10
+        endRange:
+          type: string
+          format: ipv4
+          description: >-
+            Last address the scope may lease. Must be at or after `startRange`
+            and inside the same subnet.
+          example: 10.0.30.250
+        subnetMask:
+          type: string
+          format: ipv4
+          description: >-
+            The subnet mask. With `startRange` this determines the subnet, and
+            therefore the scope's identity — two creates whose ranges fall in one
+            subnet are the same scope and the second is a 409.
+          example: 255.255.255.0
+        description:
+          type: string
+          maxLength: 255
+          description: Free-text description. Omit rather than sending an empty string.
+          example: created by weave
+        leaseDurationSeconds:
+          type: integer
+          minimum: 1
+          description: >-
+            Lease duration in whole seconds. Omitted, Windows applies its own
+            default (8 days at the time of writing) — the adapter does not
+            substitute one of its own, so the server's default remains the
+            server's to change.
+          example: 691200
+        state:
+          allOf:
+            - $ref: '#/components/schemas/ScopeState'
+          description: >-
+            Whether the scope leases addresses immediately. Defaults to `Active`
+            when omitted, matching the cmdlet.
+        type:
+          allOf:
+            - $ref: '#/components/schemas/ScopeType'
+          description: >-
+            Which protocol the scope serves. Defaults to `Dhcp` when omitted,
+            matching the cmdlet.
 
     Scope:
       type: object

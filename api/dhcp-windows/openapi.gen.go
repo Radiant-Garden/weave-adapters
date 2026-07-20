@@ -199,6 +199,55 @@ type Scope struct {
 	WadaptId string `json:"wadaptId"`
 }
 
+// ScopeCreate What a client supplies to create a scope. Deliberately narrower than Scope: it carries only what Windows accepts on `Add-DhcpServerv4Scope`, and nothing the server derives.
+// Absent by design, and rejected if sent rather than ignored — silently dropping a field a client believed in is how two systems come to disagree about what was created:
+//   - `scopeId` — Windows derives it as the network address of
+//     `startRange` masked by `subnetMask`. A client that sent one could
+//     disagree with the value the server is about to compute.
+//   - `wadaptId` — derived from the provisioned server identity and the
+//     subnet. Not a client's to choose.
+//   - `addressFamily` — IPv4 is the only family this version serves, so the
+//     field would be a constant a client could get wrong.
+//   - `superscopeName` — assigning a scope to a superscope is a separate
+//     operation on a resource this version does not model.
+type ScopeCreate struct {
+	// Description Free-text description. Omit rather than sending an empty string.
+	//
+	// Example: created by weave
+	Description string `json:"description,omitempty"`
+
+	// EndRange Last address the scope may lease. Must be at or after `startRange` and inside the same subnet.
+	//
+	// Example: 10.0.30.250
+	EndRange string `json:"endRange"`
+
+	// LeaseDurationSeconds Lease duration in whole seconds. Omitted, Windows applies its own default (8 days at the time of writing) — the adapter does not substitute one of its own, so the server's default remains the server's to change.
+	//
+	// Example: 691200
+	LeaseDurationSeconds int `json:"leaseDurationSeconds,omitempty"`
+
+	// Name Administrative name. Required by Windows, and the field an operator will actually recognise the scope by in the DHCP console.
+	//
+	// Example: lab-vlan-30
+	Name string `json:"name"`
+
+	// StartRange First address the scope may lease.
+	//
+	// Example: 10.0.30.10
+	StartRange string `json:"startRange"`
+
+	// State Whether the scope leases addresses immediately. Defaults to `Active` when omitted, matching the cmdlet.
+	State ScopeState `json:"state,omitempty"`
+
+	// SubnetMask The subnet mask. With `startRange` this determines the subnet, and therefore the scope's identity — two creates whose ranges fall in one subnet are the same scope and the second is a 409.
+	//
+	// Example: 255.255.255.0
+	SubnetMask string `json:"subnetMask"`
+
+	// Type Which protocol the scope serves. Defaults to `Dhcp` when omitted, matching the cmdlet.
+	Type ScopeType `json:"type,omitempty"`
+}
+
 // ScopeList A page of scopes. Mirrors the shared PageEnvelope with a concrete item type, which is how every adapter's list schema is built: the envelope fixes the field names and their optionality, the adapter supplies the item.
 type ScopeList struct {
 	// Items The page's scopes. Always present and always an array — an empty collection is [], never null.
@@ -230,17 +279,32 @@ type IfNoneMatch = string
 // ScopeIdFilter defines model for ScopeIdFilter.
 type ScopeIdFilter = string
 
+// WadaptIdPath defines model for WadaptIdPath.
+type WadaptIdPath = string
+
 // BackendFailed An RFC 9457 problem detail. Returned with Content-Type application/problem+json for every client-facing error, including the 401 and 404/405 produced by middleware rather than by a handler.
 type BackendFailed = externalRef0.Problem
 
 // BackendTimeout An RFC 9457 problem detail. Returned with Content-Type application/problem+json for every client-facing error, including the 401 and 404/405 produced by middleware rather than by a handler.
 type BackendTimeout = externalRef0.Problem
 
+// Conflict An RFC 9457 problem detail. Returned with Content-Type application/problem+json for every client-facing error, including the 401 and 404/405 produced by middleware rather than by a handler.
+type Conflict = externalRef0.Problem
+
 // Internal An RFC 9457 problem detail. Returned with Content-Type application/problem+json for every client-facing error, including the 401 and 404/405 produced by middleware rather than by a handler.
 type Internal = externalRef0.Problem
 
+// NotFound An RFC 9457 problem detail. Returned with Content-Type application/problem+json for every client-facing error, including the 401 and 404/405 produced by middleware rather than by a handler.
+type NotFound = externalRef0.Problem
+
+// PayloadTooLarge An RFC 9457 problem detail. Returned with Content-Type application/problem+json for every client-facing error, including the 401 and 404/405 produced by middleware rather than by a handler.
+type PayloadTooLarge = externalRef0.Problem
+
 // Unauthorized An RFC 9457 problem detail. Returned with Content-Type application/problem+json for every client-facing error, including the 401 and 404/405 produced by middleware rather than by a handler.
 type Unauthorized = externalRef0.Problem
+
+// UnsupportedMediaType An RFC 9457 problem detail. Returned with Content-Type application/problem+json for every client-facing error, including the 401 and 404/405 produced by middleware rather than by a handler.
+type UnsupportedMediaType = externalRef0.Problem
 
 // ValidationFailed An RFC 9457 problem detail. Returned with Content-Type application/problem+json for every client-facing error, including the 401 and 404/405 produced by middleware rather than by a handler.
 type ValidationFailed = externalRef0.Problem
@@ -262,3 +326,13 @@ type ListScopesParams struct {
 	// Authentication runs outside the conditional wrapper, so a valid If-None-Match presented without credentials is a 401, never a 304.
 	IfNoneMatch IfNoneMatch `json:"If-None-Match,omitempty"`
 }
+
+// GetScopeParams defines parameters for GetScope.
+type GetScopeParams struct {
+	// IfNoneMatch An ETag this endpoint previously returned. Matching it yields 304 with no body.
+	// Authentication runs outside the conditional wrapper, so a valid If-None-Match presented without credentials is a 401, never a 304.
+	IfNoneMatch IfNoneMatch `json:"If-None-Match,omitempty"`
+}
+
+// CreateScopeJSONRequestBody defines body for CreateScope for application/json ContentType.
+type CreateScopeJSONRequestBody = ScopeCreate
