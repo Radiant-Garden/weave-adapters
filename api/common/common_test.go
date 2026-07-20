@@ -4,7 +4,8 @@ Testing: common.go
 Pending:
 
 Tested:
-  errors.yaml -> errors.gen.go
+  errors.yaml -> errors.gen.go (every catalog linked via internal/catalogs, so
+  adapter-owned response codes count as live)
     - TestProblem_ShouldMatchTheHandWrittenStruct: generated Problem and apierror.Problem carry the same JSON fields.
     - TestProblem_ShouldRoundTripThroughTheHandWrittenStruct: a populated problem survives both types byte-identically.
     - TestFieldError_ShouldMatchTheHandWrittenStruct: same for the errors[] element.
@@ -44,6 +45,10 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
+	// The enum below must list every code some event emits, and events register
+	// from init() — so this test can only be right if every catalog is linked.
+	// Without it the adapter's backend codes look like ghost entries.
+	_ "github.com/radiantgarden/weave-adapters/internal/catalogs"
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/jsonshape"
