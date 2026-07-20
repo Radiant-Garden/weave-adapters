@@ -94,6 +94,31 @@ tasks:
       # which is the only claim this task exists to make.
       - go test -count=1 -tags smoke -run TestSmoke ./cmd/...
 
+  setup:dhcp-access:
+    desc: 'Grant an account read-only DHCP rights (run ONCE on the host, elevated). Vars: ACCOUNT, GROUP'
+    cmds:
+      # Cannot run from CI, and that is deliberate rather than a gap: editing a
+      # security group needs Administrator, and a CI job able to grant itself
+      # DHCP rights would be a privilege-escalation path, not a convenience. The
+      # runner executes as NETWORK SERVICE precisely so it cannot.
+      #
+      # So this is a one-time elevated run on the host -- but it belongs in the
+      # repo rather than in someone's shell history: it is reviewable, it is
+      # idempotent, and it encodes the two things that are easy to get wrong.
+      # Both are locale traps on a German host: account and group names are
+      # translated ("NT-AUTORITAET\Netzwerkdienst", "DHCP-Benutzer"), so the
+      # script grants by SID and discovers the group rather than hardcoding
+      # either. And it restarts the runner, because group membership is stamped
+      # into an access token at logon -- a running service keeps its old token
+      # and goes on failing with WIN32 5.
+      #
+      #   task setup:dhcp-access                          # grants NETWORK SERVICE
+      #   task setup:dhcp-access ACCOUNT=svc-weave-adapter  # better: one account
+      #
+      # Prefer the second. NETWORK SERVICE is shared by many Windows services, so
+      # granting it hands DHCP read to every one of them on the host.
+      - powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/grant-dhcp-access.ps1 {{if .ACCOUNT}}-Account {{.ACCOUNT}}{{end}} {{if .GROUP}}-Group "{{.GROUP}}"{{end}}
+
   e2e:
     desc: Drive the whole read path against a REAL DHCP backend (WS2022 only)
     cmds:
