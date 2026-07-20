@@ -6,7 +6,11 @@ Pending:
 Tested:
   New
     - TestNew_ShouldServeHealthEndpoint: GET /api/v1/health returns the weave health shape.
-    - TestNew_ShouldReturnNotFoundForOpenAPIDocument: the reserved spec route answers a problem+json 404.
+    - TestNew_ShouldReturnNotFoundForOpenAPIDocumentWhenNoSpecSupplied: the spec route answers a problem+json 404 with no document.
+    - TestNew_ShouldServeTheOpenAPIDocumentWhenSupplied: WithOpenAPISpec's bytes reach the wire unchanged and copied, as application/yaml with a length.
+    - TestNew_ShouldMountAdapterRoutes: WithRoutes mounts a route inside the standard chain, method-scoped.
+    - TestNew_ShouldRejectAdapterRoutesThatShadowStandardOnes: every pattern that would shadow a standard route panics at startup, including the four ServeMux accepts.
+    - TestNew_ShouldStillGenerateItsOwnNotFoundAlongsideAdapterRoutes: mounting routes does not cost the router's problem+json 404.
     - TestNew_ShouldEchoRequestIDHeader: the middleware chain is wired around the mux.
     - TestNew_ShouldRecoverFromHandlerPanic: a panicking handler yields 500, not a dead connection.
     - TestNew_ShouldSkipRequestLoggingForHealthPolls: successful health polls emit no API-010; other routes and failures do.
@@ -27,6 +31,11 @@ Tested:
 Tested elsewhere:
   serveOpenAPI, skipHealthPolls — exercised through New's routing tests rather
   than called directly; they only exist as part of the mounted chain.
+
+  The real adapter document: api/dhcp-windows asserts that what it embeds is a
+  valid spec agreeing with the Go types. Core cannot, and must not, import it —
+  the tests here pass stand-in bytes, which is all that is needed to prove the
+  option carries them through untouched.
 
   NewHandler with a caller-supplied router: internal/core/httptest mounts the
   demo resource through it, which is the case New itself cannot cover since it
@@ -62,6 +71,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -139,13 +149,14 @@ func TestNew_ShouldServeHealthEndpoint(t *testing.T) {
 	assert.NotEmpty(t, body.Components)
 }
 
-func TestNew_ShouldReturnNotFoundForOpenAPIDocument(t *testing.T) {
+func TestNew_ShouldReturnNotFoundForOpenAPIDocumentWhenNoSpecSupplied(t *testing.T) {
 	t.Parallel()
 
-	// ARRANGE
+	// ARRANGE — no WithOpenAPISpec, which is what a caller that has not written
+	// its spec yet passes.
 	ts := newTestServer(t)
 
-	// ACT — the route is reserved in M1; the document itself arrives in M2.
+	// ACT
 	resp := get(t, ts, "/openapi.yaml", nil)
 
 	// ASSERT — problem+json, not stdlib plain text: 03-api-conventions requires
@@ -158,6 +169,156 @@ func TestNew_ShouldReturnNotFoundForOpenAPIDocument(t *testing.T) {
 	assert.Equal(t, "weave-adapters:not-found", problem.Type)
 	assert.Equal(t, "/openapi.yaml", problem.Instance)
 	assert.NotEmpty(t, problem.RequestID)
+}
+
+func TestNew_ShouldServeTheOpenAPIDocumentWhenSupplied(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — stand-in bytes rather than the real adapter spec: core must not
+	// import an adapter, and what this asserts is that the option's bytes reach
+	// the wire unchanged, which any bytes prove.
+	spec := []byte("openapi: 3.0.3\n# a comment that must survive\ninfo:\n  title: stand-in\n")
+
+	srv := New(":0", health.NewHandler("1.2.3", time.Now()), WithOpenAPISpec(spec))
+
+	ts := httptest.NewServer(srv.httpServer.Handler)
+	t.Cleanup(ts.Close)
+
+	// ACT
+	resp := get(t, ts, "/openapi.yaml", nil)
+
+	// ASSERT — byte-for-byte, not merely parseable. The document a client reads
+	// has to be the file a reviewer reads, comments included; re-serializing it
+	// would reorder keys and drop every rationale the spec carries.
+	require.Equal(t, http.StatusOK, resp.status)
+	assert.Equal(t, "application/yaml", resp.header.Get("Content-Type"))
+	assert.Equal(t, spec, resp.body)
+
+	// Explicit, because the real document is well past net/http's sniff buffer
+	// and would otherwise go out chunked with no length at all.
+	assert.Equal(t, strconv.Itoa(len(spec)), resp.header.Get("Content-Length"))
+	assert.Equal(t, "no-cache", resp.header.Get("Cache-Control"))
+
+	// The option copies, so a caller mutating the slice it passed — a
+	// package-level []byte from go:embed is the obvious source — cannot rewrite
+	// what every later request receives.
+	spec[0] = 'X'
+
+	after := get(t, ts, "/openapi.yaml", nil)
+	assert.NotEqual(t, spec, after.body, "the served document must not alias the caller's slice")
+}
+
+func TestNew_ShouldMountAdapterRoutes(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — an adapter resource route, supplied as a value. This is the seam
+	// that lets the binary mount /api/v1/scopes without core importing it.
+	scopes := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[]}`))
+	})
+
+	srv := New(":0", health.NewHandler("1.2.3", time.Now()),
+		WithRoutes(Route{Pattern: "GET /api/v1/scopes", Handler: scopes}))
+
+	ts := httptest.NewServer(srv.httpServer.Handler)
+	t.Cleanup(ts.Close)
+
+	// ACT
+	resp := get(t, ts, "/api/v1/scopes", nil)
+
+	// ASSERT
+	require.Equal(t, http.StatusOK, resp.status)
+	assert.JSONEq(t, `{"items":[]}`, string(resp.body))
+
+	// The route runs inside the standard chain rather than beside it — an
+	// adapter route that skipped the chain would lose recovery, correlation and
+	// the problem+json error shape, which is the whole reason routes are mounted
+	// here instead of on a mux of the adapter's own.
+	assert.NotEmpty(t, resp.header.Get("X-Request-Id"))
+
+	// The pattern carries its method, so a write to a read-only collection is
+	// the 405 the error conventions promise rather than a 200.
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+"/api/v1/scopes", nil)
+	require.NoError(t, err)
+
+	postResp, err := ts.Client().Do(req)
+	require.NoError(t, err)
+	require.NoError(t, postResp.Body.Close())
+	assert.Equal(t, http.StatusMethodNotAllowed, postResp.StatusCode)
+}
+
+func TestNew_ShouldRejectAdapterRoutesThatShadowStandardOnes(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — every pattern here is one ServeMux would accept. Only the first
+	// is a conflict it detects on its own; the rest register cleanly and then
+	// silently answer requests the standard routes were meant to, which is why
+	// validateRoute exists rather than leaving this to the mux.
+	tests := []struct {
+		name    string
+		pattern string
+	}{
+		{
+			// The only case ServeMux catches by itself.
+			name: "should reject an exact duplicate of health", pattern: "GET " + healthPath,
+		},
+		{
+			// Registers fine beside "GET /api/v1/health" and then answers POST,
+			// DELETE and everything else on that path — replacing the
+			// problem+json 405 with whatever the adapter returns.
+			name: "should reject a path-only pattern on health", pattern: healthPath,
+		},
+		{
+			name: "should reject a path-only pattern on the spec route", pattern: openAPIPath,
+		},
+		{
+			// Matches every path the standard routes did not claim, so the mux
+			// stops generating the 404 that becomes problem+json.
+			name: "should reject a catch-all", pattern: "GET /",
+		},
+		{
+			// A resource route missing its method: a POST to a read-only
+			// collection would answer 200 instead of 405.
+			name: "should reject a resource route with no method", pattern: "/api/v1/scopes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT / ASSERT — at process start, where an operator can act on it.
+			assert.Panics(t, func() {
+				New(":0", health.NewHandler("1.2.3", time.Now()),
+					WithRoutes(Route{Pattern: tt.pattern, Handler: http.NotFoundHandler()}))
+			})
+		})
+	}
+}
+
+func TestNew_ShouldStillGenerateItsOwnNotFoundAlongsideAdapterRoutes(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the property the catch-all rejection protects: with adapter
+	// routes mounted, an unknown path is still the router's own 404 rendered as
+	// problem+json, not some adapter handler's idea of one.
+	srv := New(":0", health.NewHandler("1.2.3", time.Now()),
+		WithRoutes(Route{Pattern: "GET /api/v1/scopes", Handler: http.NotFoundHandler()}))
+
+	ts := httptest.NewServer(srv.httpServer.Handler)
+	t.Cleanup(ts.Close)
+
+	// ACT
+	resp := get(t, ts, "/api/v1/nope", nil)
+
+	// ASSERT
+	require.Equal(t, http.StatusNotFound, resp.status)
+	assert.Equal(t, apierror.ContentType, resp.header.Get("Content-Type"))
+
+	var problem apierror.Problem
+	require.NoError(t, json.Unmarshal(resp.body, &problem))
+	assert.Equal(t, "weave-adapters:not-found", problem.Type)
 }
 
 func TestNew_ShouldEchoRequestIDHeader(t *testing.T) {
@@ -343,7 +504,7 @@ func TestNew_ShouldLogRejectedRequests(t *testing.T) {
 		})
 	}
 
-	srv := New(":0", health.NewHandler("1.2.3", time.Now()), reject)
+	srv := New(":0", health.NewHandler("1.2.3", time.Now()), WithInnerMiddleware(reject))
 
 	ts := httptest.NewServer(srv.httpServer.Handler)
 	t.Cleanup(ts.Close)
@@ -470,7 +631,7 @@ func TestRun_ShouldReportAnIncompleteShutdownRatherThanClaimItDrained(t *testing
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
-	srv := New("127.0.0.1:0", health.NewHandler("1.2.3", time.Now()), blocking)
+	srv := New("127.0.0.1:0", health.NewHandler("1.2.3", time.Now()), WithInnerMiddleware(blocking))
 	errCh := make(chan error, 1)
 
 	go func() { errCh <- srv.Run(ctx) }()

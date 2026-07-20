@@ -2,18 +2,23 @@
 // standard endpoints around adapter-provided routes and handles graceful
 // shutdown.
 //
-// This is the M1 form — it mounts /api/v1/health behind the standard middleware
-// chain and reserves /openapi.yaml. Later phases add /metrics, the real OpenAPI
-// document, and configurable timeouts.
+// It mounts /api/v1/health and /openapi.yaml itself, and takes everything
+// adapter-specific — the resource routes, the spec document, the inner
+// middleware — as values through Option. That direction is not stylistic: core
+// must never import internal/adapters, so anything an adapter owns has to
+// arrive as a parameter rather than as an import.
 package httpserver
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
@@ -27,6 +32,11 @@ const (
 
 	healthPath  = "/api/v1/health"
 	openAPIPath = "/openapi.yaml"
+
+	// openAPIContentType is the media type RFC 9512 registers for YAML. The
+	// document is served as the bytes on disk rather than re-serialized, so a
+	// client and a reviewer read the same file.
+	openAPIContentType = "application/yaml"
 )
 
 // shutdownGrace bounds the drain. A var rather than a const so the drain-overran
@@ -45,23 +55,132 @@ type Server struct {
 	httpServer *http.Server
 }
 
+// Route is one adapter-supplied route: a net/http.ServeMux pattern and the
+// handler that answers it.
+//
+// A pattern carries its method ("GET /api/v1/scopes"), because a bare path
+// matches every method and would turn a POST to a read-only collection into a
+// 200 rather than the 405 the error conventions promise.
+type Route struct {
+	Pattern string
+	Handler http.Handler
+}
+
+// Option configures the server New builds. Every adapter-owned input arrives
+// this way — see the package doc for why it cannot arrive as an import.
+type Option func(*settings)
+
+// settings is the resolved option set. Unexported: an adapter composes it
+// through the With* functions, so a field added here is not a breaking change
+// at any call site.
+type settings struct {
+	inner  []middleware.Middleware
+	routes []Route
+	spec   []byte
+}
+
+// WithInnerMiddleware adds middlewares inside the standard chain —
+// authentication in practice. They run after logging so a rejected request
+// still produces its API-010 audit line, and they see the caller context the
+// request-ID middleware established.
+func WithInnerMiddleware(mw ...middleware.Middleware) Option {
+	return func(s *settings) { s.inner = append(s.inner, mw...) }
+}
+
+// WithRoutes mounts adapter resource routes on the server's mux, inside the
+// same middleware chain the standard endpoints run behind.
+//
+// Every pattern is checked by validateRoute before it is mounted, and a bad one
+// panics at process start rather than serving something the operator did not
+// configure.
+func WithRoutes(routes ...Route) Option {
+	return func(s *settings) { s.routes = append(s.routes, routes...) }
+}
+
+// validateRoute panics unless pattern is a method-qualified pattern that leaves
+// the standard endpoints alone.
+//
+// http.ServeMux's own conflict detection is not enough here, and the gap is not
+// obvious. It rejects an exact duplicate of "GET /api/v1/health" — but a bare
+// "/api/v1/health" is a *different* pattern that does not conflict, so it
+// registers happily and then answers every method the standard route did not
+// claim. Health keeps answering GET while POST and DELETE quietly reach the
+// adapter, replacing the problem+json 405 the error conventions promise. A bare
+// "/" is worse: it matches every unrouted path, so the API-900 404 stops firing
+// at all and an operator sees no signal for either.
+//
+// Requiring the method is what closes both. It is also the rule the API needs
+// anyway — a path-only pattern turns a POST to a read-only collection into a
+// 200 — so this enforces a convention rather than adding one.
+func validateRoute(pattern string) {
+	method, path, hasMethod := strings.Cut(pattern, " ")
+	if !hasMethod || method == "" || !strings.HasPrefix(path, "/") {
+		panic(fmt.Sprintf(
+			"httpserver: route pattern %q must be method-qualified, e.g. \"GET /api/v1/scopes\"; "+
+				"a path-only pattern matches every method and would answer 200 where the API promises 405",
+			pattern))
+	}
+
+	// Reserved paths are rejected by path, not by whole pattern: it is the
+	// method-qualified variants that ServeMux would let through silently.
+	if path == healthPath || path == openAPIPath {
+		panic(fmt.Sprintf(
+			"httpserver: route pattern %q targets %s, which this package owns; "+
+				"an adapter route there would shadow the endpoint weave polls",
+			pattern, path))
+	}
+
+	// A catch-all matches every path the standard routes did not claim, so the
+	// mux stops generating the 404 that ProblemErrors renders as problem+json —
+	// every unknown path would answer with the adapter's handler instead.
+	if path == "/" {
+		panic(fmt.Sprintf(
+			"httpserver: route pattern %q is a catch-all; it would swallow the router's own 404, "+
+				"which is where the problem+json error shape for unknown paths comes from",
+			pattern))
+	}
+}
+
+// WithOpenAPISpec serves spec as the document at GET /openapi.yaml.
+//
+// Without it the route answers a problem+json 404, which is what an adapter
+// that has not written its spec yet should say, and what keeps this package
+// testable without one.
+//
+// The bytes are copied. What the server hands to every client for the life of
+// the process should not be an alias of a slice the caller still holds — a
+// package-level []byte from go:embed is the obvious source, and it is writable
+// by anything that can see it.
+func WithOpenAPISpec(spec []byte) Option {
+	return func(s *settings) { s.spec = bytes.Clone(spec) }
+}
+
 // New builds a Server listening on addr with the given health handler mounted
 // at GET /api/v1/health, wrapped in the standard middleware chain (recovery →
 // request-ID → logging → inner → problem-errors).
-//
-// inner are middlewares applied inside the standard chain — authentication in
-// practice. They run after logging so a rejected request still produces its
-// API-010 audit line, and they see the caller context the request-ID middleware
-// established.
-func New(addr string, healthHandler http.Handler, inner ...middleware.Middleware) *Server {
+func New(addr string, healthHandler http.Handler, opts ...Option) *Server {
+	var set settings
+
+	for _, opt := range opts {
+		opt(&set)
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("GET "+healthPath, healthHandler)
-	mux.HandleFunc("GET "+openAPIPath, serveOpenAPI)
+	mux.HandleFunc("GET "+openAPIPath, serveOpenAPI(set.spec))
+
+	// Validated then mounted, and after the standard routes: validateRoute
+	// catches the patterns ServeMux would accept and silently shadow with, and
+	// ServeMux itself still catches an exact duplicate of another adapter route.
+	for _, route := range set.routes {
+		validateRoute(route.Pattern)
+		mux.Handle(route.Pattern, route.Handler)
+	}
 
 	return &Server{
 		httpServer: &http.Server{
 			Addr:              addr,
-			Handler:           NewHandler(mux, inner...),
+			Handler:           NewHandler(mux, set.inner...),
 			ReadHeaderTimeout: readHeaderTimeout,
 		},
 	}
@@ -110,8 +229,8 @@ func skipHealthPolls(r *http.Request, status int) bool {
 
 // Unauthenticated reports whether r addresses a route that must stay open:
 // health, because weave polls it to decide whether the adapter is reachable at
-// all and an auth failure there would read as an outage, and the reserved spec
-// route, which carries nothing worth protecting.
+// all and an auth failure there would read as an outage, and the spec route,
+// which describes the API rather than exposing any of its data.
 //
 // Everything else authenticates, including paths that match no route — an
 // unauthenticated caller learns nothing about which routes exist.
@@ -119,16 +238,44 @@ func Unauthenticated(r *http.Request) bool {
 	return r.URL.Path == healthPath || r.URL.Path == openAPIPath
 }
 
-// serveOpenAPI answers the reserved spec route. The document itself is M2
-// (spec-first work); until then the route exists so it is owned and logged, and
-// answers the way any absent document would.
+// serveOpenAPI answers the spec route with spec, or with a 404 when the caller
+// supplied no document.
 //
-// It goes through apierror rather than http.Error so the body is problem+json
-// like every other error this API returns — 03-api-conventions requires that
-// shape "including 401/404 from middleware", and a plain-text 404 here would be
-// the one response a generic client could not parse.
-func serveOpenAPI(w http.ResponseWriter, r *http.Request) {
-	apierror.WriteError(w, r, apierror.NotFound("openapi document"))
+// The absent case goes through apierror rather than http.Error so the body is
+// problem+json like every other error this API returns — 03-api-conventions
+// requires that shape "including 401/404 from middleware", and a plain-text 404
+// here would be the one response a generic client could not parse.
+//
+// The document is written as bytes rather than parsed and re-emitted: the
+// contract a client reads must be the file a reviewer reads, and a round trip
+// through a YAML library would reorder keys and drop comments.
+func serveOpenAPI(spec []byte) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if len(spec) == 0 {
+			apierror.WriteError(w, r, apierror.NotFound("openapi document"))
+
+			return
+		}
+
+		w.Header().Set("Content-Type", openAPIContentType)
+
+		// Set explicitly: the document is well past net/http's sniff buffer, so
+		// without this it goes out chunked with no length for a client to size
+		// the download against.
+		w.Header().Set("Content-Length", strconv.Itoa(len(spec)))
+
+		// The contract changes only when a new binary is deployed, so a client
+		// polling it is re-fetching bytes it already has. no-cache rather than a
+		// max-age: it still revalidates every time, which keeps a spec served
+		// from behind a proxy from going stale across a deploy.
+		w.Header().Set("Cache-Control", "no-cache")
+
+		w.WriteHeader(http.StatusOK)
+
+		// The response is already committed; a write failure is not actionable
+		// here, and the request logging middleware records the status either way.
+		_, _ = w.Write(spec)
+	}
 }
 
 // Run binds the listen address, serves, and blocks until ctx is cancelled, then

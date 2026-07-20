@@ -1,10 +1,11 @@
 // Command weave-adapter-dhcp-windows is the REST adapter that will expose
 // Windows Server DHCP behind the uniform weave-adapters HTTP API.
 //
-// M1 walking skeleton: it serves GET /api/v1/health and nothing else — it does
-// not talk to DHCP in any form. Logging goes through the cataloged events
-// system (see internal/core/events); the HTTP server emits its own lifecycle
-// events, so main only marks startup.
+// It serves GET /api/v1/health, whose dhcp-server component runs a real scope
+// query against the backend. The spec document and the scopes resource follow.
+//
+// Logging goes through the cataloged events system (see internal/core/events);
+// the HTTP server emits its own lifecycle events, so main only marks startup.
 package main
 
 import (
@@ -153,7 +154,9 @@ func run(ctx context.Context, args []string) error {
 	probe := dhcpwindows.NewProbe(backend, adapterCfg)
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
-	srv := httpserver.New(addr, health.NewHandler(version, started, probe), authMiddleware...)
+	srv := httpserver.New(addr, health.NewHandler(version, started, probe),
+		httpserver.WithInnerMiddleware(authMiddleware...),
+	)
 
 	return srv.Run(ctx)
 }
