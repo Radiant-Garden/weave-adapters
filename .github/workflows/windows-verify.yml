@@ -113,8 +113,20 @@ jobs:
             exit 1
           }
 
-      # Scoped to what only Windows can answer -- build, test, and drive the real
-      # .exe. See the ci:windows task for what is omitted and why.
-      - name: Windows gate (build, test, smoke)
+      # Scoped to what only Windows can answer -- build, test, drive the real
+      # .exe, and read the real DHCP server. See the ci:windows task for what is
+      # omitted and why.
+      #
+      # The e2e step is the one that needs this host specifically: it asserts the
+      # dhcp-server health component is HEALTHY and then walks the whole read
+      # path against real scopes. Every other gate in the repo runs against a
+      # fake runner or on a box with no DHCP role, so this is the only place a
+      # green adapter is ever observed end to end.
+      #
+      # If it fails on rights, the fix is to grant this runner's account DHCP
+      # read access (the DHCP Users group) rather than to weaken the test -- the
+      # runner executes as NT AUTHORITY\NetworkService, not as the interactive
+      # administrator who set the host up.
+      - name: Windows gate (build, test, smoke, e2e)
         run: task ci:windows
 

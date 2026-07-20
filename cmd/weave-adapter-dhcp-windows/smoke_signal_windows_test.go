@@ -1,4 +1,4 @@
-//go:build smoke && windows
+//go:build (smoke || e2e) && windows
 
 /*
 Testing: interrupt delivery on Windows

@@ -41,7 +41,7 @@ tasks:
       - go build {{.LDFLAGS}} -o {{.DOCKER_ARTIFACT}} {{.CMD_PATH}}
 
   ci:windows:
-    desc: The gate the self-hosted WS2022 runner executes (build + test + smoke)
+    desc: The gate the self-hosted WS2022 runner executes (build + test + smoke + e2e)
     cmds:
       # Deliberately NOT `task ci`. That gate is for a developer machine and a
       # cloud runner; this one runs on an infra-managed host as an unprivileged
@@ -57,9 +57,16 @@ tasks:
       #   omitted: vulncheck — fetches govulncheck@latest at run time. Unpinned
       #     remote code should not execute on an internal host, and ci.yml
       #     already scans on ubuntu.
+      #
+      # `e2e` is here and NOWHERE else: it is the only gate that can reach a real
+      # DHCP server, and the only one that observes the adapter serving actual
+      # scopes. If it fails because the runner's account lacks DHCP read rights,
+      # that is a real finding rather than a broken test — a read-only account
+      # serving every endpoint is one of the milestone's exit criteria.
       - task: build-windows
       - task: test:windows
       - task: smoke
+      - task: e2e
 
   test:windows:
     desc: Run tests without the race detector (the WS2022 runner has no C toolchain)
@@ -87,6 +94,30 @@ tasks:
       # which is the only claim this task exists to make.
       - go test -count=1 -tags smoke -run TestSmoke ./cmd/...
 
+  e2e:
+    desc: Drive the whole read path against a REAL DHCP backend (WS2022 only)
+    cmds:
+      # Behind its own tag, separate from `smoke`, because the two gates make
+      # opposite trades. smoke runs anywhere and asserts nothing about the
+      # backend's verdict -- it is about the artifact. This one REQUIRES a
+      # reachable DHCP server with read rights and fails loudly without one,
+      # because it exists to observe the green path that no other gate in this
+      # repo has ever seen: unit tests run against a fake runner, and smoke runs
+      # where there is no DHCP at all.
+      #
+      # That is why it is not in `task ci`: a developer machine has no DHCP role,
+      # so it would fail there for a reason that is not a defect. It runs on the
+      # WS2022 gate, which is the one host that can answer.
+      #
+      # To develop these tests off-host, point the shell at a stub that replays a
+      # captured fixture -- an existing config knob, not a fake in production
+      # code:
+      #   WEAVE_ADAPTER_DHCP_POWERSHELL_PATH=/path/to/stub task e2e
+      #
+      # -count=1 defeats the test cache: a cached pass would mean "the inputs did
+      # not change", not "the adapter still reads this host".
+      - go test -count=1 -tags e2e -run TestE2E -v ./cmd/...
+
   run:
     desc: Run the binary from source
     cmds:
@@ -106,7 +137,15 @@ tasks:
     desc: Verify the golangci-lint config schema and run the linters
     cmds:
       - golangci-lint config verify
-      - golangci-lint run ./...
+      # --build-tags, or the gate silently skips every file behind one. The
+      # smoke and e2e harnesses were unlinted from the day they were written,
+      # which is how a dozen findings accumulated in code that drives the
+      # shipped artifact.
+      #
+      # Both tags together, not one at a time: with only e2e set, the helpers
+      # smoke_test.go uses look unused and the linter reports three false
+      # positives.
+      - golangci-lint run --build-tags smoke,e2e ./...
 
   lint-fix:
     desc: Run golangci-lint with autofix
