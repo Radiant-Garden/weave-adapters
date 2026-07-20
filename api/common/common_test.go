@@ -37,9 +37,6 @@ package common
 import (
 	"encoding/json"
 	"os"
-	"reflect"
-	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -49,93 +46,16 @@ import (
 
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
+	"github.com/radiantgarden/weave-adapters/internal/core/jsonshape"
 	"github.com/radiantgarden/weave-adapters/internal/core/pagination"
 )
-
-// jsonField is one field's observable contract: what a client sees.
-type jsonField struct {
-	Name      string
-	OmitEmpty bool
-	Kind      string
-}
-
-// jsonFieldsOf describes a struct type by its JSON fields.
-//
-// An exported field with no json tag still serializes, under its Go name, and
-// an embedded struct promotes its fields onto the wire. Both are ignored by a
-// naive tag scan, so both are handled here — otherwise adding an untagged field
-// to one side would change the wire format and still compare equal.
-func jsonFieldsOf(t *testing.T, target any) map[string]jsonField {
-	t.Helper()
-
-	typ := reflect.TypeOf(target)
-	require.Equal(t, reflect.Struct, typ.Kind(), "only struct types have a JSON field set")
-
-	fields := make(map[string]jsonField, typ.NumField())
-
-	for field := range typ.Fields() {
-		if !field.IsExported() {
-			continue
-		}
-
-		tag := field.Tag.Get("json")
-		if tag == "-" {
-			continue
-		}
-
-		parts := strings.Split(tag, ",")
-		name := parts[0]
-
-		// Embedded and untagged: encoding/json promotes an anonymous struct's
-		// fields, and falls back to the Go name when there is no tag.
-		if name == "" {
-			if field.Anonymous && field.Type.Kind() == reflect.Struct {
-				for embedded, describe := range jsonFieldsOf(t, reflect.Zero(field.Type).Interface()) {
-					_, clash := fields[embedded]
-					require.False(t, clash, "two fields share the JSON name %q", embedded)
-					fields[embedded] = describe
-				}
-
-				continue
-			}
-
-			name = field.Name
-		}
-
-		_, clash := fields[name]
-		require.False(t, clash, "two fields share the JSON name %q", name)
-
-		fields[name] = jsonField{
-			Name:      name,
-			OmitEmpty: slices.Contains(parts[1:], "omitempty"),
-			Kind:      kindOf(field.Type),
-		}
-	}
-
-	return fields
-}
-
-// kindOf renders a type as the shape a client observes. Pointers are
-// transparent on the wire, and named types are not observable at all, so both
-// are reduced to the underlying kind.
-func kindOf(typ reflect.Type) string {
-	if typ.Kind() == reflect.Pointer {
-		typ = typ.Elem()
-	}
-
-	if typ.Kind() == reflect.Slice {
-		return "[]" + kindOf(typ.Elem())
-	}
-
-	return typ.Kind().String()
-}
 
 func TestProblem_ShouldMatchTheHandWrittenStruct(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE / ACT
-	generated := jsonFieldsOf(t, Problem{})
-	handWritten := jsonFieldsOf(t, apierror.Problem{})
+	generated := jsonshape.Of(t, Problem{})
+	handWritten := jsonshape.Of(t, apierror.Problem{})
 
 	// ASSERT — two descriptions of one wire format; a client cannot tell which
 	// produced a response, so they must not differ.
@@ -179,7 +99,7 @@ func TestFieldError_ShouldMatchTheHandWrittenStruct(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE / ACT / ASSERT
-	assert.Equal(t, jsonFieldsOf(t, apierror.FieldError{}), jsonFieldsOf(t, FieldError{}))
+	assert.Equal(t, jsonshape.Of(t, apierror.FieldError{}), jsonshape.Of(t, FieldError{}))
 }
 
 func TestProblemType_ShouldMatchTheLiveTaxonomy(t *testing.T) {
@@ -244,18 +164,18 @@ func TestPageEnvelope_ShouldMatchTheHandWrittenStruct(t *testing.T) {
 
 	// ARRANGE — the envelope is generic in Go and untyped in the spec, so the
 	// item type differs by construction; the contract is the field set.
-	generated := jsonFieldsOf(t, PageEnvelope{})
-	handWritten := jsonFieldsOf(t, pagination.Page[struct{}]{})
+	generated := jsonshape.Of(t, PageEnvelope{})
+	handWritten := jsonshape.Of(t, pagination.Page[struct{}]{})
 
 	// ACT / ASSERT — the same field names on both sides.
-	assert.ElementsMatch(t, fieldNames(handWritten), fieldNames(generated))
+	assert.ElementsMatch(t, jsonshape.Names(handWritten), jsonshape.Names(generated))
 
 	// Optionality is asserted on BOTH sides. Checking only the Go struct would
 	// let pagination.yaml move a cursor field into required:, which makes the
 	// last page unrepresentable for every generated client.
 	for _, side := range []struct {
 		name   string
-		fields map[string]jsonField
+		fields map[string]jsonshape.Field
 	}{
 		{name: "generated", fields: generated},
 		{name: "hand-written", fields: handWritten},
@@ -283,15 +203,6 @@ func TestPageEnvelope_ShouldMatchTheHandWrittenStruct(t *testing.T) {
 	for _, name := range []string{"nextPageToken", "nextPageUrl"} {
 		assert.Equal(t, handWritten[name].Kind, generated[name].Kind, "%s type", name)
 	}
-}
-
-func fieldNames(fields map[string]jsonField) []string {
-	names := make([]string, 0, len(fields))
-	for name := range fields {
-		names = append(names, name)
-	}
-
-	return names
 }
 
 func TestPageParameters_ShouldMatchTheHandWrittenNames(t *testing.T) {
