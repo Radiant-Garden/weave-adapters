@@ -1,7 +1,7 @@
 //go:build e2e
 
 /*
-Testing: the whole read path against a real DHCP backend
+Testing: the read and create paths against a real DHCP backend
 
 Pending:
 
@@ -9,6 +9,18 @@ Pending:
 	"no duplicates") are only load-bearing with two or more scopes; on a
 	single-scope server they pass vacuously. TestE2E_ShouldServeScopes says so in
 	its log output rather than pretending otherwise.
+
+	Drift detection (DHCP-002) observing a real delete-and-recreate. The ledger
+	is per-process and the event goes to the adapter's log, so asserting it needs
+	the harness to capture and parse that process's stderr — machinery no test
+	here has yet. Until then the drift path is proven against constructed scopes
+	only, and the thing it is meant to catch has never been staged for real.
+
+	The create fixture in internal/adapters/dhcpwindows/create_test.go is still
+	hand-written rather than captured. These tests now exercise the real
+	projection end to end, which is the coverage that mattered, but the unit
+	fixture remains someone's idea of what -PassThru emits. Capture it at
+	sign-off.
 
 Tested:
 
@@ -21,6 +33,15 @@ Tested:
 	  - TestE2E_ShouldFilterWithoutDisturbingTheCollection: ?scopeId= narrows, and does not corrupt.
 	  - TestE2E_ShouldDeriveStableIdentitiesAcrossARestart: the same host, read twice, yields the same IDs.
 	  - TestE2E_ShouldServeTheOpenAPIContract: the embedded spec reaches the wire.
+
+	the write path, which until these existed had never met a real shell
+	  - TestE2E_ShouldCreateAScopeAndResolveItsLocation: 201, the derived identity
+	    agrees with Windows, the optional values survive exec.Cmd.Env, and the
+	    Location a client is handed actually resolves.
+	  - TestE2E_ShouldRejectADuplicateSubnetWithAConflict: 409 rather than a
+	    backend error, which means the conflict marker survived a real round trip.
+	  - TestE2E_ShouldRejectABadCreateBeforeReachingTheBackend: four rejections,
+	    and nothing reached the DHCP server.
 
 Tested elsewhere:
 
@@ -41,6 +62,10 @@ Declined:
 	shared host to satisfy a test is not a trade worth making; the mapping is
 	covered against fakes where it can be exercised precisely.
 
+	Exercising 413 and 415 here. Both are core request-body rejections that never
+	reach the backend, so a real DHCP server proves nothing a fake does not.
+	internal/core/requestbody owns them.
+
 Additional Remarks:
 
 	THIS GATE REQUIRES A REACHABLE DHCP SERVER AND READ RIGHTS. If the backend is
@@ -54,6 +79,14 @@ Additional Remarks:
 	fixture to develop these tests off-host — that is an existing config knob,
 	not a fake compiled into production code.
 
+	THE WRITE TESTS MUTATE THE HOST. They create on 198.51.100.0/24 (RFC 5737
+	TEST-NET-2) and remove it through PowerShell directly, because there is no
+	DELETE endpoint until M3b. reserveTestSubnet pre-cleans as well as
+	post-cleans, so a run that died mid-test does not poison every run after it.
+	A cleanup that fails prints the exact command to run by hand rather than
+	failing quietly, since a leftover scope surfaces later as a 409 on create,
+	which reads like a conflict bug and is not one.
+
 	The identity inputs come from harness_test.go's startAdapter and are FIXED
 	constants. TestE2E_ShouldDeriveStableIdentitiesAcrossARestart compares
 	wadaptIDs across two processes, so randomising them per run would make that
@@ -62,15 +95,19 @@ Additional Remarks:
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -516,4 +553,230 @@ func httpClient() *http.Client {
 			return http.ErrUseLastResponse
 		},
 	}
+}
+
+// testSubnet is the subnet the write tests create on.
+//
+// RFC 5737 TEST-NET-2, chosen because it is reserved for documentation and will
+// not be a real scope on any host this gate runs against. Deliberately NOT
+// 203.0.113.0 (TEST-NET-3): TestE2E_ShouldFilterWithoutDisturbingTheCollection
+// uses that one as its "no such scope" probe, and creating a scope there would
+// make that test fail for a reason having nothing to do with filtering.
+const (
+	testSubnet     = "198.51.100.0"
+	testSubnetMask = "255.255.255.0"
+	testStartRange = "198.51.100.10"
+	testEndRange   = "198.51.100.200"
+)
+
+// powershell returns the shell the cleanup path drives.
+//
+// It honours the same WEAVE_ADAPTER_DHCP_POWERSHELL_PATH knob the adapter does,
+// so a stub that replays fixtures keeps working off-host. That is the existing
+// config knob, not a second mechanism invented for tests.
+func powershell() string {
+	if path := os.Getenv("WEAVE_ADAPTER_DHCP_POWERSHELL_PATH"); path != "" {
+		return path
+	}
+
+	return "powershell.exe"
+}
+
+// removeScope deletes a scope directly, bypassing the adapter.
+//
+// Test code reaching around the thing under test is normally a smell, and here
+// it is the only option: there is no DELETE endpoint until M3b, and a gate that
+// creates scopes on a shared DHCP server without removing them would leave the
+// host dirtier after every CI run — and the *next* run would meet its own
+// leftover as a 409 and fail for the wrong reason.
+//
+// -Force because a scope holding leases will not delete without it. Failures
+// are reported rather than swallowed: a scope this gate could not clean up is a
+// real operational fact somebody has to act on, and silently continuing would
+// hide it until the next run failed mysteriously.
+func removeScope(t *testing.T, subnet string, mustSucceed bool) {
+	t.Helper()
+
+	script := fmt.Sprintf(
+		`$ErrorActionPreference = 'Stop'; Remove-DhcpServerv4Scope -ScopeId %s -Force`, subnet)
+
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
+	defer cancel()
+
+	// The shell path comes from an operator-set environment variable and the
+	// script interpolates a package constant, never a value from the network.
+	// This is a test helper on a gate that already runs arbitrary built code.
+	//nolint:gosec // G204: constant script, shell path from the documented config knob.
+	cmd := exec.CommandContext(ctx, powershell(), "-NoProfile", "-NonInteractive", "-Command", script)
+
+	if out, err := cmd.CombinedOutput(); err != nil && mustSucceed {
+		t.Errorf(`could not remove scope %s from the DHCP server.
+
+MANUAL CLEANUP REQUIRED on this host:
+  Remove-DhcpServerv4Scope -ScopeId %s -Force
+
+Leaving it behind will make the next run of this gate fail with a 409 on
+create, which looks like a conflict bug and is not one.
+
+error: %v
+output: %s`, subnet, subnet, err, out)
+	}
+}
+
+// reserveTestSubnet clears any leftover from a previous run and schedules
+// removal of whatever this test creates.
+//
+// Pre-cleaning is what makes the gate self-healing: a run that died between
+// create and cleanup would otherwise poison every run after it. That first
+// removal is best-effort — on a clean host there is nothing to remove and the
+// cmdlet failing is the expected case.
+func reserveTestSubnet(t *testing.T) {
+	t.Helper()
+
+	removeScope(t, testSubnet, false)
+	t.Cleanup(func() { removeScope(t, testSubnet, true) })
+}
+
+// createBody is a valid create payload for the reserved test subnet.
+func createBody(name string) string {
+	return fmt.Sprintf(
+		`{"name":%q,"startRange":%q,"endRange":%q,"subnetMask":%q,`+
+			`"description":"created by the e2e gate","leaseDurationSeconds":691200}`,
+		name, testStartRange, testEndRange, testSubnetMask)
+}
+
+// createScope posts a body and returns status, decoded scope and headers.
+func (a *adapter) createScope(t *testing.T, body string) (int, scope, http.Header) {
+	t.Helper()
+
+	status, payload, header := post(t, a.base+"/api/v1/scopes", a.token, body)
+
+	var created scope
+	if status == http.StatusCreated {
+		require.NoError(t, json.Unmarshal(payload, &created), "create payload: %s", payload)
+	}
+
+	return status, created, header
+}
+
+// DHCP server; running them concurrently would put N powershell.exe spawns on a shared
+// host and make a slow query look like a flaky test.
+//
+//nolint:paralleltest // each case starts its own adapter process and mutates the one real
+func TestE2E_ShouldCreateAScopeAndResolveItsLocation(t *testing.T) {
+	// ARRANGE — this is the test the whole write path rests on. Until it ran,
+	// every assertion about create was made against a hand-written fixture
+	// nobody had captured from a host: the -PassThru projection, the conflict
+	// marker, and the eight values that reach the script through the child
+	// environment had never met a real shell.
+	a := startE2E(t)
+	a.requireHealthyBackend(t)
+	reserveTestSubnet(t)
+
+	// ACT
+	status, created, header := a.createScope(t, createBody("e2e-create"))
+
+	// ASSERT — 201 with the scope as it now exists.
+	require.Equal(t, http.StatusCreated, status)
+
+	assert.Equal(t, testSubnet, created.ScopeID, "the adapter and Windows must agree on the derived subnet")
+	assert.Regexp(t, wadaptIDShape, created.WadaptID)
+	assert.Equal(t, "e2e-create", created.Name)
+	assert.Equal(t, "ipv4", created.AddressFamily)
+
+	// The optional values travel through exec.Cmd.Env and are splatted onto the
+	// cmdlet. The read path only ever passed one value that way; this is the
+	// first exercise of that mechanism at width, and a silently dropped optional
+	// would show up here as a default rather than as an error.
+	assert.Equal(t, "created by the e2e gate", created.Description)
+	assert.Equal(t, 691200, created.LeaseDurationSeconds)
+
+	// Location must resolve. A 201 pointing at a 404 tells a client the create
+	// did not happen, which is worse than returning no header at all.
+	location := header.Get("Location")
+	require.NotEmpty(t, location, "201 carried no Location")
+	assert.Equal(t, "/api/v1/scopes/"+created.WadaptID, location)
+
+	status, body := get(t, a.base+location, a.token)
+	require.Equal(t, http.StatusOK, status, "Location %q did not resolve: %s", location, body)
+
+	var fetched scope
+	require.NoError(t, json.Unmarshal(body, &fetched))
+	assert.Equal(t, created, fetched, "the item route must serve what create returned")
+
+	// And it is in the collection, which is the read path agreeing with the
+	// write path on a host neither of them faked.
+	page := a.listScopes(t, "scopeId="+testSubnet)
+	require.Len(t, page.Items, 1)
+	assert.Equal(t, created.WadaptID, page.Items[0].WadaptID)
+}
+
+// DHCP server; running them concurrently would put N powershell.exe spawns on a shared
+// host and make a slow query look like a flaky test.
+//
+//nolint:paralleltest // each case starts its own adapter process and mutates the one real
+func TestE2E_ShouldRejectADuplicateSubnetWithAConflict(t *testing.T) {
+	// ARRANGE
+	a := startE2E(t)
+	a.requireHealthyBackend(t)
+	reserveTestSubnet(t)
+
+	status, _, _ := a.createScope(t, createBody("e2e-first"))
+	require.Equal(t, http.StatusCreated, status)
+
+	// ACT — the same subnet again. Windows permits exactly one scope per subnet.
+	status, _, _ = a.createScope(t, createBody("e2e-second"))
+
+	// ASSERT — 409, which means the pre-create check saw the existing scope and
+	// the conflict marker survived a round trip through a real shell. That
+	// marker match is exact rather than a substring search, so a projection
+	// change on the host would surface here as a 502 instead.
+	require.Equal(t, http.StatusConflict, status,
+		"a duplicate subnet must be a conflict, not a backend error")
+
+	// The subnet is still the one scope it was, so the failed create changed
+	// nothing on the server.
+	page := a.listScopes(t, "scopeId="+testSubnet)
+	assert.Len(t, page.Items, 1)
+	assert.Equal(t, "e2e-first", page.Items[0].Name)
+}
+
+// DHCP server; running them concurrently would put N powershell.exe spawns on a shared
+// host and make a slow query look like a flaky test.
+//
+//nolint:paralleltest // each case starts its own adapter process and queries the one real
+func TestE2E_ShouldRejectABadCreateBeforeReachingTheBackend(t *testing.T) {
+	// ARRANGE — no reserveTestSubnet: none of these should reach the server, and
+	// scheduling a cleanup would hide a failure to honour that.
+	a := startE2E(t)
+	a.requireHealthyBackend(t)
+
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{"invalid input", `{"name":"","startRange":"nope","endRange":"nope","subnetMask":"nope"}`, http.StatusBadRequest},
+		{"malformed json", `{"name":`, http.StatusBadRequest},
+		{"empty body", ``, http.StatusBadRequest},
+		// A client cannot assert the identity the server derives.
+		{"derived field", createBody("x")[:len(createBody("x"))-1] + `,"wadaptId":"chosen"}`, http.StatusBadRequest},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// ACT
+			status, payload, _ := post(t, a.base+"/api/v1/scopes", a.token, tc.body)
+
+			// ASSERT
+			assert.Equal(t, tc.wantStatus, status, "body: %s", payload)
+			assert.Contains(t, string(payload), "weave-adapters:", "rejection must be problem+json")
+		})
+	}
+
+	// Nothing was created on the reserved subnet, which is the assertion that
+	// makes the rest of this test worth running against a real host rather than
+	// a fake: validation happens before the backend is touched.
+	page := a.listScopes(t, "scopeId="+testSubnet)
+	assert.Empty(t, page.Items, "a rejected create reached the DHCP server")
 }

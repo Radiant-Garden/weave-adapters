@@ -41,6 +41,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,6 +188,34 @@ func get(t *testing.T, url, token string) (int, []byte) {
 	require.NoError(t, err)
 
 	return resp.StatusCode, body
+}
+
+// post sends a JSON body and returns the status, body and response headers.
+//
+// Headers are returned because Location is the point of the create test: a 201
+// that does not say where the resource lives is a contract failure the body
+// cannot reveal.
+func post(t *testing.T, url, token, body string) (int, []byte, http.Header) {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, strings.NewReader(body))
+	require.NoError(t, err)
+
+	req.Header.Set("Content-Type", "application/json")
+
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	require.NoError(t, err)
+
+	defer func() { _ = resp.Body.Close() }()
+
+	payload, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	return resp.StatusCode, payload, resp.Header
 }
 
 // waitFor reaps the process on a channel so the caller can bound the wait.
