@@ -28,7 +28,25 @@ import (
 )
 
 const (
+	// readHeaderTimeout bounds how long a client may take to send the request
+	// line and headers. It is the first line of defence against a Slowloris that
+	// dribbles headers to pin a connection.
 	readHeaderTimeout = 10 * time.Second
+
+	// readTimeout bounds the whole request read, headers plus body. The bodies
+	// this API accepts are single resources of a few hundred bytes, so a read
+	// that takes tens of seconds is a dripped body rather than a large one, and
+	// bounding it cannot truncate an honest request. Handlers read the body
+	// before they touch the backend, so this deadline never fires mid-handler on
+	// a slow backend call.
+	readTimeout = 30 * time.Second
+
+	// idleTimeout bounds a kept-alive connection between requests. Without it a
+	// client can hold a connection open indefinitely after one request, so a
+	// handful of clients can occupy every connection slot while sending nothing.
+	// It has no bearing on an active request, so no legitimate slow response is
+	// at risk.
+	idleTimeout = 120 * time.Second
 
 	healthPath  = "/api/v1/health"
 	openAPIPath = "/openapi.yaml"
@@ -74,9 +92,10 @@ type Option func(*settings)
 // through the With* functions, so a field added here is not a breaking change
 // at any call site.
 type settings struct {
-	inner  []middleware.Middleware
-	routes []Route
-	spec   []byte
+	inner        []middleware.Middleware
+	routes       []Route
+	spec         []byte
+	writeTimeout time.Duration
 }
 
 // WithInnerMiddleware adds middlewares inside the standard chain —
@@ -155,6 +174,21 @@ func WithOpenAPISpec(spec []byte) Option {
 	return func(s *settings) { s.spec = bytes.Clone(spec) }
 }
 
+// WithWriteTimeout bounds how long the server may take to write a response,
+// measured from the end of the request headers and therefore across the whole
+// handler run — the backend call included.
+//
+// It arrives as an Option rather than a constant because this package is
+// adapter-agnostic and the safe value is not: a WriteTimeout below an adapter's
+// own backend timeout would truncate a slow-but-honest response and hand the
+// client a torn body instead of the 502/504 the backend classification promises.
+// Only the binary knows that timeout, so the binary sets this to comfortably
+// exceed it. Zero — the default — leaves the write unbounded, which is the
+// pre-existing behaviour and keeps a server built without the option serveable.
+func WithWriteTimeout(d time.Duration) Option {
+	return func(s *settings) { s.writeTimeout = d }
+}
+
 // New builds a Server listening on addr with the given health handler mounted
 // at GET /api/v1/health, wrapped in the standard middleware chain (recovery →
 // request-ID → logging → inner → problem-errors).
@@ -182,6 +216,11 @@ func New(addr string, healthHandler http.Handler, opts ...Option) *Server {
 			Addr:              addr,
 			Handler:           NewHandler(mux, set.inner...),
 			ReadHeaderTimeout: readHeaderTimeout,
+			ReadTimeout:       readTimeout,
+			IdleTimeout:       idleTimeout,
+			// Zero unless the binary set it — see WithWriteTimeout for why the
+			// safe bound is the adapter's to choose.
+			WriteTimeout: set.writeTimeout,
 		},
 	}
 }

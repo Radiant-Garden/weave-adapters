@@ -1,8 +1,10 @@
 // Package events is the cataloged event system: every noteworthy log line is a
 // registered, documented, stably-identified event rather than an ad-hoc slog
-// call. This gives a machine-readable operator log, event-derived API errors
-// (later milestone), a live event stream, and an auto-generated catalog — all
-// from one place. Ported from weave's internal/daemon/events.
+// call. This gives a machine-readable operator log, event-derived API errors,
+// and an auto-generated catalog — all from one place. Ported from weave's
+// internal/daemon/events; the subscriber fan-out that port carried was dropped
+// here as speculative — no milestone consumes it — and returns with the endpoint
+// that needs it.
 package events
 
 import "log/slog"
@@ -11,24 +13,20 @@ import "log/slog"
 type EventID string
 
 // Impact describes a static, machine-readable consequence of an event that a
-// consumer can rely on. Used by event-derived API errors in a later milestone.
+// consumer can rely on — rendered into docs/events.md and available for a SIEM
+// to filter on.
+//
+// Only the impacts something actually declares live here. The vocabulary once
+// carried seven, six of them unused — the same speculative-code smell the rest
+// of the repo forbids, sitting in core. A milestone that emits a state
+// transition or a resource lifecycle event adds its impact back in the same
+// commit that consumes it, next to the emitter, which is the rule everywhere
+// else.
 type Impact int
 
 const (
 	// ImpactRequestRejected — the request was not processed.
 	ImpactRequestRejected Impact = iota
-	// ImpactStateChanged — runtime state transitioned.
-	ImpactStateChanged
-	// ImpactServiceDegraded — a dependency is impaired.
-	ImpactServiceDegraded
-	// ImpactConfigReloaded — configuration was reloaded.
-	ImpactConfigReloaded
-	// ImpactResourceCreated — a new resource was persisted.
-	ImpactResourceCreated
-	// ImpactResourceUpdated — an existing resource was modified.
-	ImpactResourceUpdated
-	// ImpactResourceDeleted — a resource was removed.
-	ImpactResourceDeleted
 )
 
 // String returns the snake_case representation of an Impact.
@@ -36,18 +34,6 @@ func (i Impact) String() string {
 	switch i {
 	case ImpactRequestRejected:
 		return "request_rejected"
-	case ImpactStateChanged:
-		return "state_changed"
-	case ImpactServiceDegraded:
-		return "service_degraded"
-	case ImpactConfigReloaded:
-		return "config_reloaded"
-	case ImpactResourceCreated:
-		return "resource_created"
-	case ImpactResourceUpdated:
-		return "resource_updated"
-	case ImpactResourceDeleted:
-		return "resource_deleted"
 	default:
 		return "unknown"
 	}

@@ -1,17 +1,16 @@
 package dhcpwindows
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/netip"
 	"net/url"
-	"slices"
 
 	adapterevents "github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
+	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 	"github.com/radiantgarden/weave-adapters/internal/core/pagination"
 	"github.com/radiantgarden/weave-adapters/internal/core/requestbody"
 )
@@ -83,18 +82,29 @@ func NewScopesHandler(backend scopeBackend, cfg Config, maxBodyBytes int) *Scope
 // both logs and responds. Everything below returns an error instead.
 //
 // The method switch is here rather than in the mux because both methods live on
-// one pattern and share the handler's state. A method the routes do not mount
-// never reaches this, so the default is unreachable from the binary — it exists
-// so a handler mounted directly in a test cannot silently serve a list for a
-// DELETE.
+// one pattern and share the handler's state. It is exhaustive rather than
+// default-to-list: an earlier version served the list on the default arm while
+// its comment claimed the opposite, so a DELETE mounted straight onto this
+// handler in a test was answered with a 200 list. In the binary the mux mounts
+// only GET and POST, so any other method is a 405 from the router before it
+// reaches here — the explicit arm below matches that answer for a handler
+// exercised without the mux, instead of contradicting it.
 func (h *ScopesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var err error
 
 	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		err = h.list(w, r)
 	case http.MethodPost:
 		err = h.create(w, r)
 	default:
-		err = h.list(w, r)
+		// Unreachable in the binary: the mux mounts only GET and POST on this
+		// pattern, so the router answers 405 for anything else before it arrives.
+		// This arm exists for a handler mounted without the mux (a direct test),
+		// and matches the router's answer rather than contradicting it. API-902 is
+		// the middleware's in production; this is the same outcome from the one
+		// place that can produce it when the middleware is absent.
+		err = apierror.New(catalog.API902, "method", r.Method, "allow", "GET, HEAD, POST")
 	}
 
 	if err != nil {
@@ -303,42 +313,17 @@ func parseScopeIDFilter(query url.Values) (string, []apierror.FieldError) {
 // ("192.168.178.0" sorts before "192.168.2.0" as text, after as an address), so
 // sorting on one form and resuming on another would skip and repeat pages in
 // silence.
+// Both of pagination.Slice's preconditions are met here rather than assumed:
+// ListScopes sorts by the encoded wadaptID and rejects a duplicate derivation,
+// so the resume key is both the sort key and unique. That rejection is not
+// defensive tidying — a repeated key is a repeated cursor, and the walk would
+// silently drop the rest of the run at a page boundary.
 func (h *ScopesHandler) paginate(
 	scopes []Scope, params pagination.Params, r *http.Request,
 ) ([]Scope, pagination.NextPage) {
-	start := 0
-
-	if params.After != "" {
-		// BinarySearchFunc lands on the first scope ordered at or after the
-		// cursor key; when that key is still present, step over it. A scope
-		// deleted between pages simply is not found, and the walk resumes at the
-		// next one rather than restarting or skipping — which is the property a
-		// resume key has and an offset does not.
-		found := false
-
-		start, found = slices.BinarySearchFunc(scopes, params.After, func(s Scope, after string) int {
-			return cmp.Compare(s.WadaptID, after)
-		})
-		if found {
-			start++
-		}
-	}
-
-	end := min(start+params.Size, len(scopes))
-	page := scopes[start:end]
-
-	// A cursor only when scopes remain. On the last page both forms are absent
-	// together, which is what tells a client to stop — not a short page.
-	//
-	// The key is never empty: ListScopes derives a wadaptID for every scope and
-	// rejects a duplicate, so the resume key is unique and non-empty, which is
-	// what a keyset cursor requires.
-	var next pagination.NextPage
-	if end < len(scopes) {
-		next = h.pages.Next(r.URL, page[len(page)-1].WadaptID)
-	}
-
-	return page, next
+	return pagination.Slice(h.pages, scopes, params, r.URL, func(s Scope) string {
+		return s.WadaptID
+	})
 }
 
 // problemFor maps a backend failure onto the response taxonomy.

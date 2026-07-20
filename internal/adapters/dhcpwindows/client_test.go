@@ -29,6 +29,7 @@ Tested:
 	  - TestListScopes_ShouldDeriveAnIDForEveryScope: the omission half of the invariant.
 	  - TestListScopes_ShouldSetTheAddressFamily: constant ipv4 in M3a.
 	  - TestListScopes_ShouldTolerateStderrOnASuccessfulRun: stderr alone is not fatal.
+	  - TestListScopes_ShouldNotLogACancellationAsABackendOutage: a done context is ErrBackendCanceled, and it emits no BACKEND-101 — a drain must not read as an outage.
 	  - TestListScopes_ShouldRejectDuplicateDerivedIDs: the converse half of the
 	    invariant — a collision is a repeated sort key, so it must be loud.
 	  - TestListScopes_ShouldClassifyBackendFailures: exit, timeout, empty stdout,
@@ -65,6 +66,12 @@ Additional Remarks:
 	The fake runner lives here rather than in production code: a fake the binary
 	  links is speculative code. internal/core/events/testing is the precedent if
 	  another package ever genuinely needs to import one.
+	The fake reproduces the two execRunner behaviours a caller depends on — a done
+	  context fails the call (classified as timeout or cancellation, as the real
+	  runner does), and env keys outside the WADAPT_ prefix are dropped. Without
+	  those, a test could pin a guard the real runner would still violate: the
+	  cancelled-caller probe test passed with probe.go's WithoutCancel deleted, and
+	  a parameter renamed off the prefix stayed green while production dropped it.
 	Fixtures are read from testdata/ rather than inlined so they stay byte-for-byte
 	  what the host emitted, including PS 5.1's two-space-after-colon formatting.
 */
@@ -84,6 +91,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	adapterevents "github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows/events"
+	eventstest "github.com/radiantgarden/weave-adapters/internal/core/events/testing"
 )
 
 // testNamespaceKey is a fixed key so derived IDs are reproducible across runs.
@@ -109,15 +119,56 @@ type fakeRunner struct {
 	onRun func(ctx context.Context)
 }
 
+// run replays the canned output, but only after reproducing the two behaviours
+// of execRunner that a caller can actually depend on. Both were absent, and
+// their absence made tests pass that pinned nothing:
+//
+//   - A done context fails the call. exec.CommandContext never starts a process
+//     for one, so a fake that ignored ctx let TestProbeCheck_ShouldSurviveACancelledCaller
+//     pass with probe.go's context.WithoutCancel line deleted — the one test in
+//     the suite that gave false confidence.
+//   - Keys outside envPrefix are dropped. runArgs filters them, so a fake that
+//     recorded env verbatim would keep every unit test green if a parameter were
+//     renamed off the prefix, while production silently stopped passing it.
 func (f *fakeRunner) run(ctx context.Context, script string, env map[string]string) ([]byte, []byte, error) {
 	f.scripts = append(f.scripts, script)
-	f.envs = append(f.envs, env)
+	f.envs = append(f.envs, filterEnv(env))
 
 	if f.onRun != nil {
 		f.onRun(ctx)
 	}
 
+	// Classified exactly the way runArgs classifies it, so a test asserting on
+	// the error sees what the real runner would have produced — including the
+	// cancellation wrapping, which is what lets backendError recognize it and
+	// stay quiet.
+	if err := ctx.Err(); err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, nil, errors.Join(ErrBackendTimeout, err)
+		}
+
+		return nil, nil, errors.Join(ErrBackendCanceled, err)
+	}
+
 	return f.stdout, f.stderr, f.err
+}
+
+// filterEnv mirrors runArgs' prefix filter, so what the fake records is what a
+// script would actually have been able to read.
+func filterEnv(env map[string]string) map[string]string {
+	if env == nil {
+		return nil
+	}
+
+	filtered := make(map[string]string, len(env))
+
+	for key, value := range env {
+		if strings.HasPrefix(key, envPrefix) {
+			filtered[key] = value
+		}
+	}
+
+	return filtered
 }
 
 // fixture reads a captured PowerShell output file.
@@ -346,6 +397,31 @@ func TestListScopes_ShouldTolerateStderrOnASuccessfulRun(t *testing.T) {
 	// first time PS 5.1 wrote anything benign there.
 	require.NoError(t, err)
 	assert.Len(t, scopes, 1)
+}
+
+func TestListScopes_ShouldNotLogACancellationAsABackendOutage(t *testing.T) { //nolint:paralleltest // installs the global emitter hook
+	// ARRANGE — a caller that has already gone away, which is what a client
+	// disconnect or a graceful drain produces. The fake classifies a done context
+	// exactly as the real runner does.
+	rec := eventstest.NewRecorder()
+	defer rec.Install()()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	client := clientWith(&fakeRunner{stdout: fixture(t, "scopes_single.json")})
+
+	// ACT
+	_, err := client.ListScopes(ctx)
+
+	// ASSERT — the outcome is a cancellation, not a backend failure, and it is
+	// NOT logged: nothing failed, the caller left. BACKEND-101 at ERROR here
+	// would raise a false outage alarm on every drained request, pointing an
+	// operator at a DHCP server that is working.
+	require.ErrorIs(t, err, ErrBackendCanceled)
+	require.NotErrorIs(t, err, ErrBackendUnavailable,
+		"a cancellation must not be reclassified as an unreachable backend")
+	rec.AssertNotEmitted(t, adapterevents.BACKEND101)
 }
 
 func TestListScopes_ShouldRejectDuplicateDerivedIDs(t *testing.T) {

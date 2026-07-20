@@ -175,9 +175,19 @@ func run(ctx context.Context, args []string) error {
 	scope := etag.Conditional(dhcpwindows.NewScopeHandler(backend))
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
+
+	// The write bound must clear the slowest honest handler, which is one backed
+	// by a full-length backend call plus the runner's kill grace, or a legitimate
+	// slow response would be truncated into a torn body rather than the classified
+	// 502/504 the backend errors promise. The margin absorbs JSON encoding and
+	// scheduling. Only the binary knows the backend timeout, which is why the
+	// server takes this as a value.
+	writeTimeout := adapterCfg.CommandTimeout + dhcpwindows.RunnerKillGrace + 5*time.Second
+
 	srv := httpserver.New(addr, health.NewHandler(version, started, probe),
 		httpserver.WithInnerMiddleware(authMiddleware...),
 		httpserver.WithOpenAPISpec(apispec.Spec()),
+		httpserver.WithWriteTimeout(writeTimeout),
 		httpserver.WithRoutes(
 			httpserver.Route{
 				Pattern: "GET " + dhcpwindows.ScopesPath,

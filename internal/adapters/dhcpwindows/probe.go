@@ -3,6 +3,7 @@ package dhcpwindows
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -86,8 +87,12 @@ func (p *Probe) Check(ctx context.Context) health.Result {
 	// poll cancels the probe, the cancellation is classified as a backend
 	// failure, and that verdict is cached — so the next unrelated poll within
 	// the TTL is served 503, weave stops routing, and the log shows a health
-	// transition caused by nothing but a disconnected client. Values and
-	// deadlines are inherited; only the cancellation is dropped.
+	// transition caused by nothing but a disconnected client.
+	//
+	// WithoutCancel drops the caller's deadline as well as its cancellation —
+	// only its values survive — so the WithTimeout on the next line is what gives
+	// the probe a bound at all, not merely a shorter one. The two lines are a
+	// pair: detach, then apply our own deadline.
 	ctx = context.WithoutCancel(ctx)
 
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
@@ -95,11 +100,17 @@ func (p *Probe) Check(ctx context.Context) health.Result {
 
 	result, err := p.client.probe(ctx)
 	if err != nil {
-		// The error already carries its classification and the shell's own
-		// words; the probe adds the identity of what it could not reach.
+		// A curated, classification-only detail — never err.Error(). The health
+		// endpoint is unauthenticated (weave polls it to decide reachability), and
+		// the raw error carries the shell's stderr, which can name internal hosts
+		// and paths. That is exactly the string the authenticated scope routes
+		// redact via problemFor, so leaking it on the open endpoint would make the
+		// unauthenticated surface the most talkative one. The stderr still reaches
+		// an operator through BACKEND-101, which c.probe already emitted with the
+		// full cause; this only governs what an anonymous caller is told.
 		return health.Result{
 			Status: health.StatusUnavailable,
-			Detail: err.Error(),
+			Detail: probeFailureDetail(err),
 			Fields: p.operatorFields(),
 		}
 	}
@@ -112,6 +123,27 @@ func (p *Probe) Check(ctx context.Context) health.Result {
 			"psVersion", result.PSVersion,
 			"psEdition", result.PSEdition,
 		),
+	}
+}
+
+// probeFailureDetail maps a probe failure onto a fixed, client-safe sentence.
+//
+// Keyed on the typed classification the client already assigned rather than on
+// the message text, so it carries no host names, paths, or shell output — the
+// same reason problemFor renders the scope routes' 502/504 from a curated
+// ResponseDetail rather than from the cause. Each sentence tells an operator
+// which of the three failure modes this is, which is what the health status is
+// for; the specifics live in BACKEND-101.
+func probeFailureDetail(err error) string {
+	switch {
+	case errors.Is(err, ErrBackendTimeout):
+		return "dhcp backend did not respond within the probe timeout"
+	case errors.Is(err, ErrBackendMalformed):
+		return "dhcp backend returned an unreadable response"
+	default:
+		// ErrBackendUnavailable, and anything unclassified, reads as unreachable —
+		// the safe direction for an anonymous caller, and the common one.
+		return "dhcp backend could not be reached or scopes could not be read"
 	}
 }
 

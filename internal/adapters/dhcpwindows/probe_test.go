@@ -17,8 +17,15 @@ Tested:
 	  - TestProbeCheck_ShouldReportHealthyWithOperatorFields: a good read yields
 	    healthy, with server and identity as SEPARATE fields plus the rest of
 	    what ends an investigation in one request.
+	  - TestProbeCheck_ShouldReportZeroScopesForAFreshlyProvisionedServer: a
+	    readable server with no scopes is healthy and honestly zero, not one.
+	  - TestProbeCheck_ShouldSurviveACancelledCaller: a disconnected caller must
+	    not mark the backend unavailable — the WithoutCancel detach, exercised.
 	  - TestProbeCheck_ShouldReportUnavailableWhenTheBackendFails: every backend
-	    failure mode makes the component unavailable, carrying the reason.
+	    failure mode makes the component unavailable, carrying a fixed
+	    classification-only reason.
+	  - TestProbeCheck_ShouldNotLeakStderrToTheUnauthenticatedDetail: the shell's
+	    stderr never reaches the anonymous health caller; it lives in BACKEND-101.
 	  - TestProbeCheck_ShouldNotServe200WhenScopesCannotBeRead: the status maps to
 	    503, so weave stops routing rather than being told a broken adapter is fine.
 	  - TestProbeCheck_ShouldBoundItsOwnRuntime: the probe applies its own shorter
@@ -189,28 +196,29 @@ func TestProbeCheck_ShouldReportUnavailableWhenTheBackendFails(t *testing.T) {
 	}{
 		{
 			// The RSAT-DHCP-absent and permissions cases both land here: the
-			// service is happily Running while the query fails.
+			// service is happily Running while the query fails. The stderr below
+			// is what must NOT reach an anonymous caller (asserted after the loop).
 			name: "the query is refused",
 			fake: &fakeRunner{
 				err:    exec.ErrNotFound,
 				stderr: []byte("Get-DhcpServerv4Scope : Access is denied."),
 			},
-			wantDetail: "Access is denied",
+			wantDetail: "could not be reached",
 		},
 		{
 			name:       "the host is wedged",
 			fake:       &fakeRunner{err: ErrBackendTimeout},
-			wantDetail: "timed out",
+			wantDetail: "did not respond within the probe timeout",
 		},
 		{
 			name:       "the shell says nothing",
 			fake:       &fakeRunner{},
-			wantDetail: "no output",
+			wantDetail: "unreadable",
 		},
 		{
 			name:       "the shell speaks nonsense",
 			fake:       &fakeRunner{stdout: []byte("not json at all")},
-			wantDetail: "malformed",
+			wantDetail: "unreadable",
 		},
 		{
 			// Decodes cleanly into a zero probeResult. Reporting healthy off
@@ -218,12 +226,12 @@ func TestProbeCheck_ShouldReportUnavailableWhenTheBackendFails(t *testing.T) {
 			// can read scopes".
 			name:       "an empty object",
 			fake:       &fakeRunner{stdout: []byte(`{}`)},
-			wantDetail: "no psVersion",
+			wantDetail: "unreadable",
 		},
 		{
 			name:       "a bare null",
 			fake:       &fakeRunner{stdout: []byte(`null`)},
-			wantDetail: "no psVersion",
+			wantDetail: "unreadable",
 		},
 	}
 
@@ -235,8 +243,9 @@ func TestProbeCheck_ShouldReportUnavailableWhenTheBackendFails(t *testing.T) {
 			result := probeWith(tc.fake).Check(context.Background())
 
 			// ASSERT — surfaced as a health component rather than as a 500 on
-			// every scopes request, and the detail carries the shell's own
-			// words where it produced any.
+			// every scopes request. The detail is a fixed, classification-only
+			// sentence: /api/v1/health is unauthenticated, so it must name the
+			// failure mode without carrying the shell's own words.
 			assert.Equal(t, health.StatusUnavailable, result.Status)
 			assert.Contains(t, result.Detail, tc.wantDetail)
 			// Carried on the failure path too: an unreachable backend is exactly
@@ -245,6 +254,31 @@ func TestProbeCheck_ShouldReportUnavailableWhenTheBackendFails(t *testing.T) {
 			assert.Equal(t, "identity01.example.test", result.Fields["identity"])
 		})
 	}
+}
+
+func TestProbeCheck_ShouldNotLeakStderrToTheUnauthenticatedDetail(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a backend failure whose stderr names something an anonymous
+	// caller must not learn. /api/v1/health takes no credential, and the same
+	// stderr is redacted on the authenticated scope routes, so leaking it here
+	// would make the open endpoint the most talkative surface.
+	// The stderr an unauthenticated caller must never be shown. Named for what it
+	// leaks — internal host and account — rather than "secret", which gosec's
+	// G101 reads as a literal credential.
+	stderrLeak := "\\\\FILESERVER01\\dhcp$ : Access is denied for CONTOSO\\svc-dhcp"
+
+	probe := probeWith(&fakeRunner{err: exec.ErrNotFound, stderr: []byte(stderrLeak)})
+
+	// ACT
+	result := probe.Check(context.Background())
+
+	// ASSERT — the classification reaches the caller; the raw words do not. They
+	// still reach an operator through BACKEND-101, which probe() emits.
+	assert.Equal(t, health.StatusUnavailable, result.Status)
+	assert.NotContains(t, result.Detail, "FILESERVER01")
+	assert.NotContains(t, result.Detail, "svc-dhcp")
+	assert.NotContains(t, result.Detail, "Access is denied")
 }
 
 func TestProbeCheck_ShouldNotServe200WhenScopesCannotBeRead(t *testing.T) {

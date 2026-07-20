@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 )
@@ -61,6 +63,21 @@ const (
 	maxDescriptionLength = 255
 )
 
+// maxLeaseDurationSeconds is int32's ceiling, because that is the type the
+// script casts to: [TimeSpan]::FromSeconds([int]$env:WADAPT_SCOPE_LEASE), and
+// PowerShell's [int] is Int32.
+//
+// Bounded here rather than left to the cast for the reason every other bound in
+// this file exists, but with a sharper consequence. An out-of-range value threw
+// under $ErrorActionPreference = 'Stop', the shell exited non-zero, runError
+// classified that as ErrBackendUnavailable, and the client was told **the DHCP
+// server could not be reached** — a false outage, complete with a BACKEND-101 at
+// ERROR pointing an operator at a server that was working perfectly. A client
+// mistake must not be able to manufacture an outage signal. Scope's own doc
+// comment already warned about this int32 trap for MaxBootpClients; this is the
+// same trap on the write path.
+const maxLeaseDurationSeconds = math.MaxInt32
+
 // Validate reports every problem with the input at once, as field errors ready
 // for a 400.
 //
@@ -91,14 +108,44 @@ func (in ScopeInput) validateText() []apierror.FieldError {
 	case len(in.Name) > maxNameLength:
 		errs = append(errs, fieldError("name",
 			fmt.Sprintf("must be at most %d characters", maxNameLength)))
+	case hasControlChars(in.Name):
+		errs = append(errs, fieldError("name", controlCharMessage))
 	}
 
-	if len(in.Description) > maxDescriptionLength {
+	switch {
+	case len(in.Description) > maxDescriptionLength:
 		errs = append(errs, fieldError("description",
 			fmt.Sprintf("must be at most %d characters", maxDescriptionLength)))
+	case hasControlChars(in.Description):
+		errs = append(errs, fieldError("description", controlCharMessage))
 	}
 
 	return errs
+}
+
+// controlCharMessage is shared by both text fields, which is what keeps the two
+// rejections wording-identical to a client fixing them together.
+const controlCharMessage = "must not contain control characters"
+
+// hasControlChars reports whether s carries a character no scope name should.
+//
+// Two distinct failures, closed together because the fix is the same:
+//
+//   - A NUL byte never reaches PowerShell at all. os/exec rejects an environment
+//     value containing one before the shell starts, so the call failed as
+//     ErrBackendUnavailable and the client was told the DHCP server was
+//     unreachable — a false outage from a value that was simply invalid.
+//   - Every other control character *does* reach Windows and lands verbatim as a
+//     scope name, so a newline or an ANSI escape sits in the DHCP console and in
+//     whatever reads it afterwards.
+//
+// unicode.IsControl rather than the printable-ASCII rule usableRequestID
+// applies, and the difference is deliberate: a correlation key is machine
+// plumbing, whereas a scope name is operator-facing text this whole package
+// works to carry intact. "Standort München" must pass, and does — the
+// [Console]::OutputEncoding line exists for exactly that value.
+func hasControlChars(s string) bool {
+	return strings.ContainsFunc(s, unicode.IsControl)
 }
 
 // validateAddressing checks the three fields that decide which subnet the scope
@@ -154,8 +201,14 @@ func (in ScopeInput) validateAddressing() []apierror.FieldError {
 func (in ScopeInput) validateOptions() []apierror.FieldError {
 	var errs []apierror.FieldError
 
-	if in.LeaseDurationSeconds < 0 {
-		errs = append(errs, fieldError("leaseDurationSeconds", "must be positive"))
+	// "must not be negative" rather than "must be positive": zero is accepted,
+	// and means "let Windows apply its own default".
+	switch {
+	case in.LeaseDurationSeconds < 0:
+		errs = append(errs, fieldError("leaseDurationSeconds", "must not be negative"))
+	case in.LeaseDurationSeconds > maxLeaseDurationSeconds:
+		errs = append(errs, fieldError("leaseDurationSeconds",
+			fmt.Sprintf("must be at most %d", maxLeaseDurationSeconds)))
 	}
 
 	if in.State != "" && !slices.Contains(validStates, in.State) {

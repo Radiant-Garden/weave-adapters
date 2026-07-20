@@ -18,7 +18,7 @@ const envServerName = "WADAPT_DHCP_SERVER"
 // passes cannot be confused with one the host environment already had.
 const envPrefix = "WADAPT_"
 
-// waitDelayGrace bounds how long Wait may block after the context kills the
+// RunnerKillGrace bounds how long Wait may block after the context kills the
 // process.
 //
 // This is load bearing, not a nicety. exec.CommandContext kills the process on
@@ -28,7 +28,11 @@ const envPrefix = "WADAPT_"
 // separate, shorter timeout only delivers on its promise if Wait is bounded
 // too, since health.refresh holds its mutex across the probe and a hung
 // powershell.exe would serialize every health poll behind it.
-const waitDelayGrace = 2 * time.Second
+//
+// Exported because the binary's HTTP write timeout must clear a full backend
+// call, which is dhcp.commandTimeout plus this grace: a WriteTimeout below that
+// sum would truncate a slow-but-honest response.
+const RunnerKillGrace = 2 * time.Second
 
 // runner turns a PowerShell script into its stdout bytes.
 //
@@ -87,9 +91,9 @@ func (r execRunner) runArgs(ctx context.Context, env map[string]string, args ...
 	//nolint:gosec // G204: constant args; path is provisioned config, not input.
 	cmd := exec.CommandContext(ctx, r.path, args...)
 
-	// See waitDelayGrace: without this the context deadline does not bound the
+	// See RunnerKillGrace: without this the context deadline does not bound the
 	// call, only the process.
-	cmd.WaitDelay = waitDelayGrace
+	cmd.WaitDelay = RunnerKillGrace
 
 	// The child inherits the parent environment and adds the target to it.
 	// Inheriting is deliberate rather than lax: powershell.exe needs PATH,
@@ -129,10 +133,20 @@ func (r execRunner) runArgs(ctx context.Context, env map[string]string, args ...
 		// context.Canceled, which is what a graceful shutdown or a disconnected
 		// client produces — telling an operator draining the server that "the
 		// dhcp backend timed out" would send them to raise dhcp.commandTimeout
-		// for a problem that was a shutdown. A cancellation falls through and is
-		// reported as what it is.
+		// for a problem that was a shutdown.
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			return stdout.Bytes(), stderr.Bytes(), errors.Join(ErrBackendTimeout, ctx.Err())
+		}
+
+		// A cancellation is classified here rather than left to fall through.
+		// "Reported as what it is" was the intent, but what it fell through to
+		// was the *exec.ExitError from the context-kill, which runError reads as
+		// a non-zero exit and classifies as ErrBackendUnavailable — so every
+		// mid-request disconnect and every graceful drain logged BACKEND-101 at
+		// ERROR saying "powershell exited -1". That is a false outage signal on
+		// the one occasion an operator is most likely to be reading the log.
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return stdout.Bytes(), stderr.Bytes(), errors.Join(ErrBackendCanceled, ctx.Err())
 		}
 
 		return stdout.Bytes(), stderr.Bytes(), err

@@ -5,7 +5,7 @@ Pending:
 
 Tested:
   Impact.String
-    - TestImpact_String_ShouldReturnSnakeCase: all seven impacts and the unknown fallback.
+    - TestImpact_String_ShouldReturnSnakeCase: the one declared impact and the unknown fallback.
   EventCategory.String
     - TestEventCategory_String_ShouldReturnPrefix: category prefix string.
 
@@ -32,12 +32,6 @@ func TestImpact_String_ShouldReturnSnakeCase(t *testing.T) {
 		want   string
 	}{
 		{ImpactRequestRejected, "request_rejected"},
-		{ImpactStateChanged, "state_changed"},
-		{ImpactServiceDegraded, "service_degraded"},
-		{ImpactConfigReloaded, "config_reloaded"},
-		{ImpactResourceCreated, "resource_created"},
-		{ImpactResourceUpdated, "resource_updated"},
-		{ImpactResourceDeleted, "resource_deleted"},
 		{Impact(999), "unknown"},
 	}
 

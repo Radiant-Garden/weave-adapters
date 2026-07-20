@@ -15,6 +15,7 @@ Tested:
   constructors
     - TestConstructors_ShouldBindTheCatalogEventAndStatus: every constructor lands on its event and status.
     - TestValidation_ShouldCarryEveryFailureAndNameThemForTheOperator: all field failures reach the client; the event names them.
+    - TestValidation_ShouldStayLoggableWithNoFailures: an empty failure set still names "(none)" rather than logging an empty field.
     - TestInternal_ShouldWrapCauseForErrorsIs: errors.Is reaches the wrapped cause.
     - TestInternal_ShouldTolerateNilCause: a nil cause does not panic.
 

@@ -16,6 +16,7 @@ Tested:
     - TestNew_ShouldSkipRequestLoggingForHealthPolls: successful health polls emit no API-010; other routes and failures do.
     - TestNew_ShouldRenderRouterErrorsAsProblemJSON: mux 404/405 share the one error shape.
     - TestNew_ShouldLogRejectedRequests: inner middleware runs inside logging, so rejections are audited.
+    - TestNew_ShouldApplyConnectionTimeouts: read-header, read and idle timeouts are always set; write is off unless WithWriteTimeout sets it.
   NewHandler
     - Every New test above exercises it: New builds its handler by calling it,
       so the chain order, recovery, request-ID, logging-skip and problem+json
@@ -147,6 +148,28 @@ func TestNew_ShouldServeHealthEndpoint(t *testing.T) {
 	assert.Equal(t, health.StatusHealthy, body.Status)
 	assert.Equal(t, "1.2.3", body.Version)
 	assert.NotEmpty(t, body.Components)
+}
+
+func TestNew_ShouldApplyConnectionTimeouts(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE / ACT — the default server, then one with a write bound supplied.
+	defaults := New(":0", health.NewHandler("1.2.3", time.Now()))
+	bounded := New(":0", health.NewHandler("1.2.3", time.Now()),
+		WithWriteTimeout(42*time.Second))
+
+	// ASSERT — the three timeouts that cannot truncate an honest response are
+	// always on: a Slowloris dribbling headers or a body, and an idle keep-alive
+	// connection, are all bounded out of the box.
+	assert.Equal(t, readHeaderTimeout, defaults.httpServer.ReadHeaderTimeout)
+	assert.Equal(t, readTimeout, defaults.httpServer.ReadTimeout)
+	assert.Equal(t, idleTimeout, defaults.httpServer.IdleTimeout)
+
+	// The write timeout is off by default, because a value below an adapter's
+	// backend timeout would tear a slow-but-honest response. It is the binary's
+	// to set, and WithWriteTimeout is how.
+	assert.Zero(t, defaults.httpServer.WriteTimeout)
+	assert.Equal(t, 42*time.Second, bounded.httpServer.WriteTimeout)
 }
 
 func TestNew_ShouldReturnNotFoundForOpenAPIDocumentWhenNoSpecSupplied(t *testing.T) {

@@ -53,6 +53,9 @@ Additional Remarks:
 package dhcpwindows
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -91,13 +94,40 @@ func loadAdapterEnv(t *testing.T, args []string, env map[string]string) (Config,
 	return NewConfig(values)
 }
 
-// identityArgs supplies the two required identity inputs as flags, so tests
-// that are not about the environment can stay parallel.
-func identityArgs(extra ...string) []string {
-	return append([]string{
-		"-identity-namespace-key", testNamespaceKey,
-		"-identity-server-name", "dhcp01.example.test",
-	}, extra...)
+// identityConfig writes a temp TOML file carrying the given identity values and
+// returns the "-config <path>" args that load it. An empty value is omitted, so
+// a negative test can supply one input and leave the other unset.
+//
+// identity.namespaceKey is no longer a flag — it is a backup-critical secret,
+// and a flag value is readable in a process listing — so a test sets it through
+// a file. A file also keeps the test parallel, which t.Setenv on the equivalent
+// environment variable could not.
+func identityConfig(t *testing.T, namespaceKey, serverName string) []string {
+	t.Helper()
+
+	body := "[identity]\n"
+	if namespaceKey != "" {
+		body += fmt.Sprintf("namespaceKey = %q\n", namespaceKey)
+	}
+
+	if serverName != "" {
+		body += fmt.Sprintf("serverName = %q\n", serverName)
+	}
+
+	// A fresh TempDir per call, so parallel subtests never share a file.
+	path := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	return []string{"-config", path}
+}
+
+// identityArgs supplies both required identity inputs through a config file, so
+// a test that is not about identity resolution can stay parallel and ignore
+// them.
+func identityArgs(t *testing.T, extra ...string) []string {
+	t.Helper()
+
+	return append(identityConfig(t, testNamespaceKey, "dhcp01.example.test"), extra...)
 }
 
 func TestKeys_ShouldComposeWithTheCoreSpec(t *testing.T) {
@@ -106,7 +136,7 @@ func TestKeys_ShouldComposeWithTheCoreSpec(t *testing.T) {
 	// ARRANGE / ACT — core plus adapter, resolved in one pass. The loader
 	// rejects a spec whose keys collide, so this also proves none of the eight
 	// adapter keys collides with a core one.
-	values, err := config.Load(append(config.CoreKeys(), Keys()...), identityArgs())
+	values, err := config.Load(append(config.CoreKeys(), Keys()...), identityArgs(t))
 	require.NoError(t, err)
 
 	core, err := config.Core(values)
@@ -170,7 +200,7 @@ func TestNewConfig_ShouldApplyDefaults(t *testing.T) {
 	t.Parallel()
 
 	// ACT
-	cfg, err := loadAdapter(t, identityArgs())
+	cfg, err := loadAdapter(t, identityArgs(t))
 
 	// ASSERT — the documented defaults from the plan's config table.
 	require.NoError(t, err)
@@ -185,11 +215,13 @@ func TestNewConfig_ShouldApplyDefaults(t *testing.T) {
 func TestNewConfig_ShouldCanonicalizeTheServerName(t *testing.T) {
 	t.Parallel()
 
-	// ACT — the forms an operator might plausibly write.
-	cfg, err := loadAdapter(t, []string{
-		"-identity-namespace-key", testNamespaceKey,
+	// ACT — the forms an operator might plausibly write. The namespace key comes
+	// from the config file (it has no flag); the messy server name is passed as a
+	// flag, so this also proves a flag-sourced value is canonicalized.
+	cfg, err := loadAdapter(t, append(
+		identityConfig(t, testNamespaceKey, ""),
 		"-identity-server-name", "  DHCP01.Example.TEST.  ",
-	})
+	))
 
 	// ASSERT — canonicalized once here, so that correcting the case of a config
 	// value later does not re-derive every ID in the deployment.
@@ -223,20 +255,17 @@ func TestValidate_ShouldRequireBothIdentityInputs(t *testing.T) {
 	}{
 		{
 			name:        "no namespace key",
-			args:        []string{"-identity-server-name", "dhcp01.example.test"},
+			args:        identityConfig(t, "", "dhcp01.example.test"),
 			wantMessage: "identity.namespaceKey is required",
 		},
 		{
 			name:        "no server name",
-			args:        []string{"-identity-namespace-key", testNamespaceKey},
+			args:        identityConfig(t, testNamespaceKey, ""),
 			wantMessage: "identity.serverName is required",
 		},
 		{
-			name: "a placeholder namespace key",
-			args: []string{
-				"-identity-namespace-key", "changeme",
-				"-identity-server-name", "dhcp01.example.test",
-			},
+			name:        "a placeholder namespace key",
+			args:        identityConfig(t, "changeme", "dhcp01.example.test"),
 			wantMessage: "identity.namespaceKey must be at least",
 		},
 	}
@@ -272,7 +301,7 @@ func TestValidate_ShouldRejectAProbeTimeoutThatIsNotShorter(t *testing.T) {
 			t.Parallel()
 
 			// ACT
-			_, err := loadAdapter(t, identityArgs("-dhcp-probe-timeout", tc.probe))
+			_, err := loadAdapter(t, identityArgs(t, "-dhcp-probe-timeout", tc.probe))
 
 			// ASSERT — health.refresh holds its mutex across the probe, so the
 			// probe's tighter bound is what stops aggressive polling
@@ -315,7 +344,7 @@ func TestValidate_ShouldRejectIncoherentPageSizes(t *testing.T) {
 			t.Parallel()
 
 			// ACT
-			_, err := loadAdapter(t, identityArgs(tc.args...))
+			_, err := loadAdapter(t, identityArgs(t, tc.args...))
 
 			// ASSERT — a default above the maximum would be clamped away on
 			// every request, so the configured value would silently never

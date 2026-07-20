@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 
+	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 )
@@ -49,13 +50,10 @@ func Conditional(next http.Handler) http.Handler {
 		// Too large to tag: the response has already been streamed through, so
 		// there is nothing left to write — only to report.
 		if captured.overflowed {
-			ctx := events.EnsureCaller(r.Context(), events.Caller{
-				RemoteAddr: r.RemoteAddr,
-				Method:     r.Method,
-				Path:       r.URL.Path,
-			})
+			ctx := events.EnsureCaller(r.Context(), apierror.FallbackCaller(r))
 
-			events.Emit(ctx, catalog.API012, "path", r.URL.Path, "limitBytes", MaxTaggedBytes)
+			events.Emit(ctx, catalog.API012,
+				"path", apierror.TruncatePath(r.URL.Path), "limitBytes", MaxTaggedBytes)
 
 			return
 		}

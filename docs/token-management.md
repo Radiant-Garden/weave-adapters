@@ -65,8 +65,22 @@ attacker would have to reverse SHA-256.
 
 The file is written `0600` and saved atomically (temp file, then rename), so an
 interrupted write can never leave a truncated store that locks weave out. On
-Windows the Unix mode bits are largely ignored; the directory ACL is the real
+Windows the Unix mode bits are largely ignored; the file ACL is the real
 protection there.
+
+A read of `tokens.toml` leaks nothing usable — it is only hashes. A **write**
+does: anyone who can write the file can append their own token hash, and the
+adapter reads the store once at startup and trusts every hash in it, so that
+hash becomes a working credential. On Windows the default inherited ACL can
+permit that write. Lock the file down after `token gen` creates it:
+
+```powershell
+.\scripts\secure-token-store.ps1 -Path tokens.toml
+```
+
+It replaces the inherited ACL with an explicit one — full control for SYSTEM,
+Administrators, and the adapter's service account, and nobody else — which is
+the ACL companion to the `0600` mode the adapter sets on every other platform.
 
 ### Why a plain hash and not bcrypt
 

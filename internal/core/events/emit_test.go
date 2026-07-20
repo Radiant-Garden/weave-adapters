@@ -10,9 +10,7 @@ Tested:
     - TestEmit_ShouldAttachCallerAndRequestWhenExternalSource: caller/request groups from ctx.
     - TestEmit_ShouldWarnOnUnknownID: unregistered ID still calls the hook, no panic.
     - TestEmit_ShouldBeSafeForConcurrentEmitters: N goroutines emit concurrently with a
-      subscriber and hook attached; validates the global locking under -race.
-  EmitWithMessage
-    - TestEmitWithMessage_ShouldOverrideTemplate: custom message path emits.
+      hook attached; validates the global hook locking under -race.
 
 Tested elsewhere:
 
@@ -129,15 +127,11 @@ func TestEmit_ShouldWarnOnUnknownID(t *testing.T) { //nolint:paralleltest // mut
 	assert.True(t, called)
 }
 
-func TestEmit_ShouldBeSafeForConcurrentEmitters(t *testing.T) { //nolint:paralleltest // mutates global registry/hook/subscribers
+func TestEmit_ShouldBeSafeForConcurrentEmitters(t *testing.T) { //nolint:paralleltest // mutates global registry/hook
 	withCleanRegistry(t)
 	Register(&Event{ID: "TEST-014", Level: slog.LevelInfo, MessageTemplate: "x"})
 
-	// A subscriber exercises fanOutToSubscribers (subsMu, globalSeq) on the
-	// emit path; a hook exercises hookMu. Both are process-global.
-	_, unsub := Subscribe(256, func(id EventID) bool { return id == "TEST-014" })
-	t.Cleanup(unsub)
-
+	// A hook exercises hookMu, which is process-global, on every emit.
 	var count atomic.Int64
 
 	prev := SetEmitterHook(func(id EventID, _ ...any) {
@@ -165,19 +159,4 @@ func TestEmit_ShouldBeSafeForConcurrentEmitters(t *testing.T) { //nolint:paralle
 	wg.Wait()
 
 	assert.Equal(t, int64(goroutines), count.Load())
-}
-
-func TestEmitWithMessage_ShouldOverrideTemplate(t *testing.T) { //nolint:paralleltest // mutates global registry/hook
-	withCleanRegistry(t)
-	Register(&Event{ID: "TEST-013", Level: slog.LevelInfo, MessageTemplate: "template"})
-
-	var got []any
-
-	captureHook(t, "TEST-013", &got)
-
-	require.NotPanics(t, func() {
-		EmitWithMessage(context.Background(), "TEST-013", "custom message", "k", "v")
-	})
-	require.Len(t, got, 1)
-	assert.Equal(t, "v", groupField(t, got[0], "data", "k"))
 }

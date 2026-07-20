@@ -91,6 +91,50 @@ const scriptPreamble = `$ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
 `
 
+// serverParams opens every script with the -ComputerName splat.
+//
+// Splatting an empty hashtable is how "no -ComputerName at all" is expressed, so
+// the local-host case is the same code path as the remote one rather than a
+// second script. Extracted because all three scripts need it verbatim, and a
+// preamble that drifted in one of them would silently send that one command to
+// the wrong host.
+const serverParams = `$params = @{}
+if ($env:` + envServerName + `) { $params['ComputerName'] = $env:` + envServerName + ` }
+`
+
+// scopeProjection is the Select-Object block that maps a Windows scope onto the
+// Scope struct, field for field.
+//
+// It is one constant because it must be one shape. This block appeared three
+// times — the listing, the create read-back, and once more besides — and
+// createScopeScript's own doc comment claimed "a create and a read cannot
+// disagree about shape" while only the listing copy was pinned by
+// TestListScopesScript_ShouldProjectEveryModelField. A field added to one copy
+// and missed in another decodes as a silently empty field on exactly one path,
+// which is the failure class this package works hardest to close: no error, no
+// log line, just a scope served with a blank name on the create response and a
+// correct one on the read.
+//
+// The scripts are assembled by constant concatenation already, so sharing this
+// costs nothing and makes the comment true by construction rather than by
+// review. The leading newline lets a caller append it directly after a pipe.
+//
+// Properties, not methods: .IPAddressToString survives deserialization where
+// .ToString() may not, and [string]$_.State works on both a live enum and a
+// deserialized string.
+const scopeProjection = `
+  Select-Object @{n='scopeId';e={$_.ScopeId.IPAddressToString}},
+                @{n='subnetMask';e={$_.SubnetMask.IPAddressToString}},
+                @{n='startRange';e={$_.StartRange.IPAddressToString}},
+                @{n='endRange';e={$_.EndRange.IPAddressToString}},
+                @{n='name';e={$_.Name}},
+                @{n='description';e={$_.Description}},
+                @{n='state';e={[string]$_.State}},
+                @{n='type';e={[string]$_.Type}},
+                @{n='superscopeName';e={[string]$_.SuperscopeName}},
+                @{n='leaseDurationSeconds';e={[int]$_.LeaseDuration.TotalSeconds}}
+`
+
 // listScopesScript reads every IPv4 scope as flat JSON.
 //
 // Every field is a calculated property even where the name would pass through
@@ -114,9 +158,8 @@ const scriptPreamble = `$ErrorActionPreference = 'Stop'
 // with exactly one scope would break the decoder. PS 5.1 has no -AsArray (that
 // arrived in PS 6); wrapping in @() is the workaround, verified on the host.
 //
-// Properties, not methods, in projections: .IPAddressToString survives
-// deserialization where .ToString() may not, and [string]$_.State works on both
-// a live enum and a deserialized string.
+// The projection itself is scopeProjection, shared with createScopeScript so
+// the two cannot describe different shapes.
 //
 // Nothing is interpolated into this script — it is a constant, and the one
 // value it needs arrives through the child process environment. That is the
@@ -125,24 +168,9 @@ const scriptPreamble = `$ErrorActionPreference = 'Stop'
 // cmdlet. No quoting, no injection surface, no temp file, and it works with
 // -Command — which has no -ArgumentList, while -File would make execution
 // policy relevant again.
-//
-// Splatting an empty hashtable is also how "no -ComputerName at all" is
-// expressed, so the local-host case is the same code path as the remote one
-// rather than a second script.
-const listScopesScript = scriptPreamble + `$params = @{}
-if ($env:` + envServerName + `) { $params['ComputerName'] = $env:` + envServerName + ` }
-$scopes = Get-DhcpServerv4Scope @params |
-  Select-Object @{n='scopeId';e={$_.ScopeId.IPAddressToString}},
-                @{n='subnetMask';e={$_.SubnetMask.IPAddressToString}},
-                @{n='startRange';e={$_.StartRange.IPAddressToString}},
-                @{n='endRange';e={$_.EndRange.IPAddressToString}},
-                @{n='name';e={$_.Name}},
-                @{n='description';e={$_.Description}},
-                @{n='state';e={[string]$_.State}},
-                @{n='type';e={[string]$_.Type}},
-                @{n='superscopeName';e={[string]$_.SuperscopeName}},
-                @{n='leaseDurationSeconds';e={[int]$_.LeaseDuration.TotalSeconds}}
-ConvertTo-Json -InputObject @($scopes) -Depth 5
+const listScopesScript = scriptPreamble + serverParams +
+	`$scopes = Get-DhcpServerv4Scope @params |` + scopeProjection +
+	`ConvertTo-Json -InputObject @($scopes) -Depth 5
 `
 
 // probeScript is the health probe's single command: the cheapest query that
@@ -174,9 +202,8 @@ ConvertTo-Json -InputObject @($scopes) -Depth 5
 // `null` and `[]` unmarshal to a slice of length zero. A freshly provisioned
 // server with no scopes yet is the case that would otherwise report one scope
 // that does not exist, to an operator checking whether provisioning worked.
-const probeScript = scriptPreamble + `$params = @{}
-if ($env:` + envServerName + `) { $params['ComputerName'] = $env:` + envServerName + ` }
-$scopeIds = Get-DhcpServerv4Scope @params |
+const probeScript = scriptPreamble + serverParams +
+	`$scopeIds = Get-DhcpServerv4Scope @params |
   Select-Object @{n='scopeId';e={$_.ScopeId.IPAddressToString}}
 ConvertTo-Json -InputObject @{
   scopes     = @($scopeIds)
@@ -212,8 +239,11 @@ const (
 // decides while it still has structured data; Go reads a stable ASCII token.
 const conflictMarker = "WADAPT_CONFLICT"
 
-// createScopeScript adds one scope and emits it in the same projection
-// listScopesScript uses, so a create and a read cannot disagree about shape.
+// createScopeScript adds one scope and emits it through scopeProjection — the
+// same constant listScopesScript uses, so a create and a read cannot disagree
+// about shape. That was a claim this comment made while the block was copied
+// into both scripts and only the listing copy was pinned by a test; sharing the
+// constant is what makes it structural.
 //
 // The subnet is checked BEFORE the create rather than classified afterwards.
 // Windows permits one scope per subnet, and that is the one failure a client
@@ -242,9 +272,7 @@ const conflictMarker = "WADAPT_CONFLICT"
 // what makes "omitted" mean "Windows applies its own default" rather than "the
 // adapter chose one for you". A scope created without a lease duration gets the
 // server's default, and that default stays the server's to change.
-const createScopeScript = scriptPreamble + `$params = @{}
-if ($env:` + envServerName + `) { $params['ComputerName'] = $env:` + envServerName + ` }
-
+const createScopeScript = scriptPreamble + serverParams + `
 $existing = @(Get-DhcpServerv4Scope @params |
   Where-Object { $_.ScopeId.IPAddressToString -eq $env:` + envScopeID + ` })
 if ($existing.Count -gt 0) {
@@ -263,16 +291,6 @@ if ($env:` + envScopeState + `)       { $create['State']         = $env:` + envS
 if ($env:` + envScopeType + `)        { $create['Type']          = $env:` + envScopeType + ` }
 if ($env:` + envScopeLease + `)       { $create['LeaseDuration'] = [TimeSpan]::FromSeconds([int]$env:` + envScopeLease + `) }
 
-$scope = Add-DhcpServerv4Scope @create -PassThru |
-  Select-Object @{n='scopeId';e={$_.ScopeId.IPAddressToString}},
-                @{n='subnetMask';e={$_.SubnetMask.IPAddressToString}},
-                @{n='startRange';e={$_.StartRange.IPAddressToString}},
-                @{n='endRange';e={$_.EndRange.IPAddressToString}},
-                @{n='name';e={$_.Name}},
-                @{n='description';e={$_.Description}},
-                @{n='state';e={[string]$_.State}},
-                @{n='type';e={[string]$_.Type}},
-                @{n='superscopeName';e={[string]$_.SuperscopeName}},
-                @{n='leaseDurationSeconds';e={[int]$_.LeaseDuration.TotalSeconds}}
-ConvertTo-Json -InputObject @($scope) -Depth 5
+$scope = Add-DhcpServerv4Scope @create -PassThru |` + scopeProjection +
+	`ConvertTo-Json -InputObject @($scope) -Depth 5
 `

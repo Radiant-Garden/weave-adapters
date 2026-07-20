@@ -65,6 +65,18 @@ type Key struct {
 	Default any
 	// Usage is the flag's help text.
 	Usage string
+	// NoFlag suppresses this key's CLI flag, leaving it settable only from the
+	// environment or a config file.
+	//
+	// It exists for a secret whose value must not appear in a process listing. A
+	// flag value is an argv entry, readable by any local user through `ps` or
+	// /proc for the life of the process, so a backup-critical key passed as
+	// -identity-namespace-key would leak to every account on the host. Dropping
+	// the flag keeps the environment — which is per-process and not world-visible
+	// — as the way in, which is the standard channel for a provisioned secret
+	// anyway. The key still resolves through every other source and every other
+	// derivation is unchanged.
+	NoFlag bool
 }
 
 // Spec is an ordered set of registered keys. A binary composes one from

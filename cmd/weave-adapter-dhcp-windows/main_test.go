@@ -10,9 +10,14 @@ Tested:
     - TestRun_ShouldReturnErrorWhenPortUnavailable: a port conflict fails startup rather than serving.
     - TestRun_ShouldRefuseToStartWithoutTokens: a missing, empty, or wholly expired store fails startup with a fix.
     - TestRun_ShouldWarnLoudlyWhenAuthIsDisabled: starting wide open emits SYS-006.
+    - TestRun_ShouldReportCoreAndAdapterConfigProblemsTogether: one problem from each config half arrives in one run, joined.
+    - TestRun_ShouldRefuseToStartWithoutTheIdentityInputs: neither identity input may be defaulted; the binary refuses and says why.
 
   isTokenCommand
     - TestIsTokenCommand_ShouldRecogniseOnlyTheTokenVerb: server args never route to the CLI.
+
+  the shipped config example
+    - TestConfigExample_ShouldLoadAndValidate: the config file an operator copies from actually loads and validates.
 
 Tested elsewhere:
   Each wired component (config.Load, observability.Setup, httpserver.New/Run,
@@ -51,6 +56,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -68,7 +74,30 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/core/health"
 )
 
-// withIdentity appends the two identity inputs every server run now needs.
+// testNamespaceKey is the provisioned namespace key every server run here
+// carries, long enough to clear the minimum-length floor.
+const testNamespaceKey = "main-test-namespace-key-0123456789"
+
+// namespaceKeyConfig writes a temp config file carrying identity.namespaceKey
+// and returns the "--config <path>" args that load it.
+//
+// The key is supplied through a file rather than a flag because it no longer has
+// a flag: it is a backup-critical secret, and a flag value is readable in a
+// process listing. A file also keeps these tests as they are rather than forcing
+// t.Setenv, which would serialize them.
+func namespaceKeyConfig(t *testing.T, key string) []string {
+	t.Helper()
+
+	body := "[identity]\nnamespaceKey = " + strconv.Quote(key) + "\n"
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	return []string{"--config", path}
+}
+
+// withIdentity supplies the two identity inputs every server run now needs: the
+// namespace key through a config file, the server name as a flag.
 //
 // identity.namespaceKey and identity.serverName are provisioned config with no
 // defaults and no fallbacks, by design: an auto-generated namespace key
@@ -76,11 +105,12 @@ import (
 // following os.Hostname() re-keys on a host rename. The adapter refuses to
 // start without them, so every run here carries them exactly as a real
 // deployment does.
-func withIdentity(args ...string) []string {
-	return append(args,
-		"--identity-namespace-key", "main-test-namespace-key-0123456789",
-		"--identity-server-name", "dhcp01.test",
-	)
+func withIdentity(t *testing.T, args ...string) []string {
+	t.Helper()
+
+	args = append(args, "--identity-server-name", "dhcp01.test")
+
+	return append(namespaceKeyConfig(t, testNamespaceKey), args...)
 }
 
 // freePort returns a port that is free right now, having closed the listener
@@ -194,8 +224,12 @@ func TestRun_ShouldServeHealthUntilContextCancelled(t *testing.T) {
 	tokensPath, token := tokenStore(t)
 	errCh := make(chan error, 1)
 
+	// Built before the goroutine: withIdentity writes a temp file and asserts on
+	// it, and those assertions must run on the test's own goroutine.
+	args := withIdentity(t, "--port", strconv.Itoa(port), "--auth-tokens-file", tokensPath)
+
 	go func() {
-		errCh <- run(ctx, withIdentity("--port", strconv.Itoa(port), "--auth-tokens-file", tokensPath))
+		errCh <- run(ctx, args)
 	}()
 
 	waitForListening(t, rec)
@@ -281,7 +315,7 @@ func TestRun_ShouldServeHealthUntilContextCancelled(t *testing.T) {
 
 	fingerprint := rec.FindByID(adapterevents.DHCP001)[0].Data("namespaceKeyFingerprint")
 	assert.NotEmpty(t, fingerprint)
-	assert.NotEqual(t, "main-test-namespace-key-0123456789", fingerprint,
+	assert.NotEqual(t, testNamespaceKey, fingerprint,
 		"the startup event must log a fingerprint, never the namespace key")
 
 	rec.AssertMatchesCatalog(t)
@@ -332,7 +366,7 @@ func TestRun_ShouldRefuseToStartWithoutTokens(t *testing.T) {
 			t.Cleanup(rec.Install())
 
 			// ACT
-			err := run(t.Context(), withIdentity(
+			err := run(t.Context(), withIdentity(t,
 				"--port", strconv.Itoa(freePort(t)),
 				"--auth-tokens-file", tt.tokensFile,
 			))
@@ -411,8 +445,10 @@ func TestRun_ShouldRefuseToStartWithoutTheIdentityInputs(t *testing.T) {
 			wantMessage: "identity.namespaceKey is required",
 		},
 		{
+			// The namespace key arrives through a config file (it has no flag);
+			// the server name is deliberately left unset.
 			name:        "no server name",
-			args:        []string{"--identity-namespace-key", "main-test-namespace-key-0123456789"},
+			args:        namespaceKeyConfig(t, testNamespaceKey),
 			wantMessage: "identity.serverName is required",
 		},
 	}
@@ -443,8 +479,11 @@ func TestRun_ShouldWarnLoudlyWhenAuthIsDisabled(t *testing.T) {
 	errCh := make(chan error, 1)
 	port := strconv.Itoa(freePort(t))
 
+	// Built before the goroutine; see the note in the health-serving test.
+	args := withIdentity(t, "--port", port, "--disable-auth")
+
 	go func() {
-		errCh <- run(ctx, withIdentity("--port", port, "--disable-auth"))
+		errCh <- run(ctx, args)
 	}()
 
 	waitForListening(t, rec)
@@ -481,7 +520,7 @@ func TestRun_ShouldReturnErrorWhenConfigInvalid(t *testing.T) {
 	t.Cleanup(rec.Install())
 
 	// ACT — out of range, so Load fails validation.
-	err := run(t.Context(), withIdentity("--port", "70000"))
+	err := run(t.Context(), withIdentity(t, "--port", "70000"))
 
 	// ASSERT — startup stops at config; nothing announces itself as running.
 	require.Error(t, err)
@@ -506,7 +545,7 @@ func TestRun_ShouldReturnErrorWhenPortUnavailable(t *testing.T) {
 	tokensPath, _ := tokenStore(t)
 
 	// ACT
-	err = run(t.Context(), withIdentity("--port", strconv.Itoa(port), "--auth-tokens-file", tokensPath))
+	err = run(t.Context(), withIdentity(t, "--port", strconv.Itoa(port), "--auth-tokens-file", tokensPath))
 
 	// ASSERT — a bind conflict is a startup error, not a silent no-op.
 	require.Error(t, err)

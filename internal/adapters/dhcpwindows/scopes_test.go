@@ -12,6 +12,7 @@ Tested:
 
 	ScopesHandler.ServeHTTP / list
 	  - TestScopes_ShouldServeAPageOfScopes: the envelope, its content type, and items always an array.
+	  - TestScopes_ShouldAnswer405ForAnUnsupportedMethodRatherThanServingAList: the default arm is a 405, never a silent list for a DELETE.
 	  - TestScopes_ShouldRenderAnEmptyCollectionAsAnArray: no scopes is [], never null.
 	  - TestScopes_ShouldWalkEveryScopeExactlyOnceViaNextPageUrl: the link form weave follows, across a multi-page collection.
 	  - TestScopes_ShouldOrderByWadaptIdNotScopeId: the two orders genuinely differ, and the served order is the cursor's.
@@ -27,6 +28,7 @@ Tested:
 	problemFor
 	  - TestScopes_ShouldMapBackendFailuresToTheirOwnStatusCodes: unavailable 502, timeout 504, malformed 502, duplicate 500.
 	  - TestScopes_ShouldNotLeakTheBackendMessageToTheClient: stderr reaches the log, never the body.
+	  - TestProblemFor_ShouldPreserveTheCauseForTheOperator: WithCause keeps the backend cause reachable for the log while the body stays curated.
 	ScopesHandler.create
 	  - TestCreate_ShouldAnswer201WithTheCreatedScope: the success path, body carrying the derived identity.
 	  - TestCreate_ShouldPointLocationAtTheItemRoute: Location names the wadaptId, never the scopeId — the item route is keyed by identity.
@@ -258,6 +260,27 @@ func TestScopes_ShouldServeAPageOfScopes(t *testing.T) {
 		assert.Len(t, item.WadaptID, WadaptIDLength)
 		assert.Equal(t, AddressFamilyIPv4, item.AddressFamily)
 	}
+}
+
+func TestScopes_ShouldAnswer405ForAnUnsupportedMethodRatherThanServingAList(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a DELETE mounted straight onto the handler, bypassing the mux
+	// that would 405 it in the binary. An earlier version fell through to the
+	// list on its default arm, so this returned a 200 collection for a DELETE.
+	scopes := scopesFor(t, "10.0.1.0", "10.0.2.0")
+	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, 500), testMaxBodyBytes)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodDelete, ScopesPath, nil)
+	rec := httptest.NewRecorder()
+
+	// ACT
+	handler.ServeHTTP(rec, req)
+
+	// ASSERT — a method-not-allowed, and emphatically not a list.
+	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	assert.NotContains(t, rec.Body.String(), `"items"`,
+		"a DELETE must never be answered with the collection")
 }
 
 func TestScopes_ShouldRenderAnEmptyCollectionAsAnArray(t *testing.T) {

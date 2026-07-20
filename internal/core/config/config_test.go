@@ -17,7 +17,7 @@ Tested:
 	  - TestCore_ShouldReturnTheValidationError: Core validates, so an invalid
 	    combination never reaches a caller as a usable struct.
 
-	Validate / fieldError
+	Validate
 	  - TestValidate_ShouldReportProblems: valid and invalid configs, including all errors joined.
 	  - TestValidate_ShouldRejectEmptyTokensFileWhenAuthEnabled: no silent empty allow-list.
 	  - TestValidate_ShouldAllowEmptyTokensFileWhenAuthDisabled: the dev hatch needs no file.
@@ -30,11 +30,6 @@ Tested elsewhere:
 	Name derivation and per-type parse errors: key_test.go.
 
 Declined:
-
-	Validate's non-ValidationErrors branch and fieldError's default case: defensive
-	  and unreachable today (only *Config is validated, and every tagged field —
-	  Port, LogSeverity, MaxRequestBodyBytes — has a bespoke message), so they are
-	  documented in-code rather than tested.
 
 Additional Remarks:
 

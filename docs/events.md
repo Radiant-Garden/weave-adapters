@@ -435,7 +435,7 @@
 | scopeId | string | true | The subnet the identity derives from — unchanged by definition, since it is an input. |
 | changed | string | true | Comma-separated names of the attributes that differ from the last observation. |
 
-**Example:** `{"eventId":"DHCP-002","data":{"wadaptId":"c7k3n2q8r4t6y8u0","scopeId":"10.0.30.0","changed":"name, startRange, endRange"}}`
+**Example:** `{"eventId":"DHCP-002","data":{"wadaptId":"c7k3n2q8r4t6v","scopeId":"10.0.30.0","changed":"name, startRange, endRange"}}`
 
 **Troubleshooting:** Decide which of two things happened, because they need opposite responses. If somebody edited an existing scope, nothing is wrong and the event is noise. If a scope was deleted and a new one created on the same subnet, weave is now bound to the wrong object: it holds desired state for the scope that is gone and will apply it to the scope that replaced it, with no error and no retry — the adapter cannot tell, which is why this is a warning rather than a rejection. Confirm against the DHCP server's own change history, and if it was a recreate, reconcile the weave-side object deliberately rather than letting the next sync do it. Note the ledger is in memory: a restart re-baselines, so an absent event after one proves nothing.
 

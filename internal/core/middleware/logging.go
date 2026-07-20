@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 	"github.com/radiantgarden/weave-adapters/internal/core/httpx"
@@ -28,11 +29,7 @@ func Logging(skip func(r *http.Request, status int) bool) Middleware {
 				return
 			}
 
-			ctx := events.EnsureCaller(r.Context(), events.Caller{
-				RemoteAddr: r.RemoteAddr,
-				Method:     r.Method,
-				Path:       r.URL.Path,
-			})
+			ctx := events.EnsureCaller(r.Context(), apierror.FallbackCaller(r))
 
 			events.Emit(ctx, catalog.API010,
 				"status", rec.Status(),

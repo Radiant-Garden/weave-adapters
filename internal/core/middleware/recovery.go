@@ -36,7 +36,7 @@ func Recovery(next http.Handler) http.Handler {
 
 			events.Emit(r.Context(), catalog.API011,
 				"method", r.Method,
-				"path", r.URL.Path,
+				"path", apierror.TruncatePath(r.URL.Path),
 				"remoteAddr", r.RemoteAddr,
 				"requestId", rw.Header().Get(requestIDHeader),
 				"panic", fmt.Sprint(rec),
@@ -55,7 +55,7 @@ func Recovery(next http.Handler) http.Handler {
 				Title:     apierror.TitleFor(events.CodeInternal),
 				Status:    http.StatusInternalServerError,
 				Detail:    "An unexpected error occurred.",
-				Instance:  r.URL.Path,
+				Instance:  apierror.TruncatePath(r.URL.Path),
 				RequestID: rw.Header().Get(requestIDHeader),
 			})
 		}()

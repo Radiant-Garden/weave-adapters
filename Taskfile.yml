@@ -189,8 +189,10 @@ tasks:
 
   vulncheck:
     desc: Scan for known vulnerabilities (govulncheck)
+    # Pinned to match CI (.github/workflows/ci.yml); Renovate bumps both. An
+    # unpinned scanner floats the build's own tooling — see the CI step.
     cmds:
-      - go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
   tidy:
     desc: Tidy go.mod / go.sum

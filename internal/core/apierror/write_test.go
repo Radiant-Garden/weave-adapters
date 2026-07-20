@@ -14,6 +14,12 @@ Tested:
     - TestWriteError_ShouldRenderFieldErrors: errors[] reaches the body.
     - TestWriteError_ShouldRenderBackendError: the sanitized backend message is surfaced, the cause is not.
     - TestWriteError_ShouldNotPanicWithoutCallerContext: a request outside the middleware chain still gets its status.
+    - TestWriteError_ShouldStaySilentForACancelledRequest: a request whose context is done gets no response and emits no API-901 — a client hang-up is not an adapter fault.
+  TruncatePath
+    - TestTruncatePath_ShouldBoundOnARuneBoundary: an overlong multi-byte path is cut without splitting a rune into U+FFFD.
+    - TestTruncatePath_ShouldLeaveAShortPathUntouched: a path under the limit passes through verbatim.
+  FallbackCaller
+    - TestFallbackCaller_ShouldTruncateTheReflectedPath: the shared helper bounds the path the three fallback sites once echoed raw.
   WriteProblem
     - TestWriteProblem_ShouldWriteWithoutEmitting: the recovery path stays single-lined.
     - TestWriteProblem_ShouldDefaultMissingStatus: an unset status answers 500 instead of panicking.
@@ -42,12 +48,15 @@ Additional Remarks:
 package apierror
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -280,6 +289,76 @@ func TestWriteError_ShouldNotPanicWithoutCallerContext(t *testing.T) {
 	emitted := rec.FindByID(catalog.API900)
 	require.NotEmpty(t, emitted)
 	assert.Equal(t, req.RemoteAddr, emitted[0].Caller("remoteAddr"))
+}
+
+//nolint:paralleltest // installs the recorder, which mutates the global emitter hook
+func TestWriteError_ShouldStaySilentForACancelledRequest(t *testing.T) {
+	// ARRANGE — a request whose own context is done, which is what a client that
+	// hung up mid-request produces. There is nobody to answer.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	ctx, cancel := context.WithCancel(newRequest(t, "/api/v1/leases/1").Context())
+	cancel()
+
+	req := httptest.NewRequestWithContext(ctx, http.MethodGet, "/api/v1/leases/1", nil)
+	recorder := httptest.NewRecorder()
+
+	// ACT — an unmapped context.Canceled would otherwise resolve to API-901
+	// "internal error" at ERROR and raise a false alarm on every dropped
+	// connection.
+	WriteError(recorder, req, context.Canceled)
+
+	// ASSERT — nothing written, nothing emitted. The request is not invisible:
+	// the logging middleware's API-010 still records it.
+	assert.Empty(t, recorder.Body.String())
+	rec.AssertNotEmitted(t, catalog.API901)
+}
+
+func TestTruncatePath_ShouldBoundOnARuneBoundary(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a path far past the limit whose byte at the cut offset is in the
+	// middle of a multi-byte rune. Slicing bytes there would emit U+FFFD into the
+	// very field the bound exists to keep clean.
+	path := "/api/v1/scopes/" + strings.Repeat("ä", MaxReflectedPathLen)
+
+	// ACT
+	got := TruncatePath(path)
+
+	// ASSERT — bounded, marked, and still valid UTF-8: no rune was split.
+	assert.LessOrEqual(t, len(got), MaxReflectedPathLen+len("…"))
+	assert.True(t, strings.HasSuffix(got, "…"))
+	assert.True(t, utf8.ValidString(got), "a rune was split mid-sequence")
+}
+
+func TestTruncatePath_ShouldLeaveAShortPathUntouched(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	path := "/api/v1/scopes/10.0.0.0"
+
+	// ACT / ASSERT — under the limit passes through verbatim, no marker.
+	assert.Equal(t, path, TruncatePath(path))
+}
+
+func TestFallbackCaller_ShouldTruncateTheReflectedPath(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the three fallback sites built this struct by hand and all passed
+	// the path raw; the helper is the one place that bounds it.
+	long := "/" + strings.Repeat("a", 2*MaxReflectedPathLen)
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, long, nil)
+	req.RemoteAddr = "192.0.2.1:1234"
+
+	// ACT
+	caller := FallbackCaller(req)
+
+	// ASSERT — bounded here, so no reflection site can reopen the amplifier.
+	assert.Equal(t, "192.0.2.1:1234", caller.RemoteAddr)
+	assert.Equal(t, http.MethodGet, caller.Method)
+	assert.LessOrEqual(t, len(caller.Path), MaxReflectedPathLen+len("…"))
+	assert.True(t, strings.HasSuffix(caller.Path, "…"))
 }
 
 //nolint:paralleltest // installs the recorder, which mutates the global emitter hook

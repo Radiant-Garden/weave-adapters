@@ -34,15 +34,6 @@ func SetEmitterHook(hook func(id EventID, attrs ...any)) func(id EventID, attrs 
 // request-scoped event. An unregistered ID logs a loud warning instead of
 // silently dropping.
 func Emit(ctx context.Context, id EventID, dataKvs ...any) {
-	emit(ctx, id, "", dataKvs...)
-}
-
-// EmitWithMessage is Emit with a dynamic message overriding the template.
-func EmitWithMessage(ctx context.Context, id EventID, message string, dataKvs ...any) {
-	emit(ctx, id, message, dataKvs...)
-}
-
-func emit(ctx context.Context, id EventID, message string, dataKvs ...any) {
 	hookMu.RLock()
 
 	hook := emitterHook
@@ -51,23 +42,20 @@ func emit(ctx context.Context, id EventID, message string, dataKvs ...any) {
 
 	event, ok := Get(id)
 	if !ok {
-		msg := message
-		if msg == "" {
-			msg = fmt.Sprintf("unknown event: %s", id)
-		}
-
+		// The hook sees the data wrapped in the same "data" group it gets for a
+		// registered event, so a recorder reading .Data(key) finds the fields on
+		// an unregistered emission too rather than an empty map. The two paths
+		// once handed the hook different shapes — raw pairs here, a group below —
+		// and a test asserting on fields silently saw nothing for the unregistered
+		// case.
 		if hook != nil {
-			hook(id, dataKvs...)
+			hook(id, slog.Group("data", dataKvs...))
 		}
 
-		slog.Warn(msg, append([]any{"eventId", string(id)}, dataKvs...)...)
+		slog.Warn(fmt.Sprintf("unknown event: %s", id),
+			append([]any{"eventId", string(id)}, dataKvs...)...)
 
 		return
-	}
-
-	msg := message
-	if msg == "" {
-		msg = event.MessageTemplate
 	}
 
 	dataGroup := slog.Group("data", dataKvs...)
@@ -98,7 +86,5 @@ func emit(ctx context.Context, id EventID, message string, dataKvs ...any) {
 		hook(id, hookAttrs...)
 	}
 
-	fanOutToSubscribers(id, dataKvs)
-
-	slog.Default().Log(ctx, event.Level, msg, attrs...)
+	slog.Default().Log(ctx, event.Level, event.MessageTemplate, attrs...)
 }

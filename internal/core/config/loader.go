@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/knadh/koanf/parsers/toml/v2"
@@ -155,13 +156,26 @@ func defaults(spec Spec) map[string]any {
 // keys the user explicitly set. Only visited flags win, so an unset flag's zero
 // value doesn't clobber a file or environment value.
 func parseFlags(spec Spec, args []string) (configPath string, overrides map[string]any, err error) {
-	fs := flag.NewFlagSet("weave-adapter-dhcp-windows", flag.ContinueOnError)
+	// The flagset name is what flag prints in "Usage of NAME" on -h and on every
+	// flag error. Derived from the running binary rather than hardcoded: this
+	// package is adapter-agnostic, and a second adapter linking it must not see
+	// the first adapter's binary name in its own usage line. filepath.Base of
+	// os.Args[0] is what the shell invoked, which is the name an operator typed
+	// and the one they expect to read back.
+	fs := flag.NewFlagSet(filepath.Base(os.Args[0]), flag.ContinueOnError)
 
 	// Flag name -> key name, and flag name -> the pointer holding its value.
 	keyOf := make(map[string]string, len(spec))
 	valueOf := make(map[string]any, len(spec))
 
 	for _, k := range spec {
+		// A NoFlag key registers no flag, so its value never lands in argv where a
+		// local user could read it. It stays resolvable from the environment and
+		// the config file, which resolve entirely outside this function.
+		if k.NoFlag {
+			continue
+		}
+
 		name := FlagName(k.Name)
 		keyOf[name] = k.Name
 

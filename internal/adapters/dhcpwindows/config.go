@@ -126,9 +126,14 @@ func Keys() config.Spec {
 			Usage:   "maximum page size for GET /api/v1/scopes",
 		},
 		{
-			Name:  KeyNamespaceKey,
-			Type:  config.TypeString,
-			Usage: "HMAC key for wadaptID derivation (required, backup-critical)",
+			Name: KeyNamespaceKey,
+			Type: config.TypeString,
+			// No flag: it is a backup-critical secret, and a flag value is an argv
+			// entry any local user can read from `ps`. It is set from the
+			// environment (or the config file), the standard channel for a
+			// provisioned secret.
+			NoFlag: true,
+			Usage:  "HMAC key for wadaptID derivation (required, backup-critical); set via " + config.EnvName(KeyNamespaceKey),
 		},
 		{
 			Name:  KeyServerName,

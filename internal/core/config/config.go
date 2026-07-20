@@ -17,8 +17,7 @@ package config
 import (
 	"errors"
 	"fmt"
-
-	"github.com/go-playground/validator/v10"
+	"slices"
 )
 
 const (
@@ -63,9 +62,10 @@ const (
 // the operator's comments.
 const DefaultAuthTokensFile = "tokens.toml"
 
-// validate is the shared struct validator (safe for concurrent use, caches
-// struct metadata).
-var validate = validator.New(validator.WithRequiredStructEnabled())
+// validLogSeverities is the accepted set for logSeverity. A slice rather than a
+// map because it is short and the membership test reads as one line beside the
+// message that lists the same values.
+var validLogSeverities = []string{"debug", "info", "warn", "error"}
 
 // CoreKeys returns the adapter-agnostic keys every binary registers. An adapter
 // appends its own to this spec; it never edits it.
@@ -110,21 +110,30 @@ func CoreKeys() Spec {
 	}
 }
 
-// Config is the adapter-agnostic runtime configuration. Field rules are
-// expressed as validator struct tags and checked by Validate.
+// Config is the adapter-agnostic runtime configuration. Field rules are plain
+// Go, checked by Validate.
+//
+// No struct tags. It carries no `koanf:"..."` tags because nothing unmarshals
+// into it — the loader restructure moved to building it field by field in Core
+// via the typed getters, so tags describing an unmarshal that no longer happens
+// were dead weight that read as live contract. And no `validate:"..."` tags
+// because the adapter's own Config.Validate already does more (eight keys,
+// cross-field rules the tag language cannot express) in plain Go, so a second
+// mechanism here bought a module and every rule stated twice — once in a tag,
+// once in the prose that rendered the tag's failure.
 type Config struct {
 	// Port is the TCP port the HTTP server listens on.
-	Port int `koanf:"port" validate:"min=1,max=65535"`
+	Port int
 	// DisableHTTPS must be true in M1 — HTTPS/TLS is not implemented yet.
-	DisableHTTPS bool `koanf:"disableHttps"`
+	DisableHTTPS bool
 	// LogSeverity is the log level: debug, info, warn, or error.
-	LogSeverity string `koanf:"logSeverity" validate:"oneof=debug info warn error"`
+	LogSeverity string
 	// AuthTokensFile is the path to the token store the `token` subcommand
 	// manages. It is read once at startup; changes need a restart.
-	AuthTokensFile string `koanf:"authTokensFile"`
+	AuthTokensFile string
 	// DisableAuth turns off bearer authentication. Development only — it leaves
 	// every route open to anyone who can reach the port.
-	DisableAuth bool `koanf:"disableAuth"`
+	DisableAuth bool
 	// MaxRequestBodyBytes bounds every request body the adapter reads. A body
 	// that exceeds it is rejected with 413 before the decoder sees it.
 	//
@@ -132,7 +141,7 @@ type Config struct {
 	// rather than read as off. An operator who wants a bigger body raises the
 	// number, and the one who fat-fingers it to 0 gets a startup error instead
 	// of a server that will read a body until it runs out of memory.
-	MaxRequestBodyBytes int `koanf:"maxRequestBodyBytes" validate:"min=1"`
+	MaxRequestBodyBytes int
 }
 
 // Core builds and validates the core configuration from resolved values. It
@@ -157,22 +166,25 @@ func Core(v *Values) (*Config, error) {
 }
 
 // Validate reports all configuration problems at once (joined), rather than
-// failing on the first one. Field rules run through the validator; the
-// disableHttps rule is M1-specific and checked separately.
+// failing on the first one. Each rule is one if statement whose message names
+// the config key an operator actually sets, which is the whole reason this is
+// plain Go rather than struct tags rendered back into prose.
 func (c *Config) Validate() error {
 	var errs []error
 
-	var verrs validator.ValidationErrors
-	if err := validate.Struct(c); err != nil && errors.As(err, &verrs) {
-		for _, fe := range verrs {
-			errs = append(errs, fieldError(fe))
-		}
-	} else if err != nil {
-		// Defensive: validate.Struct only returns a non-ValidationErrors error
-		// for a programmer mistake (a nil or non-struct target). Validate always
-		// passes a *Config, so this branch is unreachable today; it is kept so a
-		// future misuse surfaces as an error instead of being silently dropped.
-		errs = append(errs, err)
+	if c.Port < minPort || c.Port > maxPort {
+		errs = append(errs, fmt.Errorf("port must be between %d and %d, got %d", minPort, maxPort, c.Port))
+	}
+
+	if !slices.Contains(validLogSeverities, c.LogSeverity) {
+		errs = append(errs, fmt.Errorf("logSeverity must be one of debug, info, warn, error, got %q", c.LogSeverity))
+	}
+
+	if c.MaxRequestBodyBytes < 1 {
+		// The message says there is no unlimited setting, which is the mistake a 0
+		// most likely was.
+		errs = append(errs, fmt.Errorf(
+			"maxRequestBodyBytes must be at least 1 byte (there is no unlimited setting), got %d", c.MaxRequestBodyBytes))
 	}
 
 	if !c.DisableHTTPS {
@@ -186,26 +198,4 @@ func (c *Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
-}
-
-// fieldError renders a validator field error as an operator-friendly message.
-func fieldError(fe validator.FieldError) error {
-	switch fe.Field() {
-	case "Port":
-		return fmt.Errorf("port must be between %d and %d, got %v", minPort, maxPort, fe.Value())
-	case "LogSeverity":
-		return fmt.Errorf("logSeverity must be one of debug, info, warn, error, got %q", fe.Value())
-	case "MaxRequestBodyBytes":
-		// Named rather than left to the fallback because the fallback prints the
-		// Go field name, and an operator reading it has a config key in front of
-		// them. It also says there is no unlimited setting, which is the mistake
-		// a 0 most likely was.
-		return fmt.Errorf("maxRequestBodyBytes must be at least 1 byte (there is no unlimited setting), got %v", fe.Value())
-	default:
-		// Defensive fallback for a tagged field without a bespoke message. Only
-		// Port and LogSeverity carry validate tags today, so this is unreachable
-		// until a third tagged field is added; it then yields a generic message
-		// rather than nothing.
-		return fmt.Errorf("%s failed %q validation", fe.Field(), fe.Tag())
-	}
 }

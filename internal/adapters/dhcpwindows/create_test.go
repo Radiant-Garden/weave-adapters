@@ -15,8 +15,9 @@ Pending:
 Tested:
 
 	ScopeInput.Validate
-	  - TestValidate_ShouldAcceptAWellFormedInput: the happy path reports nothing.
-	  - TestValidate_ShouldRejectEachMalformedField: every rule, one case each.
+	  - TestValidate_ShouldAcceptAWellFormedInput: the happy path reports nothing, including a non-ASCII name.
+	  - TestValidate_ShouldAcceptTheContiguousMaskEdges: /30, /31 and /32 are contiguous and accepted — the boundary isContiguousMask is likeliest to misjudge.
+	  - TestValidate_ShouldRejectEachMalformedField: every rule, one case each — including the int32 lease bound and control-character rejection that keep a client mistake from reading as a 502.
 	  - TestValidate_ShouldReportEveryFailureAtOnce: a wholly invalid input names all its fields.
 	ScopeInput.ScopeID
 	  - TestScopeID_ShouldBeTheNetworkAddress: start masked by subnetMask, for several masks.
@@ -28,6 +29,7 @@ Tested:
 	  - TestCreateScope_ShouldReportAConflictWhenTheSubnetIsTaken: the typed error a 409 renders from.
 	  - TestCreateScope_ShouldRejectAScopeOnADifferentSubnetThanAsked: the Location-would-lie guard.
 	  - TestCreateScope_ShouldRejectAPayloadThatIsNotExactlyOneScope: -PassThru returns one or the script misbehaved.
+	  - TestCreateScope_ShouldNotMistakeAScopeDescriptionForTheConflictMarker: the marker is matched exactly, so a payload containing it is still a create.
 
 Tested elsewhere:
 
@@ -61,6 +63,7 @@ package dhcpwindows
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 
@@ -114,8 +117,12 @@ func TestValidate_ShouldAcceptAWellFormedInput(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE — every optional field set too, so the optional paths are covered
-	// rather than merely skipped.
+	// rather than merely skipped. The name carries a non-ASCII character on
+	// purpose: the control-character rule must reject C0/C1 without touching
+	// legitimate Unicode, and "München" is the value the whole encoding chain
+	// exists to carry intact.
 	in := validInput()
+	in.Name = "Standort München"
 	in.Description = "created by weave"
 	in.LeaseDurationSeconds = 3600
 	in.State = "Inactive"
@@ -123,6 +130,42 @@ func TestValidate_ShouldAcceptAWellFormedInput(t *testing.T) {
 
 	// ACT / ASSERT
 	assert.Empty(t, in.Validate())
+}
+
+func TestValidate_ShouldAcceptTheContiguousMaskEdges(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the tightest masks are the ones isContiguousMask is most likely
+	// to get wrong: /31 and /32 are all-ones runs with a zero or one-bit tail,
+	// exactly the boundary the power-of-two trick turns on. They pass through
+	// validateAddressing untested elsewhere, and Windows rejects a bad mask late
+	// with a message about a cmdlet parameter, so accepting the good ones here is
+	// what keeps that rejection from ever being reached for a legitimate input.
+	tests := []struct {
+		name  string
+		mask  string
+		start string
+		end   string
+	}{
+		{name: "/30", mask: "255.255.255.252", start: "192.168.1.4", end: "192.168.1.6"},
+		{name: "/31", mask: "255.255.255.254", start: "192.168.1.4", end: "192.168.1.5"},
+		{name: "/32", mask: "255.255.255.255", start: "192.168.1.4", end: "192.168.1.4"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ARRANGE
+			in := validInput()
+			in.SubnetMask = tt.mask
+			in.StartRange = tt.start
+			in.EndRange = tt.end
+
+			// ACT / ASSERT — a contiguous mask, however tight, is accepted.
+			assert.Empty(t, in.Validate(), "%s should be a valid contiguous mask", tt.mask)
+		})
+	}
 }
 
 func TestValidate_ShouldRejectEachMalformedField(t *testing.T) {
@@ -193,6 +236,37 @@ func TestValidate_ShouldRejectEachMalformedField(t *testing.T) {
 			name:      "should reject a negative lease",
 			mutate:    func(in *ScopeInput) { in.LeaseDurationSeconds = -1 },
 			wantField: "leaseDurationSeconds",
+		},
+		{
+			// Above int32, the script's [int] cast throws, the shell exits
+			// non-zero, and the client is told the backend is unreachable — a
+			// false outage from a client mistake. Bounded here so it is a 400.
+			//
+			// The add happens at runtime, through a variable, so it is not a
+			// constant expression the compiler would reject as an int overflow on
+			// a 32-bit build (this package must still compile there even though it
+			// only ships for amd64). On a 64-bit int the value is genuinely over
+			// the bound; the field is named either way.
+			name: "should reject a lease above int32",
+			mutate: func(in *ScopeInput) {
+				max32 := int(math.MaxInt32)
+				in.LeaseDurationSeconds = max32 + 1
+			},
+			wantField: "leaseDurationSeconds",
+		},
+		{
+			// A NUL never reaches PowerShell — os/exec rejects the env value — so
+			// without this guard it is a 502 rather than the 400 it is.
+			name:      "should reject a NUL in the name",
+			mutate:    func(in *ScopeInput) { in.Name = "a\x00b" },
+			wantField: "name",
+		},
+		{
+			// A newline does reach Windows and lands verbatim as a scope name in
+			// the console, so it is rejected before it can.
+			name:      "should reject a control character in the description",
+			mutate:    func(in *ScopeInput) { in.Description = "line one\nline two" },
+			wantField: "description",
 		},
 		{
 			name:      "should reject an unknown state",

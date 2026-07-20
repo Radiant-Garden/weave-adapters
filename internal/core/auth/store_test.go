@@ -8,6 +8,7 @@ Tested:
     - TestLoad_ShouldRoundTripASavedStore: what Save writes, Load reads back.
     - TestLoad_ShouldReportMissingFileAsNotExist: absent file is distinguishable from unreadable.
     - TestLoad_ShouldReturnErrorWhenFileMalformed: garbage is an error, not an empty store.
+    - TestLoad_ShouldReturnErrorWhenExpiryMalformed: an unparseable expiry fails the load rather than reading as never-expires.
     - TestLoad_ShouldEnforceTheInvariantsAddApplies: a hand-edited file gets label, duplicate and hash checks.
   Expiry.MarshalText
     - TestMarshalText_ShouldRefuseAYearItCouldNotParseBack: a 5-digit year is refused, not written.

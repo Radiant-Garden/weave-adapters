@@ -50,6 +50,11 @@ var (
 	// ErrBackendMalformed — the shell exited zero but its output could not be
 	// decoded, including the empty-stdout case.
 	ErrBackendMalformed = errors.New("dhcp backend returned malformed output")
+	// ErrBackendCanceled — the caller went away before the call finished: a
+	// client disconnect, or a graceful drain. Distinct from every error above
+	// because nothing failed. It is the one runner outcome that is not a backend
+	// fault, which is why backendError declines to log it.
+	ErrBackendCanceled = errors.New("dhcp backend call canceled")
 	// ErrDuplicateWadaptID — two scopes derived the same identity. Detected
 	// rather than tolerated; see ListScopes.
 	ErrDuplicateWadaptID = errors.New("two scopes derived the same wadaptID")
@@ -238,7 +243,20 @@ const (
 // detail only to whoever polled it. Suppressing the repeat would need
 // last-failure state in a package that is deliberately stateless, to save an
 // operator from log lines that are telling them the truth.
+//
+// A cancellation is the one thing that reaches here and is *not* logged. The
+// caller disconnected or the server is draining; the backend did not fail, and
+// BACKEND-101 says it did — at ERROR, carrying "powershell exited -1", with
+// troubleshooting that sends whoever reads it to check a DHCP server that is
+// working. A drain would emit one per in-flight request, which is precisely when
+// an operator is watching. Returning the error unlogged keeps the single-owner
+// rule intact: the client still classifies every outcome, it just declines to
+// raise an alarm for the one that is not an outage.
 func (c *Client) backendError(ctx context.Context, operation string, err error) error {
+	if errors.Is(err, ErrBackendCanceled) {
+		return err
+	}
+
 	events.Emit(ctx, adapterevents.BACKEND101, "operation", operation, "error", err.Error())
 
 	return err
@@ -361,6 +379,14 @@ func validateScope(index int, s Scope) error {
 func runError(err error, stderr []byte) error {
 	if errors.Is(err, ErrBackendTimeout) {
 		return fmt.Errorf("%w%s", err, stderrContext(stderr))
+	}
+
+	// Already classified by the runner, and deliberately not re-wrapped as
+	// unavailable: nothing failed, the caller left. Passing it through unchanged
+	// is what lets backendError recognize it and stay quiet. stderr is dropped
+	// with it — a killed shell's partial output describes the kill, not a fault.
+	if errors.Is(err, ErrBackendCanceled) {
+		return err
 	}
 
 	var exitErr *exec.ExitError

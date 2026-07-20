@@ -20,6 +20,10 @@ Tested:
 	  - TestLoad_ShouldRejectANonBooleanEnvVar: an unreadable boolean is an error, not a silent false.
 	  - TestLoad_ShouldIgnoreUnregisteredEnvVars: a WEAVE_ADAPTER_* name nothing registered is not a key.
 
+	  - TestLoad_ShouldRegisterNoFlagForANoFlagKey: a NoFlag key rejects its
+	    derived flag (so it cannot appear in a process listing) but still resolves
+	    from the environment.
+
 	Values
 	  - TestValues_ShouldPanicOnAnUnregisteredKey: a wiring mistake fails loudly at startup.
 	  - TestValues_ShouldPanicOnATypeMismatch: reading a key as the wrong type likewise.
@@ -131,6 +135,33 @@ func TestLoad_ShouldApplyPrecedence(t *testing.T) {
 			assert.Equal(t, tc.wantSev, values.String(KeyLogSeverity))
 		})
 	}
+}
+
+func TestLoad_ShouldRegisterNoFlagForANoFlagKey(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a secret-style key that must not appear in a process listing, so
+	// it carries no flag, plus an ordinary one that does.
+	spec := Spec{
+		{Name: "identity.namespaceKey", Type: TypeString, NoFlag: true, Usage: "secret"},
+		{Name: "port", Type: TypeInt, Default: defaultPort, Usage: "a flagged key"},
+	}
+
+	// ACT — passing the derived flag must fail: it was never registered, which is
+	// the whole point. A local user cannot put the value in argv.
+	_, flagErr := load(spec, []string{"-identity-namespace-key", "leaked-on-the-command-line"}, environ())
+
+	// ASSERT
+	require.Error(t, flagErr)
+	assert.Contains(t, flagErr.Error(), "not defined")
+
+	// ACT — the same key still resolves from the environment, the intended path.
+	values, err := load(spec, nil, environ("WEAVE_ADAPTER_IDENTITY_NAMESPACE_KEY=from-the-environment"))
+
+	// ASSERT — set from the environment, and the ordinary key is unaffected.
+	require.NoError(t, err)
+	assert.Equal(t, "from-the-environment", values.String("identity.namespaceKey"))
+	assert.Equal(t, defaultPort, values.Int("port"))
 }
 
 func TestLoad_ShouldOverrideFileWithEnv(t *testing.T) {

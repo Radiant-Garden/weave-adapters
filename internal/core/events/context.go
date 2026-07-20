@@ -87,16 +87,3 @@ func callerFrom(ctx context.Context) Caller {
 
 	return *caller
 }
-
-// InternalActorCtx returns a context satisfying the ExternalSource contract for
-// system-driven events (background sweeps, restart recovery) that still need
-// the external shape. role is "system" and remoteAddr is "internal", so SIEM
-// filters can split system-driven events (caller.role=system) from real callers.
-func InternalActorCtx(actor, requestID string) context.Context {
-	return WithCaller(context.Background(), Caller{
-		Subject:    actor,
-		Role:       "system",
-		RemoteAddr: "internal",
-		RequestID:  requestID,
-	})
-}

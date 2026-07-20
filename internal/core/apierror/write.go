@@ -1,12 +1,14 @@
 package apierror
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 )
@@ -20,6 +22,24 @@ import (
 // recorded in the event only, so an unmapped internal failure cannot leak a
 // message that names internal hosts, queries, or file paths.
 func WriteError(w http.ResponseWriter, r *http.Request, err error) {
+	// A request whose own context is done has no client left to answer. Writing
+	// is a no-op on a closed connection, and the event would be a false report:
+	// an unmapped cancellation resolves to API-901 "internal error" at ERROR, so
+	// every client that hangs up mid-request would raise an alarm about an
+	// adapter fault that never happened.
+	//
+	// Both conditions are required. r.Context().Err() alone would swallow a
+	// genuine failure that merely finished after the client left, and the error
+	// alone would swallow a handler that wraps context.Canceled for its own
+	// reasons while the connection is healthy. Together they identify exactly
+	// the case where there is nobody to tell and nothing to report.
+	//
+	// API-010 still records the request from the logging middleware, so the
+	// request is not invisible — only the invented error is.
+	if r.Context().Err() != nil && errors.Is(err, context.Canceled) {
+		return
+	}
+
 	apiErr := asError(err)
 	problem := apiErr.problem(r)
 
@@ -27,11 +47,7 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	// remoteAddr in context. A handler reached without the request-ID middleware
 	// (a route mounted outside the chain, or a direct unit test) would otherwise
 	// panic here and have its 404 turned into a 500 by the recovery middleware.
-	ctx := events.EnsureCaller(r.Context(), events.Caller{
-		RemoteAddr: r.RemoteAddr,
-		Method:     r.Method,
-		Path:       r.URL.Path,
-	})
+	ctx := events.EnsureCaller(r.Context(), FallbackCaller(r))
 
 	// Emit before writing: if the client has gone away mid-write, the operator
 	// still gets the record of what happened.
@@ -86,12 +102,44 @@ const MaxReflectedPathLen = 128
 // TruncatePath bounds an echoed request path. It lives here, beside the Instance
 // member that is the most-copied echo of a path, so every reflection site shares
 // one limit instead of each picking its own.
+//
+// It cuts on a rune boundary. Slicing bytes would split a multi-byte rune
+// straddling the limit and put a replacement character into the very field the
+// bound exists to keep clean — the same trade stderrContext makes in the adapter,
+// and for the same reason.
 func TruncatePath(path string) string {
 	if len(path) <= MaxReflectedPathLen {
 		return path
 	}
 
-	return path[:MaxReflectedPathLen] + "…"
+	// The byte length is the bound that matters (it is what makes an amplifier),
+	// so back off to the last rune boundary at or below it rather than counting
+	// runes — a path of 128 multi-byte runes is not the case being defended
+	// against.
+	cut := MaxReflectedPathLen
+	for cut > 0 && !utf8.RuneStart(path[cut]) {
+		cut--
+	}
+
+	return path[:cut] + "…"
+}
+
+// FallbackCaller builds the caller context for an event emitted where the
+// request-ID middleware's caller may be absent — a route mounted outside the
+// chain, or a handler driven directly by a test.
+//
+// It exists because three sites built this same struct by hand and all three
+// passed r.URL.Path raw, while the middleware that normally supplies the caller
+// truncates it. The path is attacker-controlled and bounded only by
+// MaxHeaderBytes, so the fallback quietly reopened, on the paths that need it
+// most, exactly the amplification the middleware closes. One helper means a
+// fourth site cannot get it wrong either.
+func FallbackCaller(r *http.Request) events.Caller {
+	return events.Caller{
+		RemoteAddr: r.RemoteAddr,
+		Method:     r.Method,
+		Path:       TruncatePath(r.URL.Path),
+	}
 }
 
 // problem renders the client-facing body. Everything in it comes from the

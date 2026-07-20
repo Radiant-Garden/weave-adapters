@@ -3,6 +3,7 @@ package dhcpwindows
 import (
 	"encoding/json"
 	"net/http"
+	"unicode/utf8"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 )
@@ -80,5 +81,29 @@ func (h *ScopeHandler) get(w http.ResponseWriter, r *http.Request) error {
 	// The identifier is echoed because it is the client's own input, and a 404
 	// that does not say what was not found is unactionable when a client is
 	// reconciling a set.
-	return apierror.NotFound("scope " + wadaptID)
+	//
+	// Bounded on the way out. The path segment is attacker-controlled and limited
+	// only by MaxHeaderBytes — around a megabyte — and it lands in both the 404
+	// detail and API-900's resource field, so an unbounded echo is an amplifier
+	// into log storage on a route that needs no credential to be wrong. A real
+	// wadaptID is exactly WadaptIDLength characters, so the bound costs nothing a
+	// legitimate client would notice.
+	return apierror.NotFound("scope " + truncateWadaptID(wadaptID))
+}
+
+// maxEchoedWadaptID bounds what an item 404 repeats back. Generous against
+// WadaptIDLength on purpose: the point is to stop an amplifier, not to
+// second-guess the format, and echoing a slightly-wrong ID in full is what makes
+// the 404 actionable.
+const maxEchoedWadaptID = 4 * WadaptIDLength
+
+// truncateWadaptID bounds the echoed identifier. Cut by runes rather than bytes,
+// so a multi-byte value cannot be split mid-sequence into the replacement
+// character — the same rule apierror.TruncatePath and stderrContext follow.
+func truncateWadaptID(id string) string {
+	if utf8.RuneCountInString(id) <= maxEchoedWadaptID {
+		return id
+	}
+
+	return string([]rune(id)[:maxEchoedWadaptID]) + "…"
 }

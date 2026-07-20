@@ -177,7 +177,7 @@ func TestExecRunner_ShouldNotBlockPastTheDeadlineOnAWedgedChild(t *testing.T) {
 	select {
 	case err := <-done:
 		require.ErrorIs(t, err, ErrBackendTimeout)
-	case <-time.After(waitDelayGrace + 5*time.Second):
+	case <-time.After(RunnerKillGrace + 5*time.Second):
 		t.Fatal("run did not return after the context expired: WaitDelay is not bounding Wait")
 	}
 }

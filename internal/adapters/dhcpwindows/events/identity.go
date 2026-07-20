@@ -95,7 +95,11 @@ func init() {
 				Description: "Comma-separated names of the attributes that differ from the last observation.",
 			},
 		},
-		Example: `{"eventId":"DHCP-002","data":{"wadaptId":"c7k3n2q8r4t6y8u0",` +
+		// A real wadaptID is exactly WadaptIDLength (13) characters of lowercase
+		// base32hex (0-9a-v) — the earlier example was 16 characters and contained
+		// a 'y', which the alphabet has no room for, so it could never be a value
+		// this event actually carries.
+		Example: `{"eventId":"DHCP-002","data":{"wadaptId":"c7k3n2q8r4t6v",` +
 			`"scopeId":"10.0.30.0","changed":"name, startRange, endRange"}}`,
 		Troubleshooting: "Decide which of two things happened, because they need opposite responses. If somebody " +
 			"edited an existing scope, nothing is wrong and the event is noise. If a scope was deleted and a new " +

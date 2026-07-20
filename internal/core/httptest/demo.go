@@ -121,36 +121,13 @@ func (r *Resource) list(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Resume after the cursor key. The slice is sorted by ID, so the first item
-	// ordered after it starts the page.
-	start := 0
-
-	if params.After != "" {
-		// BinarySearchFunc lands on the first item ordered at or after the
-		// cursor key; when the key itself is still present, step over it.
-		found := false
-
-		start, found = slices.BinarySearchFunc(r.items, params.After, func(it Item, after string) int {
-			return cmp.Compare(it.ID, after)
-		})
-		if found {
-			start++
-		}
-	}
-
-	end := min(start+params.Size, len(r.items))
-	page := r.items[start:end]
-
-	// A next cursor only when items remain; on the last page both cursor forms
-	// are absent, which is what tells the client to stop.
-	//
-	// The key is non-empty because NewResource rejects empty IDs — without that
-	// guarantee Next would mint no cursor here and the listing would report
+	// pagination.Slice's preconditions hold because NewResource enforces them:
+	// items are sorted by ID and IDs are unique and non-empty. Without the
+	// non-empty guarantee Next would mint no cursor and the listing would report
 	// itself complete with rows still unread.
-	var next pagination.NextPage
-	if end < len(r.items) {
-		next = r.pages.Next(req.URL, page[len(page)-1].ID)
-	}
+	page, next := pagination.Slice(r.pages, r.items, params, req.URL, func(it Item) string {
+		return it.ID
+	})
 
 	writeJSON(w, pagination.NewPage(page, next))
 }
