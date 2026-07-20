@@ -135,56 +135,75 @@ Each failed request therefore logs **two** lines by design: `BACKEND-101` at
 ERROR with the cause, and `BACKEND-102`/`103`/`104` at WARN recording what the
 client was told. See `docs/events.md`.
 
-## Granting the adapter read access
+## What privilege the adapter needs
 
-The adapter needs DHCP **read** rights and nothing more. Windows checks that
-against the identity the process runs as, so a console `.exe` launched by an
-administrator works while the same binary under a service account does not --
-the process model is irrelevant, the account is everything.
+**Local administrator on the DHCP host.** Not DHCP read-only, despite Windows
+appearing to offer exactly that.
 
-The symptom is unmistakable once you have seen it:
+This was measured, not assumed. On WS2022 (2026-07-20, host `WIN-01`):
+
+| Account | Membership | `Get-DhcpServerv4Scope` |
+|---|---|---|
+| `NETWORK SERVICE` | `DHCP Users` | denied, `WIN32 5` |
+| `NETWORK SERVICE` | `DHCP Administrators` | denied, `WIN32 5` |
+| ordinary local user | `DHCP Users` | denied, `WIN32 5` |
+| local administrator | -- | **works** |
+
+`DHCP Users` is described by Windows as "members who have read-only access to
+the DHCP service", which is precisely what this adapter wants. It grants nothing
+here. That group governs the DHCP console and `netsh`; the cmdlets go through
+WMI (`root\Microsoft\Windows\DHCP`), which gates on Administrators. Granting
+`DHCP Users` is not a smaller version of the fix -- it does nothing at all,
+which is worse than doing nothing, because it looks like it worked.
+
+The symptom, once you know to read it:
 
 ```
 PermissionDenied: (WIN-01:root/Microsoft/...) [Get-DhcpServerv4Scope], CimException
 FullyQualifiedErrorId : WIN32 5,Get-DhcpServerv4Scope
 ```
 
-`WIN32 5` is `ERROR_ACCESS_DENIED`. Note what it rules out: the cmdlet ran, so
-the DhcpServer module is installed, and it named the server, so the DHCP role is
-present. Only the identity is wrong.
+`WIN32 5` is `ERROR_ACCESS_DENIED`, returned by the DHCP call itself. Note what
+it rules out: the cmdlet ran, so the module is installed, and it named the
+server, so the role is present. Executing PowerShell was never the gated thing
+-- reading the data is.
 
-Grant it once, from an elevated shell on the host:
+To grant it, from an elevated shell on the host:
 
 ```
-task setup:dhcp-access ACCOUNT=svc-weave-adapter
+task setup:dhcp-access
 ```
 
-`DHCP Users` is the read-only group -- exactly the privilege level M3a is
-designed around, so granting the minimum is also what the exit criterion asks
-for. `DHCP Administrators` is not needed and should not be used.
+The script refuses without `-IUnderstandThisGrantsAdministrator`, because
+granting administrator should not happen by accident.
 
-Three things the script handles that are easy to get wrong by hand:
+### Consequences
 
-- **Names are localized.** On a German host the account is
-  `NT-AUTORITAET\Netzwerkdienst` and the group is `DHCP-Benutzer`, so
-  `Add-LocalGroupMember -Member "NT AUTHORITY\NetworkService"` fails. It grants
-  by SID and discovers the group instead.
-- **The grant does not reach a running process.** Group membership is stamped
-  into an access token at logon, so a service keeps its old token and goes on
-  being denied. The script restarts the runner; skipping that is the likeliest
-  way to conclude the grant did not work.
-- **Domain controllers are different.** Local groups do not exist there, and
-  `NETWORK SERVICE` cannot be added to an AD group at all -- on a DC it
-  authenticates as the computer account. The script detects this and says so
-  rather than failing obscurely.
+This is a real constraint on the project, not a CI detail:
 
-Prefer a dedicated account over `NETWORK SERVICE`. That identity is shared by
-many Windows services, so granting it hands DHCP read to every one of them on
-the host -- a class, not a service.
+- It applies to the **write** milestone too. `DHCP Administrators` was tested and
+  refused, so mutations will not be servable by a DHCP-admin-but-not-local-admin
+  account either.
+- The M3a exit criterion "a read-only service account serves every endpoint" is
+  **not achievable through this transport**. What remains true, and is what that
+  criterion was really protecting, is that M3a's code path issues no writes --
+  provable by inspection and by the tests, since only read cmdlets exist.
+- Granting a CI runner this makes code reaching that runner administrator on a
+  DHCP server. The trust boundary is still who can push to `main`, but the blast
+  radius is larger. See the SECURITY note in `.github/workflows/windows-verify.yml`.
 
-It cannot run from CI, and that is deliberate: editing a security group needs
-Administrator, and a CI job able to grant itself DHCP rights would be a
-privilege-escalation path rather than a convenience.
+### The way out, if that trade is unacceptable
+
+`netsh dhcp server show scope` **does** respect `DHCP Users`. Switching the
+backend transport to it would restore a genuinely read-only service account, at
+the cost of parsing tabular text instead of JSON -- which is the thing the
+PowerShell projection was chosen to avoid. Not a small change, and not one to
+make without measuring the parsing risk against the privilege saved.
+
+Untested, and worth trying before either: granting the account rights on the
+`root\Microsoft\Windows\DHCP` WMI namespace directly (`wmimgmt.msc`, or
+scripted via `__SystemSecurity`). If that makes `DHCP Administrators` functional,
+it is the best of both -- one dedicated account, no local admin.
 
 ## Reading the health component
 
