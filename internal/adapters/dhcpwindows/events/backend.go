@@ -26,9 +26,31 @@ import (
 
 // BACKEND event IDs for this adapter. Range 100–199 is this adapter's
 // partition; 100–109 is reserved for call outcomes.
+//
+// The split between 101 and 102–104 mirrors core's split between API-010 and
+// the API-9xx block, and it is not redundancy. BACKEND-101 is the operator's
+// diagnostic: it is emitted by the client, which is the only layer that knows
+// whether the shell failed to start, exited non-zero, timed out or spoke
+// nonsense, and it carries the shell's own stderr. BACKEND-102–104 back the
+// *responses* — they exist because apierror renders the problem+json body from
+// a catalog entry, so each distinct response needs its own ID with its own
+// ResponseCode and client-safe detail.
+//
+// One failed request therefore logs BACKEND-101 at Error with the cause, and
+// its response event at Warn. The response events are deliberately quieter:
+// the line worth alerting on is the one carrying the diagnostic, and levelling
+// both at Error would double every backend outage in the log without adding a
+// fact.
 const (
 	// BACKEND101 is emitted when a call to the DHCP backend fails.
 	BACKEND101 coreevents.EventID = "BACKEND-101"
+
+	// BACKEND102 backs a 502 when the backend could not be reached.
+	BACKEND102 coreevents.EventID = "BACKEND-102"
+	// BACKEND103 backs a 504 when the backend exceeded its timeout.
+	BACKEND103 coreevents.EventID = "BACKEND-103"
+	// BACKEND104 backs a 502 when the backend answered unusably.
+	BACKEND104 coreevents.EventID = "BACKEND-104"
 )
 
 func init() {
@@ -70,4 +92,86 @@ func init() {
 			"the DHCP Server role. A timeout instead suggests a slow or wedged host — raise dhcp.commandTimeout " +
 			"only after confirming the query is slow rather than hung. Escalate to the Windows server owner.",
 	})
+
+	for _, r := range responseEvents {
+		coreevents.Register(&coreevents.Event{
+			ID:              r.id,
+			Level:           slog.LevelWarn,
+			MessageTemplate: r.message,
+			Description: r.describe + " Backs the client-facing response; the cause is on the BACKEND-101 line " +
+				"emitted for the same failure, which carries the shell's own stderr.",
+			Category: coreevents.CategoryBackend.String(),
+			Topic:    "Calls",
+
+			// ExternalSource: these are emitted only from a request-scoped
+			// handler through apierror.WriteError, so a caller is always in
+			// context — unlike BACKEND-101, which the health probe also emits
+			// from a background context.
+			ExternalSource: true,
+
+			ResponseCode:   r.code,
+			ResponseDetail: r.detail,
+			Impacts:        []coreevents.Impact{coreevents.ImpactRequestRejected},
+
+			Fields: append(coreevents.CallerFields(), coreevents.FieldDef{
+				Name: "operation", Type: "string", Required: true,
+				Description: "Which backend call failed (listScopes).",
+			}),
+			Example: `{"eventId":"` + string(r.id) + `","caller":{"subject":"weave-prod","role":"service",` +
+				`"remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET",` +
+				`"path":"/api/v1/scopes"},"data":{"operation":"listScopes"}}`,
+			Troubleshooting: r.fix,
+		})
+	}
+}
+
+// responseEvents declares the three client-facing backend failures.
+//
+// A table rather than three Register calls because they differ only in the four
+// fields below; spelling out the shared two-thirds three times is how one of
+// them ends up with a different category or a missing Impacts entry.
+var responseEvents = []struct {
+	id       coreevents.EventID
+	code     coreevents.ResponseCode
+	message  string
+	detail   string
+	describe string
+	fix      string
+}{
+	{
+		id:      BACKEND102,
+		code:    coreevents.CodeBackendUnavailable,
+		message: "request failed: dhcp backend unavailable",
+		detail:  "The DHCP server could not be reached.",
+		describe: "Emitted when a request could not be served because the backend was unreachable — the shell " +
+			"would not run, or it exited non-zero.",
+		fix: "Same causes as BACKEND-101: the RSAT-DHCP feature is missing, the service account lacks DHCP " +
+			"read rights, or dhcp.server names an unreachable host. The dhcp-server health component reports " +
+			"unavailable for the same reason, so check /api/v1/health first — if it is also failing, this is " +
+			"an outage rather than a request-specific fault.",
+	},
+	{
+		id:       BACKEND103,
+		code:     coreevents.CodeBackendTimeout,
+		message:  "request failed: dhcp backend timed out",
+		detail:   "The DHCP server did not respond in time.",
+		describe: "Emitted when a request could not be served because the backend exceeded dhcp.commandTimeout.",
+		fix: "A slow or wedged host rather than a broken one. Time the query directly before touching config: " +
+			"Measure-Command { Get-DhcpServerv4Scope }. Raise dhcp.commandTimeout only if the query is " +
+			"genuinely slow — raising it to cover a hung host just makes every request hang longer. Note that " +
+			"dhcp.probeTimeout must stay below it.",
+	},
+	{
+		id:      BACKEND104,
+		code:    coreevents.CodeBackendError,
+		message: "request failed: dhcp backend returned malformed output",
+		detail:  "The DHCP server returned a response the adapter could not read.",
+		describe: "Emitted when a request could not be served because the backend exited zero but its output " +
+			"could not be decoded — including empty output, a bare null, and a scope with no usable scopeId.",
+		fix: "This one is an adapter or environment defect rather than a permissions problem, because the shell " +
+			"reported success. Reproduce with the projection the client sends and inspect the raw bytes. Likely " +
+			"causes: a PowerShell profile writing to stdout despite -NoProfile, a -Depth regression serializing " +
+			"nested values as \"System.Object[]\", or an output encoding that mangles non-ASCII scope names. The " +
+			"BACKEND-101 line for the same failure carries the decode error itself.",
+	},
 }

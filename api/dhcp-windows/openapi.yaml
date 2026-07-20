@@ -146,6 +146,10 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/Internal'
+        '502':
+          $ref: '#/components/responses/BackendFailed'
+        '504':
+          $ref: '#/components/responses/BackendTimeout'
 
 components:
   securitySchemes:
@@ -243,9 +247,47 @@ components:
 
     Internal:
       description: >-
-        An unexpected fault, including a failure to read from the DHCP server.
+        An unexpected fault in the adapter itself. A failure to read from the
+        DHCP server is 502 or 504 instead — this code means the adapter is
+        broken, not the backend, and conflating the two sends an operator to the
+        wrong logs.
+
         `detail` is curated for clients and never carries the underlying error
         message; correlate with the log via `requestId` for the cause.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../common/errors.yaml#/components/schemas/Problem'
+
+    BackendFailed:
+      description: >-
+        The DHCP server could not be read. Two distinct `type` values arrive
+        with this status and a client should treat them differently:
+        `backend-unavailable` means the server could not be reached at all,
+        while `backend-error` means it answered with something the adapter could
+        not decode — the first is usually an outage or a permissions problem,
+        the second an adapter or environment defect.
+
+        `/api/v1/health` reports the same backend through its `dhcp-server`
+        component, so it is the cheaper place to distinguish an outage from a
+        request-specific fault.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '../common/errors.yaml#/components/schemas/Problem'
+
+    BackendTimeout:
+      description: >-
+        The DHCP server did not answer within the adapter's configured
+        per-invocation timeout. Distinct from 502 because it is a slow backend
+        rather than an unreachable one, and it is the one backend failure where
+        retrying the same request may succeed.
       headers:
         X-Request-Id:
           $ref: '#/components/headers/RequestId'

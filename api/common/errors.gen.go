@@ -5,16 +5,25 @@ package common
 
 // Defines values for ProblemType.
 const (
-	WeaveAdaptersInternal         ProblemType = "weave-adapters:internal"
-	WeaveAdaptersMethodNotAllowed ProblemType = "weave-adapters:method-not-allowed"
-	WeaveAdaptersNotFound         ProblemType = "weave-adapters:not-found"
-	WeaveAdaptersUnauthorized     ProblemType = "weave-adapters:unauthorized"
-	WeaveAdaptersValidationFailed ProblemType = "weave-adapters:validation-failed"
+	WeaveAdaptersBackendError       ProblemType = "weave-adapters:backend-error"
+	WeaveAdaptersBackendTimeout     ProblemType = "weave-adapters:backend-timeout"
+	WeaveAdaptersBackendUnavailable ProblemType = "weave-adapters:backend-unavailable"
+	WeaveAdaptersInternal           ProblemType = "weave-adapters:internal"
+	WeaveAdaptersMethodNotAllowed   ProblemType = "weave-adapters:method-not-allowed"
+	WeaveAdaptersNotFound           ProblemType = "weave-adapters:not-found"
+	WeaveAdaptersUnauthorized       ProblemType = "weave-adapters:unauthorized"
+	WeaveAdaptersValidationFailed   ProblemType = "weave-adapters:validation-failed"
 )
 
 // Valid indicates whether the value is a known member of the ProblemType enum.
 func (e ProblemType) Valid() bool {
 	switch e {
+	case WeaveAdaptersBackendError:
+		return true
+	case WeaveAdaptersBackendTimeout:
+		return true
+	case WeaveAdaptersBackendUnavailable:
+		return true
 	case WeaveAdaptersInternal:
 		return true
 	case WeaveAdaptersMethodNotAllowed:

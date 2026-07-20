@@ -229,6 +229,12 @@ type IfNoneMatch = string
 // ScopeIdFilter defines model for ScopeIdFilter.
 type ScopeIdFilter = string
 
+// BackendFailed An RFC 9457 problem detail. Returned with Content-Type application/problem+json for every client-facing error, including the 401 and 404/405 produced by middleware rather than by a handler.
+type BackendFailed = externalRef0.Problem
+
+// BackendTimeout An RFC 9457 problem detail. Returned with Content-Type application/problem+json for every client-facing error, including the 401 and 404/405 produced by middleware rather than by a handler.
+type BackendTimeout = externalRef0.Problem
+
 // Internal An RFC 9457 problem detail. Returned with Content-Type application/problem+json for every client-facing error, including the 401 and 404/405 produced by middleware rather than by a handler.
 type Internal = externalRef0.Problem
 

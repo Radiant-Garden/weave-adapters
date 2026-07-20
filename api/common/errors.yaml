@@ -114,4 +114,7 @@ components:
         - weave-adapters:not-found
         - weave-adapters:method-not-allowed
         - weave-adapters:internal
+        - weave-adapters:backend-unavailable
+        - weave-adapters:backend-timeout
+        - weave-adapters:backend-error
 

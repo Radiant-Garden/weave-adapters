@@ -9,8 +9,8 @@
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
 | remoteAddr | string | true | Client address. |
 | requestId | string | true | Correlation ID (X-Request-Id). |
 | method | string | true | HTTP method. |
@@ -66,8 +66,8 @@
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
 | remoteAddr | string | true | Client address. |
 
 **Client response**
@@ -89,8 +89,8 @@
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
 | remoteAddr | string | true | Client address. |
 | scheme | string | false | The scheme the caller presented, truncated; "(none)" when the header had no scheme. Never the credential. |
 
@@ -113,8 +113,8 @@
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
 | remoteAddr | string | true | Client address. |
 
 **Client response**
@@ -136,8 +136,8 @@
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
 | remoteAddr | string | true | Client address. |
 | label | string | true | Label of the expired token. |
 | expiredAt | string | true | When the token expired (RFC 3339). |
@@ -161,8 +161,8 @@
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
 | remoteAddr | string | true | Client address. |
 | resource | string | true | The resource that was not found. |
 
@@ -185,8 +185,8 @@
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
 | remoteAddr | string | true | Client address. |
 | error | string | true | The internal error. Never sent to the client. |
 
@@ -209,8 +209,8 @@
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
 | remoteAddr | string | true | Client address. |
 | method | string | true | The method the caller used. |
 | allow | string | false | The methods the route does accept. |
@@ -234,8 +234,8 @@
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| subject | string | false | Authenticated caller (empty until auth lands). |
-| role | string | false | Caller role (empty until auth). |
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
 | remoteAddr | string | true | Client address. |
 | fields | string | true | Comma-separated names of the fields that failed. The per-field messages are in the response body's errors[]. |
 
@@ -263,6 +263,78 @@
 **Example:** `{"eventId":"BACKEND-101","data":{"operation":"listScopes","error":"dhcp backend unavailable: powershell exited 1: Get-DhcpServerv4Scope : Access is denied."}}`
 
 **Troubleshooting:** Scopes cannot be read, so /api/v1/scopes fails and the dhcp-server health component reports unavailable. Reproduce with: powershell.exe -NoProfile -NonInteractive -Command "Get-DhcpServerv4Scope". Likely causes: the RSAT-DHCP feature is not installed, so the DhcpServer module is missing (Install-WindowsFeature RSAT-DHCP); the service account lacks DHCP read rights (add it to the DHCP Users group); or dhcp.server names a host that is unreachable or not running the DHCP Server role. A timeout instead suggests a slow or wedged host — raise dhcp.commandTimeout only after confirming the query is slow rather than hung. Escalate to the Windows server owner.
+
+## BACKEND-102 — request failed: dhcp backend unavailable
+
+- **Level:** WARN
+- **Category / Topic:** BACKEND / Calls
+- **External source:** yes
+- **Description:** Emitted when a request could not be served because the backend was unreachable — the shell would not run, or it exited non-zero. Backs the client-facing response; the cause is on the BACKEND-101 line emitted for the same failure, which carries the shell's own stderr.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
+| remoteAddr | string | true | Client address. |
+| operation | string | true | Which backend call failed (listScopes). |
+
+**Client response**
+
+- **Problem type:** `weave-adapters:backend-unavailable`
+- **Detail:** The DHCP server could not be reached.
+- **Impacts:** `request_rejected`
+
+**Example:** `{"eventId":"BACKEND-102","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/scopes"},"data":{"operation":"listScopes"}}`
+
+**Troubleshooting:** Same causes as BACKEND-101: the RSAT-DHCP feature is missing, the service account lacks DHCP read rights, or dhcp.server names an unreachable host. The dhcp-server health component reports unavailable for the same reason, so check /api/v1/health first — if it is also failing, this is an outage rather than a request-specific fault.
+
+## BACKEND-103 — request failed: dhcp backend timed out
+
+- **Level:** WARN
+- **Category / Topic:** BACKEND / Calls
+- **External source:** yes
+- **Description:** Emitted when a request could not be served because the backend exceeded dhcp.commandTimeout. Backs the client-facing response; the cause is on the BACKEND-101 line emitted for the same failure, which carries the shell's own stderr.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
+| remoteAddr | string | true | Client address. |
+| operation | string | true | Which backend call failed (listScopes). |
+
+**Client response**
+
+- **Problem type:** `weave-adapters:backend-timeout`
+- **Detail:** The DHCP server did not respond in time.
+- **Impacts:** `request_rejected`
+
+**Example:** `{"eventId":"BACKEND-103","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/scopes"},"data":{"operation":"listScopes"}}`
+
+**Troubleshooting:** A slow or wedged host rather than a broken one. Time the query directly before touching config: Measure-Command { Get-DhcpServerv4Scope }. Raise dhcp.commandTimeout only if the query is genuinely slow — raising it to cover a hung host just makes every request hang longer. Note that dhcp.probeTimeout must stay below it.
+
+## BACKEND-104 — request failed: dhcp backend returned malformed output
+
+- **Level:** WARN
+- **Category / Topic:** BACKEND / Calls
+- **External source:** yes
+- **Description:** Emitted when a request could not be served because the backend exited zero but its output could not be decoded — including empty output, a bare null, and a scope with no usable scopeId. Backs the client-facing response; the cause is on the BACKEND-101 line emitted for the same failure, which carries the shell's own stderr.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
+| remoteAddr | string | true | Client address. |
+| operation | string | true | Which backend call failed (listScopes). |
+
+**Client response**
+
+- **Problem type:** `weave-adapters:backend-error`
+- **Detail:** The DHCP server returned a response the adapter could not read.
+- **Impacts:** `request_rejected`
+
+**Example:** `{"eventId":"BACKEND-104","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET","path":"/api/v1/scopes"},"data":{"operation":"listScopes"}}`
+
+**Troubleshooting:** This one is an adapter or environment defect rather than a permissions problem, because the shell reported success. Reproduce with the projection the client sends and inspect the raw bytes. Likely causes: a PowerShell profile writing to stdout despite -NoProfile, a -Depth regression serializing nested values as "System.Object[]", or an output encoding that mangles non-ASCII scope names. The BACKEND-101 line for the same failure carries the decode error itself.
 
 ## DHCP-001 — dhcp adapter identity resolved
 

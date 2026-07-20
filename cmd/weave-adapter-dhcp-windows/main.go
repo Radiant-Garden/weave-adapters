@@ -2,9 +2,9 @@
 // Windows Server DHCP behind the uniform weave-adapters HTTP API.
 //
 // It serves GET /api/v1/health — whose dhcp-server component runs a real scope
-// query against the backend — and GET /openapi.yaml, which returns the
-// contract the resource endpoints are being built to satisfy. The scopes
-// resource itself is the next phase.
+// query against the backend — GET /openapi.yaml, which returns the contract the
+// resource endpoints satisfy, and GET /api/v1/scopes, the first real resource:
+// authenticated, ETagged and cursor-paginated.
 //
 // Logging goes through the cataloged events system (see internal/core/events);
 // the HTTP server emits its own lifecycle events, so main only marks startup.
@@ -27,6 +27,7 @@ import (
 	adapterevents "github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/auth"
 	"github.com/radiantgarden/weave-adapters/internal/core/config"
+	"github.com/radiantgarden/weave-adapters/internal/core/etag"
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 	"github.com/radiantgarden/weave-adapters/internal/core/health"
@@ -158,13 +159,25 @@ func run(ctx context.Context, args []string) error {
 	backend := dhcpwindows.NewClient(adapterCfg)
 	probe := dhcpwindows.NewProbe(backend, adapterCfg)
 
-	// The spec is supplied here for the same reason the config spec is: this is
-	// the one place that knows which adapter this binary is. httpserver is core
-	// and must never import an adapter, so the document arrives as bytes.
+	// The spec and the routes are supplied here for the same reason the config
+	// spec is: this is the one place that knows which adapter this binary is.
+	// httpserver is core and must never import an adapter, so the document
+	// arrives as bytes and the routes as values.
+	//
+	// etag.Conditional wraps the handler rather than the chain. It buffers the
+	// response to hash it, which is right for a JSON collection and wrong for a
+	// stream, so the choice belongs to whoever writes the handler — and a list
+	// weave polls is exactly the case a 304 saves the most work on.
+	scopes := etag.Conditional(dhcpwindows.NewScopesHandler(backend, adapterCfg))
+
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	srv := httpserver.New(addr, health.NewHandler(version, started, probe),
 		httpserver.WithInnerMiddleware(authMiddleware...),
 		httpserver.WithOpenAPISpec(apispec.Spec()),
+		httpserver.WithRoutes(httpserver.Route{
+			Pattern: "GET " + dhcpwindows.ScopesPath,
+			Handler: scopes,
+		}),
 	)
 
 	return srv.Run(ctx)
