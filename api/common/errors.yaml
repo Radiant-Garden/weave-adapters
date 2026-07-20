@@ -109,12 +109,13 @@ components:
         codes are live: an adapter maps its backend'''s failures onto them, so a
         client sees backend-unavailable or backend-error with a 502 and
         backend-timeout with a 504 rather than one indistinguishable 500. The
-        rest of the taxonomy in 02-shared-core.md (conflict,
-        precondition-failed) still arrives with the code that emits it.
+        rest of the taxonomy in 02-shared-core.md (precondition-failed) still
+        arrives with the code that emits it.
 
         payload-too-large and unsupported-media-type are request-body
         rejections, raised before a body is decoded and so before any handler
-        sees it.
+        sees it. conflict is raised by a handler that found the resource it was
+        asked to create already there.
       enum:
         - weave-adapters:validation-failed
         - weave-adapters:unauthorized
@@ -123,6 +124,7 @@ components:
         - weave-adapters:internal
         - weave-adapters:payload-too-large
         - weave-adapters:unsupported-media-type
+        - weave-adapters:conflict
         - weave-adapters:backend-unavailable
         - weave-adapters:backend-timeout
         - weave-adapters:backend-error

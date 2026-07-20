@@ -384,6 +384,30 @@
 
 **Troubleshooting:** This one is an adapter or environment defect rather than a permissions problem, because the shell reported success. Reproduce with the projection the client sends and inspect the raw bytes. Likely causes: a PowerShell profile writing to stdout despite -NoProfile, a -Depth regression serializing nested values as "System.Object[]", or an output encoding that mangles non-ASCII scope names. The BACKEND-101 line for the same failure carries the decode error itself.
 
+## BACKEND-105 — request rejected: scope already exists
+
+- **Level:** DEBUG
+- **Category / Topic:** BACKEND / Calls
+- **External source:** yes
+- **Description:** Emitted when a create names a subnet that already holds a scope. Windows permits exactly one scope per subnet, so this is the backend answering correctly rather than failing — there is no BACKEND-101 line for it.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
+| remoteAddr | string | true | Client address. |
+| scopeId | string | true | The subnet that already holds a scope. |
+
+**Client response**
+
+- **Problem type:** `weave-adapters:conflict`
+- **Detail:** A scope already exists on subnet {{scopeId}}.
+- **Impacts:** `request_rejected`
+
+**Example:** `{"eventId":"BACKEND-105","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"POST","path":"/api/v1/scopes"},"data":{"scopeId":"10.0.30.0"}}`
+
+**Troubleshooting:** Not a fault. The caller asked for a subnet that is already scoped; the answer is to update the existing scope rather than create a second one, which Windows would refuse anyway. GET /api/v1/scopes?scopeId=<subnet> returns the one that is there. Note the pre-create check is not atomic: two creates racing on one subnet can both pass it, and the loser surfaces as a backend error rather than as this event.
+
 ## DHCP-001 — dhcp adapter identity resolved
 
 - **Level:** INFO

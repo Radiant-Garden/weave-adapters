@@ -168,16 +168,33 @@ func run(ctx context.Context, args []string) error {
 	// response to hash it, which is right for a JSON collection and wrong for a
 	// stream, so the choice belongs to whoever writes the handler — and a list
 	// weave polls is exactly the case a 304 saves the most work on.
-	scopes := etag.Conditional(dhcpwindows.NewScopesHandler(backend, adapterCfg))
+	// One handler serves both methods on the collection, so it is wrapped once
+	// and mounted twice. etag.Conditional passes non-GET straight through
+	// untouched, so wrapping it does not put an ETag on the 201.
+	scopes := etag.Conditional(dhcpwindows.NewScopesHandler(backend, adapterCfg, cfg.MaxRequestBodyBytes))
+	scope := etag.Conditional(dhcpwindows.NewScopeHandler(backend))
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 	srv := httpserver.New(addr, health.NewHandler(version, started, probe),
 		httpserver.WithInnerMiddleware(authMiddleware...),
 		httpserver.WithOpenAPISpec(apispec.Spec()),
-		httpserver.WithRoutes(httpserver.Route{
-			Pattern: "GET " + dhcpwindows.ScopesPath,
-			Handler: scopes,
-		}),
+		httpserver.WithRoutes(
+			httpserver.Route{
+				Pattern: "GET " + dhcpwindows.ScopesPath,
+				Handler: scopes,
+			},
+			httpserver.Route{
+				Pattern: "POST " + dhcpwindows.ScopesPath,
+				Handler: scopes,
+			},
+			// Mounted with POST rather than after it, because a create's
+			// Location header points here and a 201 pointing at a 404 tells a
+			// client the create did not happen.
+			httpserver.Route{
+				Pattern: "GET " + dhcpwindows.ScopeItemPath,
+				Handler: scope,
+			},
+		),
 	)
 
 	return srv.Run(ctx)

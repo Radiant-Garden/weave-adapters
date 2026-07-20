@@ -29,16 +29,20 @@ var ErrScopeExists = errors.New("a scope already exists on that subnet")
 //
 // The optional fields are zero-valued when omitted, and a zero value means
 // "let Windows apply its own default" rather than a value this adapter chose.
+// The JSON tags are the request body's contract, and they are hand-written for
+// the same reason Scope's are: the generated ScopeCreate is compared against
+// this struct by a conformance test rather than imported, which keeps the
+// adapter free of a dependency on its own generated code.
 type ScopeInput struct {
-	Name       string
-	StartRange string
-	EndRange   string
-	SubnetMask string
+	Name       string `json:"name"`
+	StartRange string `json:"startRange"`
+	EndRange   string `json:"endRange"`
+	SubnetMask string `json:"subnetMask"`
 
-	Description          string
-	LeaseDurationSeconds int
-	State                string
-	Type                 string
+	Description          string `json:"description,omitempty"`
+	LeaseDurationSeconds int    `json:"leaseDurationSeconds,omitempty"`
+	State                string `json:"state,omitempty"`
+	Type                 string `json:"type,omitempty"`
 }
 
 // Scope states and types Windows accepts. Validated here rather than left to
@@ -210,9 +214,16 @@ func (c *Client) CreateScope(ctx context.Context, in ScopeInput) (Scope, error) 
 
 	// The subnet was already taken. Checked before the create rather than
 	// classified from a localized error message; see createScopeScript.
+	//
+	// Returned without backendError, deliberately: that emits BACKEND-101 at
+	// ERROR with "dhcp backend call failed", and nothing failed here. The shell
+	// ran, the check ran, and the answer was "taken" — a normal outcome of a
+	// client asking for a scope that already exists. Logging it as a backend
+	// error would alert an operator to ordinary client behaviour and point them
+	// at a DHCP server that is working. BACKEND-105 is the only line this
+	// deserves, and the handler emits it with the response.
 	if isConflict(stdout) {
-		return Scope{}, c.backendError(ctx, opCreateScope,
-			fmt.Errorf("%w: %s", ErrScopeExists, scopeID))
+		return Scope{}, fmt.Errorf("%w: %s", ErrScopeExists, scopeID)
 	}
 
 	scopes, err := decodeScopes(stdout, stderr)

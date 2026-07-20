@@ -18,6 +18,7 @@ Tested:
 	  - TestScope_ShouldMatchTheHandWrittenStruct: generated Scope and dhcpwindows.Scope carry the same JSON fields.
 	  - TestScopeCreate_ShouldNotAcceptDerivedFields: a client cannot assert scopeId, wadaptId, addressFamily or superscopeName.
 	  - TestScopeCreate_ShouldBeASubsetOfTheServedScope: every field a client may send comes back under the same name and shape.
+	  - TestScopeCreate_ShouldMatchTheHandWrittenInput: the spec and adapter.ScopeInput agree field for field — the handler decodes into it and rejects unknown fields, so a drift here 400s a spec-conformant client.
 	  - TestScope_ShouldRoundTripThroughTheHandWrittenStruct: a populated scope survives both types byte-identically.
 	  - TestScopeList_ShouldMatchTheSharedPageEnvelope: the adapter's list schema is the shared envelope with a concrete item.
 	  - TestHealthResponse_ShouldMatchTheHandWrittenStruct: same for the health shape, including its component entries.
@@ -195,6 +196,21 @@ func TestScopeCreate_ShouldBeASubsetOfTheServedScope(t *testing.T) {
 		require.Contains(t, served, name, "ScopeCreate.%s has no counterpart on Scope", name)
 		assert.Equal(t, served[name].Kind, field.Kind, "%s changes type between create and read", name)
 	}
+}
+
+func TestScopeCreate_ShouldMatchTheHandWrittenInput(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE / ACT
+	generated := jsonshape.Of(t, ScopeCreate{})
+	handWritten := jsonshape.Of(t, adapter.ScopeInput{})
+
+	// ASSERT — the create handler decodes straight into adapter.ScopeInput, so
+	// this struct *is* the request contract. A field the spec promises and the
+	// input does not carry is worse than a mismatch on the read side: the
+	// handler rejects unknown fields, so a client following the published spec
+	// would get a 400 for a field the document told it to send.
+	assert.Equal(t, handWritten, generated)
 }
 
 func TestScope_ShouldMatchTheHandWrittenStruct(t *testing.T) {

@@ -13,6 +13,7 @@ import (
 	adapterevents "github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows/events"
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 	"github.com/radiantgarden/weave-adapters/internal/core/pagination"
+	"github.com/radiantgarden/weave-adapters/internal/core/requestbody"
 )
 
 // ScopesPath is the collection route, mounted by the binary.
@@ -38,32 +39,127 @@ type scopeLister interface {
 	ListScopes(ctx context.Context) ([]Scope, error)
 }
 
-// ScopesHandler serves GET /api/v1/scopes.
+// scopeCreator is the write half, declared separately so the read handlers
+// cannot reach it. The collection handler embeds both because it serves both
+// methods; ScopeHandler takes only the reader, which is what stops a future
+// edit to the item route from growing a write.
+type scopeCreator interface {
+	CreateScope(ctx context.Context, in ScopeInput) (Scope, error)
+}
+
+// scopeBackend is what the collection handler needs: it lists on GET and
+// creates on POST.
+type scopeBackend interface {
+	scopeLister
+	scopeCreator
+}
+
+// ScopesHandler serves GET and POST /api/v1/scopes.
 type ScopesHandler struct {
-	backend scopeLister
+	backend scopeBackend
 	pages   pagination.Paginator
+	// maxBodyBytes bounds a create body. It comes from core config rather than
+	// the adapter's own, because the limit is a property of the server and not
+	// of DHCP.
+	maxBodyBytes int
 }
 
 // NewScopesHandler returns the collection handler, paginated per the adapter's
-// configured page sizes.
+// configured page sizes and bounded by the core body limit.
 //
 // It panics on an unusable page-size configuration, via pagination.New. Config
 // validation rejects those values before this is reached in the binary, so a
 // panic here means a handler built directly in a test.
-func NewScopesHandler(backend scopeLister, cfg Config) *ScopesHandler {
+func NewScopesHandler(backend scopeBackend, cfg Config, maxBodyBytes int) *ScopesHandler {
 	return &ScopesHandler{
-		backend: backend,
-		pages:   pagination.New(paginationScope, cfg.DefaultPageSize, cfg.MaxPageSize),
+		backend:      backend,
+		pages:        pagination.New(paginationScope, cfg.DefaultPageSize, cfg.MaxPageSize),
+		maxBodyBytes: maxBodyBytes,
 	}
 }
 
 // ServeHTTP is the single place this handler turns an error into a response,
 // and it does so by delegating: apierror.WriteError is the one function that
 // both logs and responds. Everything below returns an error instead.
+//
+// The method switch is here rather than in the mux because both methods live on
+// one pattern and share the handler's state. A method the routes do not mount
+// never reaches this, so the default is unreachable from the binary — it exists
+// so a handler mounted directly in a test cannot silently serve a list for a
+// DELETE.
 func (h *ScopesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if err := h.list(w, r); err != nil {
+	var err error
+
+	switch r.Method {
+	case http.MethodPost:
+		err = h.create(w, r)
+	default:
+		err = h.list(w, r)
+	}
+
+	if err != nil {
 		apierror.WriteError(w, r, err)
 	}
+}
+
+// create decodes a scope, creates it, and answers 201 with the new resource.
+//
+// Validation runs before the backend is touched: a malformed input is the
+// client's to fix, and spawning a PowerShell process to be told so wastes a
+// second and puts a failed create in the DHCP server's own logs.
+func (h *ScopesHandler) create(w http.ResponseWriter, r *http.Request) error {
+	var in ScopeInput
+	if err := requestbody.Decode(w, r, h.maxBodyBytes, &in); err != nil {
+		return err
+	}
+
+	if fieldErrors := in.Validate(); len(fieldErrors) > 0 {
+		return apierror.Validation(fieldErrors...)
+	}
+
+	scope, err := h.backend.CreateScope(r.Context(), in)
+	if err != nil {
+		return createProblemFor(err, in)
+	}
+
+	// Location must resolve, which is why the item route ships with this one.
+	// A 201 pointing at a 404 is worse than no header: a client that follows it
+	// concludes the create did not happen.
+	w.Header().Set("Location", ScopesPath+"/"+scope.WadaptID)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+
+	_ = json.NewEncoder(w).Encode(scope)
+
+	return nil
+}
+
+// createProblemFor maps a create failure, which has one outcome list does not.
+//
+// A conflict is a 409 rather than a backend code: the backend answered
+// correctly and the answer was "that subnet is taken". It is also the one
+// failure here a client can act on without an operator — the fix is to update
+// the scope that is already there.
+//
+// The subnet is recomputed from the input rather than parsed out of the error
+// string. Both name the same value — CreateScope derives it the same way — and
+// deriving it is the option that cannot break when someone rewords the error.
+func createProblemFor(err error, in ScopeInput) error {
+	if errors.Is(err, ErrScopeExists) {
+		// The subnet reaches the client, because "a scope already exists" with
+		// no subnet named is unactionable when a client is reconciling several.
+		// It is the client's own input echoed back, not internal state.
+		//
+		// The error is ignored: reaching a conflict means CreateScope already
+		// derived this successfully, so it cannot fail here. An empty string
+		// would render a detail naming no subnet, which is the pre-existing
+		// behaviour rather than a new failure.
+		scopeID, _ := in.ScopeID()
+
+		return apierror.New(adapterevents.BACKEND105, "scopeId", scopeID).WithCause(err)
+	}
+
+	return problemFor(err, opCreateScope)
 }
 
 // list resolves the query, reads the backend, and writes one page.
@@ -77,7 +173,7 @@ func (h *ScopesHandler) list(w http.ResponseWriter, r *http.Request) error {
 
 	scopes, err := h.backend.ListScopes(r.Context())
 	if err != nil {
-		return problemFor(err)
+		return problemFor(err, opListScopes)
 	}
 
 	// Filter before paging, so pageSize counts matching scopes rather than
@@ -262,16 +358,18 @@ func (h *ScopesHandler) paginate(
 // and these carry raw PowerShell stderr, which can name internal hosts and
 // paths. It reaches the operator through WithCause and through BACKEND-101,
 // which is where it belongs; the client gets the curated ResponseDetail.
-func problemFor(err error) error {
+// operation names which backend call failed, so the diagnostic says whether a
+// list or a create was in flight.
+func problemFor(err error, operation string) error {
 	switch {
 	case errors.Is(err, ErrBackendTimeout):
-		return apierror.New(adapterevents.BACKEND103, "operation", opListScopes).WithCause(err)
+		return apierror.New(adapterevents.BACKEND103, "operation", operation).WithCause(err)
 
 	case errors.Is(err, ErrBackendUnavailable):
-		return apierror.New(adapterevents.BACKEND102, "operation", opListScopes).WithCause(err)
+		return apierror.New(adapterevents.BACKEND102, "operation", operation).WithCause(err)
 
 	case errors.Is(err, ErrBackendMalformed):
-		return apierror.New(adapterevents.BACKEND104, "operation", opListScopes).WithCause(err)
+		return apierror.New(adapterevents.BACKEND104, "operation", operation).WithCause(err)
 
 	default:
 		// ErrDuplicateWadaptID lands here, as does anything ListScopes grows

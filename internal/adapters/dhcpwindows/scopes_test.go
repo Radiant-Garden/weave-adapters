@@ -27,11 +27,26 @@ Tested:
 	problemFor
 	  - TestScopes_ShouldMapBackendFailuresToTheirOwnStatusCodes: unavailable 502, timeout 504, malformed 502, duplicate 500.
 	  - TestScopes_ShouldNotLeakTheBackendMessageToTheClient: stderr reaches the log, never the body.
+	ScopesHandler.create
+	  - TestCreate_ShouldAnswer201WithTheCreatedScope: the success path, body carrying the derived identity.
+	  - TestCreate_ShouldPointLocationAtTheItemRoute: Location names the wadaptId, never the scopeId — the item route is keyed by identity.
+	  - TestCreate_ShouldPassTheDecodedInputToTheBackend: the optional fields survive JSON, which is what ScopeInput's wire tags exist for.
+	  - TestCreate_ShouldRejectAnInvalidInputBeforeTouchingTheBackend: 400 with every failure at once, and zero backend calls.
+	  - TestCreate_ShouldAnswer409WhenTheSubnetIsTaken: a conflict, not a backend code, and the subnet reaches the client.
+	  - TestCreate_ShouldMapBackendFailuresTheSameWayListDoes: the distinction weave reads survives the write path too.
+	  - TestCreate_ShouldRejectABodyThatIsNotJSON: proof the create path is wired through requestbody at all.
+	  - TestCreate_ShouldRejectAnAttemptToAssertTheDerivedIdentity: sending wadaptId is a 400, not a silent drop.
 	the ETag pairing
 	  - TestScopes_ShouldAnswer304WhenTheRepresentationIsUnchanged: a re-GET with If-None-Match.
 	  - TestScopes_ShouldKeepAFullPageUnderTheEtagBufferLimit: maxPageSize cannot silently cost the 304.
 
 Tested elsewhere:
+
+	The body-limit, media-type and malformed-JSON rejections belong to
+	internal/core/requestbody and are tested there. This file asserts only that
+	the create path delegates to it.
+
+	ScopeInput's validation rules: create_test.go. The item route: scope_item_test.go.
 
 	Sorting and the duplicate-ID rejection belong to ListScopes and are tested in
 	client_test.go; this file takes a sorted listing as given, because that is
@@ -69,6 +84,7 @@ package dhcpwindows
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -95,6 +111,24 @@ type fakeLister struct {
 	// calls counts invocations, so a test can assert the handler reads the
 	// backend once per request rather than once per page of output.
 	calls int
+
+	// created records the input the last CreateScope received, so a test can
+	// assert what the handler passed through rather than only what came back.
+	created ScopeInput
+	// createScope, when set, answers CreateScope. Nil means the fake was built
+	// for a read test and a create reaching it is the test's own mistake.
+	createScope func(ScopeInput) (Scope, error)
+}
+
+func (f *fakeLister) CreateScope(_ context.Context, in ScopeInput) (Scope, error) {
+	f.calls++
+	f.created = in
+
+	if f.createScope == nil {
+		return Scope{}, errors.New("createScope not configured for this fake")
+	}
+
+	return f.createScope(in)
 }
 
 func (f *fakeLister) ListScopes(context.Context) ([]Scope, error) {
@@ -106,6 +140,11 @@ func (f *fakeLister) ListScopes(context.Context) ([]Scope, error) {
 
 	return f.scopes, nil
 }
+
+// testMaxBodyBytes is generous relative to every body in this file, so a test
+// that is not about the size limit never trips it. requestbody owns the limit's
+// own behaviour.
+const testMaxBodyBytes = 64 * 1024
 
 // testPageConfig is the page-size configuration under test. Small enough that a
 // handful of scopes spans several pages without a large fixture.
@@ -197,7 +236,7 @@ func TestScopes_ShouldServeAPageOfScopes(t *testing.T) {
 
 	// ARRANGE
 	scopes := scopesFor(t, "10.0.1.0", "10.0.2.0")
-	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, 500))
+	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, 500), testMaxBodyBytes)
 
 	// ACT
 	rec := getScopes(t, handler, "")
@@ -225,7 +264,7 @@ func TestScopes_ShouldRenderAnEmptyCollectionAsAnArray(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE — a freshly provisioned server with no scopes yet.
-	handler := NewScopesHandler(&fakeLister{scopes: []Scope{}}, testPageConfig(50, 500))
+	handler := NewScopesHandler(&fakeLister{scopes: []Scope{}}, testPageConfig(50, 500), testMaxBodyBytes)
 
 	// ACT
 	rec := getScopes(t, handler, "")
@@ -245,7 +284,7 @@ func TestScopes_ShouldWalkEveryScopeExactlyOnceViaNextPageUrl(t *testing.T) {
 	// way cannot be paged by weave at all.
 	scopes := scopesFor(t, "10.0.1.0", "10.0.2.0", "10.0.3.0", "10.0.4.0", "10.0.5.0")
 	backend := &fakeLister{scopes: scopes}
-	handler := NewScopesHandler(backend, testPageConfig(2, 500))
+	handler := NewScopesHandler(backend, testPageConfig(2, 500), testMaxBodyBytes)
 
 	// ACT — walk from the first page, following only what the server hands back.
 	var (
@@ -304,7 +343,7 @@ func TestScopes_ShouldOrderByWadaptIdNotScopeId(t *testing.T) {
 		byScopeID[i] = s.ScopeID
 	}
 
-	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, 500))
+	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, 500), testMaxBodyBytes)
 
 	// ACT
 	decoded := getPage(t, handler, "")
@@ -335,7 +374,7 @@ func TestScopes_ShouldStopWithoutCursorsOnTheLastPage(t *testing.T) {
 	// cursor here would send a client after a page that does not exist, and its
 	// presence rather than a short page is what tells a client to continue.
 	scopes := scopesFor(t, "10.0.1.0", "10.0.2.0")
-	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(2, 500))
+	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(2, 500), testMaxBodyBytes)
 
 	// ACT
 	decoded := getPage(t, handler, "")
@@ -351,7 +390,7 @@ func TestScopes_ShouldClampPageSizeToTheConfiguredMaximum(t *testing.T) {
 
 	// ARRANGE
 	scopes := scopesFor(t, "10.0.1.0", "10.0.2.0", "10.0.3.0", "10.0.4.0")
-	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(2, 3))
+	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(2, 3), testMaxBodyBytes)
 
 	// ACT — well over the maximum.
 	decoded := getPage(t, handler, "pageSize=1000")
@@ -367,7 +406,7 @@ func TestScopes_ShouldFilterByScopeId(t *testing.T) {
 
 	// ARRANGE
 	scopes := scopesFor(t, "10.0.1.0", "10.0.2.0", "10.0.3.0")
-	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, 500))
+	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, 500), testMaxBodyBytes)
 
 	// ACT
 	decoded := getPage(t, handler, "scopeId=10.0.2.0")
@@ -392,7 +431,7 @@ func TestScopes_ShouldNotMutateTheCollectionWhenFiltering(t *testing.T) {
 	// that caused it.
 	scopes := scopesFor(t, "10.0.1.0", "10.0.2.0", "10.0.3.0")
 	backend := &fakeLister{scopes: scopes}
-	handler := NewScopesHandler(backend, testPageConfig(50, 500))
+	handler := NewScopesHandler(backend, testPageConfig(50, 500), testMaxBodyBytes)
 
 	before := make([]string, len(backend.scopes))
 	for i, s := range backend.scopes {
@@ -431,7 +470,7 @@ func TestScopes_ShouldCarryQueryParametersIntoNextPageUrl(t *testing.T) {
 	// parameter dropped from nextPageUrl silently changes what later pages
 	// contain.
 	scopes := scopesFor(t, "10.0.1.0", "10.0.2.0", "10.0.3.0")
-	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(1, 500))
+	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(1, 500), testMaxBodyBytes)
 
 	// ACT
 	first := getPage(t, handler, "pageSize=1")
@@ -464,7 +503,7 @@ func TestScopes_ShouldRejectAnAmbiguouslySpelledFilter(t *testing.T) {
 
 	// ARRANGE — a leading-zero spelling of an address the collection holds.
 	scopes := scopesFor(t, "10.0.0.0")
-	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, 500))
+	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, 500), testMaxBodyBytes)
 
 	// ACT
 	rec := getScopes(t, handler, "scopeId=010.000.000.000")
@@ -490,7 +529,7 @@ func TestScopes_ShouldRejectAMalformedScopeIdFilter(t *testing.T) {
 
 	// ARRANGE
 	scopes := scopesFor(t, "10.0.1.0")
-	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, 500))
+	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, 500), testMaxBodyBytes)
 
 	// ACT — not an address, so it can never match anything in this collection.
 	resp := getScopes(t, handler, "scopeId=not-an-address")
@@ -521,7 +560,7 @@ func TestScopes_ShouldReportEveryQueryFailureAtOnce(t *testing.T) {
 
 	// ARRANGE
 	scopes := scopesFor(t, "10.0.1.0")
-	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, 500))
+	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, 500), testMaxBodyBytes)
 
 	// ACT — both parameters wrong in one request.
 	resp := getScopes(t, handler, "pageSize=abc&scopeId=nope")
@@ -588,7 +627,7 @@ func TestScopes_ShouldMapBackendFailuresToTheirOwnStatusCodes(t *testing.T) {
 			rec := eventstest.NewRecorder()
 			t.Cleanup(rec.Install())
 
-			handler := NewScopesHandler(&fakeLister{err: tt.err}, testPageConfig(50, 500))
+			handler := NewScopesHandler(&fakeLister{err: tt.err}, testPageConfig(50, 500), testMaxBodyBytes)
 
 			// ACT
 			resp := getScopes(t, handler, "")
@@ -619,7 +658,7 @@ func TestScopes_ShouldNotLeakTheBackendMessageToTheClient(t *testing.T) {
 
 	handler := NewScopesHandler(
 		&fakeLister{err: fmt.Errorf("%w: powershell exited 1: %s", ErrBackendUnavailable, internalDetail)},
-		testPageConfig(50, 500),
+		testPageConfig(50, 500), testMaxBodyBytes,
 	)
 
 	// ACT
@@ -646,7 +685,7 @@ func TestScopes_ShouldAnswer304WhenTheRepresentationIsUnchanged(t *testing.T) {
 	// work on, so this is the combination worth asserting rather than either
 	// half alone.
 	scopes := scopesFor(t, "10.0.1.0", "10.0.2.0")
-	handler := etag.Conditional(NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, 500)))
+	handler := etag.Conditional(NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, 500), testMaxBodyBytes))
 
 	// ACT
 	first := getScopes(t, handler, "")
@@ -691,7 +730,7 @@ func TestScopes_ShouldKeepAFullPageUnderTheEtagBufferLimit(t *testing.T) {
 		scopes[i].SuperscopeName = strings.Repeat("s", 255)
 	}
 
-	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, maxPageSize))
+	handler := NewScopesHandler(&fakeLister{scopes: scopes}, testPageConfig(50, maxPageSize), testMaxBodyBytes)
 
 	// ACT
 	resp := getScopes(t, handler, fmt.Sprintf("pageSize=%d", maxPageSize))
@@ -714,7 +753,7 @@ func TestProblemFor_ShouldPreserveTheCauseForTheOperator(t *testing.T) {
 	cause := fmt.Errorf("%w: powershell exited 1", ErrBackendUnavailable)
 
 	// ACT
-	mapped := problemFor(cause)
+	mapped := problemFor(cause, opListScopes)
 
 	// ASSERT — the cause stays reachable through errors.Is, so the operator log
 	// keeps what the response drops. Losing it here would leave the 502 with no
@@ -727,4 +766,221 @@ func TestProblemFor_ShouldPreserveTheCauseForTheOperator(t *testing.T) {
 	// read into a 500.
 	var apiErr *apierror.Error
 	require.ErrorAs(t, mapped, &apiErr)
+}
+
+// postScope drives the handler with a JSON body and the correct media type.
+func postScope(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, ScopesPath, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	return rec
+}
+
+// mustJSON renders a value as a request body.
+func mustJSON(t *testing.T, v any) string {
+	t.Helper()
+
+	encoded, err := json.Marshal(v)
+	require.NoError(t, err)
+
+	return string(encoded)
+}
+
+func TestCreate_ShouldAnswer201WithTheCreatedScope(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the backend answers with the scope as it now exists.
+	created := scopesFor(t, "10.0.30.0")[0]
+	backend := &fakeLister{createScope: func(ScopeInput) (Scope, error) { return created, nil }}
+	handler := NewScopesHandler(backend, testPageConfig(50, 500), testMaxBodyBytes)
+
+	// ACT
+	rec := postScope(t, handler, mustJSON(t, validInput()))
+
+	// ASSERT
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var got Scope
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, created.WadaptID, got.WadaptID)
+	assert.Equal(t, "10.0.30.0", got.ScopeID)
+}
+
+func TestCreate_ShouldPointLocationAtTheItemRoute(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	created := scopesFor(t, "10.0.30.0")[0]
+	backend := &fakeLister{createScope: func(ScopeInput) (Scope, error) { return created, nil }}
+	handler := NewScopesHandler(backend, testPageConfig(50, 500), testMaxBodyBytes)
+
+	// ACT
+	rec := postScope(t, handler, mustJSON(t, validInput()))
+
+	// ASSERT — the header must name the wadaptId, not the scopeId: the item
+	// route is keyed by identity, so a Location built from the subnet would 404.
+	require.Equal(t, http.StatusCreated, rec.Code)
+	assert.Equal(t, ScopesPath+"/"+created.WadaptID, rec.Header().Get("Location"))
+	assert.NotContains(t, rec.Header().Get("Location"), created.ScopeID)
+}
+
+func TestCreate_ShouldPassTheDecodedInputToTheBackend(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	created := scopesFor(t, "10.0.30.0")[0]
+	backend := &fakeLister{createScope: func(ScopeInput) (Scope, error) { return created, nil }}
+	handler := NewScopesHandler(backend, testPageConfig(50, 500), testMaxBodyBytes)
+
+	input := validInput()
+	input.Description = "created by weave"
+	input.LeaseDurationSeconds = 691200
+
+	// ACT
+	rec := postScope(t, handler, mustJSON(t, input))
+
+	// ASSERT — the optional fields survive the round trip through JSON, which is
+	// what the wire tags on ScopeInput exist to guarantee.
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, input, backend.created)
+}
+
+func TestCreate_ShouldRejectAnInvalidInputBeforeTouchingTheBackend(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a body that decodes cleanly and does not validate.
+	backend := &fakeLister{createScope: func(ScopeInput) (Scope, error) {
+		return Scope{}, errors.New("the backend must not be reached")
+	}}
+	handler := NewScopesHandler(backend, testPageConfig(50, 500), testMaxBodyBytes)
+
+	input := validInput()
+	input.Name = ""
+	input.SubnetMask = "255.255.0.255"
+
+	// ACT
+	rec := postScope(t, handler, mustJSON(t, input))
+
+	// ASSERT — 400, and the backend was never called: spawning PowerShell to be
+	// told the client's own body is wrong wastes a second and writes a failed
+	// create into the DHCP server's logs.
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Zero(t, backend.calls)
+
+	// Every failure at once, not just the first.
+	var problem apierror.Problem
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &problem))
+	assert.Len(t, problem.Errors, 2)
+}
+
+func TestCreate_ShouldAnswer409WhenTheSubnetIsTaken(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	backend := &fakeLister{createScope: func(ScopeInput) (Scope, error) {
+		return Scope{}, fmt.Errorf("%w: 10.0.30.0", ErrScopeExists)
+	}}
+	handler := NewScopesHandler(backend, testPageConfig(50, 500), testMaxBodyBytes)
+
+	// ACT
+	rec := postScope(t, handler, mustJSON(t, validInput()))
+
+	// ASSERT — a conflict, not a backend failure. The backend answered
+	// correctly; the answer was "taken".
+	require.Equal(t, http.StatusConflict, rec.Code)
+
+	var problem apierror.Problem
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &problem))
+	assert.Equal(t, "weave-adapters:conflict", problem.Type)
+
+	// The subnet reaches the client, or a caller reconciling several scopes
+	// cannot tell which one collided.
+	assert.Contains(t, problem.Detail, "10.0.30.0")
+}
+
+func TestCreate_ShouldMapBackendFailuresTheSameWayListDoes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+		wantType   string
+	}{
+		{"unavailable", ErrBackendUnavailable, http.StatusBadGateway, "weave-adapters:backend-unavailable"},
+		{"timeout", ErrBackendTimeout, http.StatusGatewayTimeout, "weave-adapters:backend-timeout"},
+		{"malformed", ErrBackendMalformed, http.StatusBadGateway, "weave-adapters:backend-error"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ARRANGE
+			backend := &fakeLister{createScope: func(ScopeInput) (Scope, error) {
+				return Scope{}, fmt.Errorf("%w: powershell exited 1", tc.err)
+			}}
+			handler := NewScopesHandler(backend, testPageConfig(50, 500), testMaxBodyBytes)
+
+			// ACT
+			rec := postScope(t, handler, mustJSON(t, validInput()))
+
+			// ASSERT — the distinction weave reads is the status code, so it has
+			// to survive the create path as it does the read path.
+			require.Equal(t, tc.wantStatus, rec.Code)
+
+			var problem apierror.Problem
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &problem))
+			assert.Equal(t, tc.wantType, problem.Type)
+		})
+	}
+}
+
+func TestCreate_ShouldRejectABodyThatIsNotJSON(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	backend := &fakeLister{createScope: func(ScopeInput) (Scope, error) {
+		return Scope{}, errors.New("the backend must not be reached")
+	}}
+	handler := NewScopesHandler(backend, testPageConfig(50, 500), testMaxBodyBytes)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, ScopesPath,
+		strings.NewReader(mustJSON(t, validInput())))
+	req.Header.Set("Content-Type", "text/plain")
+
+	rec := httptest.NewRecorder()
+
+	// ACT
+	handler.ServeHTTP(rec, req)
+
+	// ASSERT — the handler delegates to requestbody, which owns the rejection.
+	// Asserted here only to prove the create path is wired through it at all.
+	assert.Equal(t, http.StatusUnsupportedMediaType, rec.Code)
+	assert.Zero(t, backend.calls)
+}
+
+func TestCreate_ShouldRejectAnAttemptToAssertTheDerivedIdentity(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a client trying to choose the identity the server derives.
+	backend := &fakeLister{createScope: func(ScopeInput) (Scope, error) {
+		return Scope{}, errors.New("the backend must not be reached")
+	}}
+	handler := NewScopesHandler(backend, testPageConfig(50, 500), testMaxBodyBytes)
+
+	// ACT
+	rec := postScope(t, handler, `{"name":"lab","startRange":"10.0.30.10","endRange":"10.0.30.250",`+
+		`"subnetMask":"255.255.255.0","wadaptId":"chosen-by-the-client"}`)
+
+	// ASSERT — 400 rather than a silent drop. ScopeInput has no such field, so
+	// DisallowUnknownFields catches it; accepting and ignoring it would let a
+	// client believe it had set an identity the server was about to compute.
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Zero(t, backend.calls)
 }

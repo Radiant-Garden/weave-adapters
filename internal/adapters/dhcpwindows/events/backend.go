@@ -51,6 +51,8 @@ const (
 	BACKEND103 coreevents.EventID = "BACKEND-103"
 	// BACKEND104 backs a 502 when the backend answered unusably.
 	BACKEND104 coreevents.EventID = "BACKEND-104"
+	// BACKEND105 backs a 409 when the subnet already holds a scope.
+	BACKEND105 coreevents.EventID = "BACKEND-105"
 )
 
 func init() {
@@ -93,6 +95,48 @@ func init() {
 			"only after confirming the query is slow rather than hung. Escalate to the Windows server owner.",
 	})
 
+	// BACKEND105 is registered on its own rather than in responseEvents, because
+	// it differs in the two fields that table holds constant.
+	//
+	// Level: the others are Warn because they record that a request could not be
+	// served. This one records that it was served correctly with a "no" — an
+	// ordinary 4xx, which the guideline's severity table puts at Debug alongside
+	// API-900/902/903.
+	//
+	// Description: the others point at a BACKEND-101 line carrying the cause.
+	// There is none here, and saying so matters — an operator who goes looking
+	// for the companion ERROR line would find nothing and conclude the log had
+	// dropped it. The create path returns a conflict without emitting
+	// BACKEND-101, because nothing failed.
+	coreevents.Register(&coreevents.Event{
+		ID:              BACKEND105,
+		Level:           slog.LevelDebug,
+		MessageTemplate: "request rejected: scope already exists",
+		Description: "Emitted when a create names a subnet that already holds a scope. Windows permits exactly " +
+			"one scope per subnet, so this is the backend answering correctly rather than failing — there is no " +
+			"BACKEND-101 line for it.",
+		Category:       coreevents.CategoryBackend.String(),
+		Topic:          "Calls",
+		ExternalSource: true,
+
+		ResponseCode:   coreevents.CodeConflict,
+		ResponseDetail: "A scope already exists on subnet {{scopeId}}.",
+		Impacts:        []coreevents.Impact{coreevents.ImpactRequestRejected},
+
+		Fields: append(coreevents.CallerFields(), coreevents.FieldDef{
+			Name: "scopeId", Type: "string", Required: true,
+			Description: "The subnet that already holds a scope.",
+		}),
+		Example: `{"eventId":"BACKEND-105","caller":{"subject":"weave-prod","role":"service",` +
+			`"remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"POST",` +
+			`"path":"/api/v1/scopes"},"data":{"scopeId":"10.0.30.0"}}`,
+		Troubleshooting: "Not a fault. The caller asked for a subnet that is already scoped; the answer is to " +
+			"update the existing scope rather than create a second one, which Windows would refuse anyway. " +
+			"GET /api/v1/scopes?scopeId=<subnet> returns the one that is there. Note the pre-create check is not " +
+			"atomic: two creates racing on one subnet can both pass it, and the loser surfaces as a backend error " +
+			"rather than as this event.",
+	})
+
 	for _, r := range responseEvents {
 		coreevents.Register(&coreevents.Event{
 			ID:              r.id,
@@ -125,7 +169,7 @@ func init() {
 	}
 }
 
-// responseEvents declares the three client-facing backend failures.
+// responseEvents declares the client-facing backend failures.
 //
 // A table rather than three Register calls because they differ only in the four
 // fields below; spelling out the shared two-thirds three times is how one of

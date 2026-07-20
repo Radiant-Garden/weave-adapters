@@ -40,6 +40,7 @@ var taxonomy = map[events.ResponseCode]entry{
 
 	events.CodePayloadTooLarge:      {status: http.StatusRequestEntityTooLarge, title: "Payload too large"},
 	events.CodeUnsupportedMediaType: {status: http.StatusUnsupportedMediaType, title: "Unsupported media type"},
+	events.CodeConflict:             {status: http.StatusConflict, title: "Conflict"},
 
 	events.CodeBackendUnavailable: {status: http.StatusBadGateway, title: "Backend unavailable"},
 	events.CodeBackendTimeout:     {status: http.StatusGatewayTimeout, title: "Backend timeout"},

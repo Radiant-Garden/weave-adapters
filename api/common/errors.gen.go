@@ -8,6 +8,7 @@ const (
 	WeaveAdaptersBackendError         ProblemType = "weave-adapters:backend-error"
 	WeaveAdaptersBackendTimeout       ProblemType = "weave-adapters:backend-timeout"
 	WeaveAdaptersBackendUnavailable   ProblemType = "weave-adapters:backend-unavailable"
+	WeaveAdaptersConflict             ProblemType = "weave-adapters:conflict"
 	WeaveAdaptersInternal             ProblemType = "weave-adapters:internal"
 	WeaveAdaptersMethodNotAllowed     ProblemType = "weave-adapters:method-not-allowed"
 	WeaveAdaptersNotFound             ProblemType = "weave-adapters:not-found"
@@ -25,6 +26,8 @@ func (e ProblemType) Valid() bool {
 	case WeaveAdaptersBackendTimeout:
 		return true
 	case WeaveAdaptersBackendUnavailable:
+		return true
+	case WeaveAdaptersConflict:
 		return true
 	case WeaveAdaptersInternal:
 		return true
@@ -101,6 +104,6 @@ type Problem struct {
 }
 
 // ProblemType The problem types this version of core defines. An adapter may add its own, but never a second error shape.
-// Entries exist only for codes something actually returns. The backend codes are live: an adapter maps its backend”'s failures onto them, so a client sees backend-unavailable or backend-error with a 502 and backend-timeout with a 504 rather than one indistinguishable 500. The rest of the taxonomy in 02-shared-core.md (conflict, precondition-failed) still arrives with the code that emits it.
-// payload-too-large and unsupported-media-type are request-body rejections, raised before a body is decoded and so before any handler sees it.
+// Entries exist only for codes something actually returns. The backend codes are live: an adapter maps its backend”'s failures onto them, so a client sees backend-unavailable or backend-error with a 502 and backend-timeout with a 504 rather than one indistinguishable 500. The rest of the taxonomy in 02-shared-core.md (precondition-failed) still arrives with the code that emits it.
+// payload-too-large and unsupported-media-type are request-body rejections, raised before a body is decoded and so before any handler sees it. conflict is raised by a handler that found the resource it was asked to create already there.
 type ProblemType string

@@ -83,6 +83,9 @@ const (
 	CodePayloadTooLarge ResponseCode = "payload-too-large"
 	// CodeUnsupportedMediaType — the request body was not application/json (415).
 	CodeUnsupportedMediaType ResponseCode = "unsupported-media-type"
+	// CodeConflict — the resource cannot be created or changed as asked because
+	// it would collide with one that already exists (409).
+	CodeConflict ResponseCode = "conflict"
 )
 
 // The backend codes. An adapter maps its backend's failures onto these; the
