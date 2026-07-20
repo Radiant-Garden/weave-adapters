@@ -24,20 +24,23 @@ type entry struct {
 // invent a second error shape.
 //
 // Entries exist only for codes something actually returns. The rest of the
-// vocabulary in 02-shared-core.md arrives with its emitter:
-// conflict/precondition (409/412), and 413/428 with the body-limit middleware
-// and ETag write side that produce them.
+// vocabulary in 02-shared-core.md arrives with its emitter: conflict/precondition
+// (409/412), and 428 with the ETag write side that produces it.
 //
 // The backend codes are 502/504 rather than 500 because they say the fault was
 // downstream. An adapter is a gateway: a 500 claims the adapter itself is
 // broken, which sends an operator to the wrong logs, and weave — which reads
 // the status code and never the body — cannot tell the two apart otherwise.
 var taxonomy = map[events.ResponseCode]entry{
-	events.CodeValidationFailed:   {status: http.StatusBadRequest, title: "Validation failed"},
-	events.CodeUnauthorized:       {status: http.StatusUnauthorized, title: "Unauthorized"},
-	events.CodeNotFound:           {status: http.StatusNotFound, title: "Not found"},
-	events.CodeMethodNotAllowed:   {status: http.StatusMethodNotAllowed, title: "Method not allowed"},
-	events.CodeInternal:           {status: http.StatusInternalServerError, title: "Internal server error"},
+	events.CodeValidationFailed: {status: http.StatusBadRequest, title: "Validation failed"},
+	events.CodeUnauthorized:     {status: http.StatusUnauthorized, title: "Unauthorized"},
+	events.CodeNotFound:         {status: http.StatusNotFound, title: "Not found"},
+	events.CodeMethodNotAllowed: {status: http.StatusMethodNotAllowed, title: "Method not allowed"},
+	events.CodeInternal:         {status: http.StatusInternalServerError, title: "Internal server error"},
+
+	events.CodePayloadTooLarge:      {status: http.StatusRequestEntityTooLarge, title: "Payload too large"},
+	events.CodeUnsupportedMediaType: {status: http.StatusUnsupportedMediaType, title: "Unsupported media type"},
+
 	events.CodeBackendUnavailable: {status: http.StatusBadGateway, title: "Backend unavailable"},
 	events.CodeBackendTimeout:     {status: http.StatusGatewayTimeout, title: "Backend timeout"},
 	events.CodeBackendError:       {status: http.StatusBadGateway, title: "Backend error"},

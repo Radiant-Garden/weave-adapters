@@ -43,6 +43,10 @@ const (
 	API901 events.EventID = "API-901"
 	// API903 backs a 400 validation-failed response.
 	API903 events.EventID = "API-903"
+	// API904 backs a 413 payload-too-large response.
+	API904 events.EventID = "API-904"
+	// API905 backs a 415 unsupported-media-type response.
+	API905 events.EventID = "API-905"
 )
 
 // clientError describes one entry in the client-facing error range. Declaring
@@ -143,6 +147,31 @@ var clientErrors = []clientError{
 		fix: "Client-side fault; the response body's errors[] names each field and what was expected. A recurring " +
 			"pageToken failure usually means the client stored a token across a listing whose scope changed — it " +
 			"should drop the token and list from the first page.",
+	},
+	{
+		id: API904, topic: "Errors", level: slog.LevelDebug, message: "request rejected: body too large",
+		detail: "The request body exceeds the {{limitBytes}} byte limit.", code: events.CodePayloadTooLarge,
+		fields: []events.FieldDef{
+			{Name: "limitBytes", Type: "int", Required: true, Description: "The configured maxRequestBodyBytes the body exceeded."},
+		},
+		example:  `{"eventId":"API-904","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"POST","path":"/api/v1/scopes"},"data":{"limitBytes":1048576}}`,
+		describe: "A request body exceeded maxRequestBodyBytes and was rejected before the decoder read it.",
+		fix: "The limit is three orders of magnitude above any single resource this adapter accepts, so a genuine " +
+			"client should never reach it — treat a hit as a malformed or hostile request first, and raise " +
+			"maxRequestBodyBytes only after confirming the payload is legitimate. The byte count is not logged " +
+			"because the body was never read; only the limit is known.",
+	},
+	{
+		id: API905, topic: "Errors", level: slog.LevelDebug, message: "request rejected: unsupported media type",
+		detail: "The request body must be sent as application/json.", code: events.CodeUnsupportedMediaType,
+		fields: []events.FieldDef{
+			{Name: "contentType", Type: "string", Required: false, Description: "The media type the caller sent, truncated; \"(none)\" when the header was absent."},
+		},
+		example:  `{"eventId":"API-905","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"POST","path":"/api/v1/scopes"},"data":{"contentType":"text/plain"}}`,
+		describe: "A request carried a body whose Content-Type is not application/json.",
+		fix: "Client-side fault. The adapter speaks one media type on the request side; a caller sending form data " +
+			"or no Content-Type at all lands here. Note this fires before decoding, so a body that is valid JSON " +
+			"but mislabelled is still rejected — the header is the contract, not the bytes.",
 	},
 	{
 		id: API901, topic: "Errors", level: slog.LevelError, message: "internal error",

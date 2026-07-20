@@ -27,6 +27,13 @@ const (
 	defaultPort        = 8444
 	defaultLogSeverity = "info"
 
+	// defaultMaxRequestBodyBytes bounds a request body at 1 MiB. The bodies this
+	// adapter reads are single resources — a scope create is a few hundred bytes
+	// — so this is three orders of magnitude of headroom rather than a limit an
+	// honest client will meet. It exists to stop an unbounded read, not to size
+	// the payload.
+	defaultMaxRequestBodyBytes = 1 << 20
+
 	minPort = 1
 	maxPort = 65535
 )
@@ -41,6 +48,8 @@ const (
 	//nolint:gosec // G101: a config key name, not a credential — it names the path to the store.
 	KeyAuthTokensFile = "authTokensFile"
 	KeyDisableAuth    = "disableAuth"
+
+	KeyMaxRequestBodyBytes = "maxRequestBodyBytes"
 )
 
 // DefaultAuthTokensFile is the token store both the server and the token CLI
@@ -92,6 +101,12 @@ func CoreKeys() Spec {
 			Default: false,
 			Usage:   "disable bearer authentication (development only)",
 		},
+		{
+			Name:    KeyMaxRequestBodyBytes,
+			Type:    TypeInt,
+			Default: defaultMaxRequestBodyBytes,
+			Usage:   "maximum accepted request body size in bytes",
+		},
 	}
 }
 
@@ -110,6 +125,14 @@ type Config struct {
 	// DisableAuth turns off bearer authentication. Development only — it leaves
 	// every route open to anyone who can reach the port.
 	DisableAuth bool `koanf:"disableAuth"`
+	// MaxRequestBodyBytes bounds every request body the adapter reads. A body
+	// that exceeds it is rejected with 413 before the decoder sees it.
+	//
+	// There is no "unlimited" value on purpose: 0 and negative are rejected
+	// rather than read as off. An operator who wants a bigger body raises the
+	// number, and the one who fat-fingers it to 0 gets a startup error instead
+	// of a server that will read a body until it runs out of memory.
+	MaxRequestBodyBytes int `koanf:"maxRequestBodyBytes" validate:"min=1"`
 }
 
 // Core builds and validates the core configuration from resolved values. It
@@ -122,6 +145,8 @@ func Core(v *Values) (*Config, error) {
 		LogSeverity:    v.String(KeyLogSeverity),
 		AuthTokensFile: v.String(KeyAuthTokensFile),
 		DisableAuth:    v.Bool(KeyDisableAuth),
+
+		MaxRequestBodyBytes: v.Int(KeyMaxRequestBodyBytes),
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -170,6 +195,12 @@ func fieldError(fe validator.FieldError) error {
 		return fmt.Errorf("port must be between %d and %d, got %v", minPort, maxPort, fe.Value())
 	case "LogSeverity":
 		return fmt.Errorf("logSeverity must be one of debug, info, warn, error, got %q", fe.Value())
+	case "MaxRequestBodyBytes":
+		// Named rather than left to the fallback because the fallback prints the
+		// Go field name, and an operator reading it has a config key in front of
+		// them. It also says there is no unlimited setting, which is the mistake
+		// a 0 most likely was.
+		return fmt.Errorf("maxRequestBodyBytes must be at least 1 byte (there is no unlimited setting), got %v", fe.Value())
 	default:
 		// Defensive fallback for a tagged field without a bespoke message. Only
 		// Port and LogSeverity carry validate tags today, so this is unreachable

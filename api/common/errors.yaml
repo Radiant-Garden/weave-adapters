@@ -111,12 +111,18 @@ components:
         backend-timeout with a 504 rather than one indistinguishable 500. The
         rest of the taxonomy in 02-shared-core.md (conflict,
         precondition-failed) still arrives with the code that emits it.
+
+        payload-too-large and unsupported-media-type are request-body
+        rejections, raised before a body is decoded and so before any handler
+        sees it.
       enum:
         - weave-adapters:validation-failed
         - weave-adapters:unauthorized
         - weave-adapters:not-found
         - weave-adapters:method-not-allowed
         - weave-adapters:internal
+        - weave-adapters:payload-too-large
+        - weave-adapters:unsupported-media-type
         - weave-adapters:backend-unavailable
         - weave-adapters:backend-timeout
         - weave-adapters:backend-error

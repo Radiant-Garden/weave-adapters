@@ -79,6 +79,10 @@ const (
 	CodeMethodNotAllowed ResponseCode = "method-not-allowed"
 	// CodeInternal — an unexpected adapter fault (500).
 	CodeInternal ResponseCode = "internal"
+	// CodePayloadTooLarge — the request body exceeded maxRequestBodyBytes (413).
+	CodePayloadTooLarge ResponseCode = "payload-too-large"
+	// CodeUnsupportedMediaType — the request body was not application/json (415).
+	CodeUnsupportedMediaType ResponseCode = "unsupported-media-type"
 )
 
 // The backend codes. An adapter maps its backend's failures onto these; the

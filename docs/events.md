@@ -249,6 +249,54 @@
 
 **Troubleshooting:** Client-side fault; the response body's errors[] names each field and what was expected. A recurring pageToken failure usually means the client stored a token across a listing whose scope changed — it should drop the token and list from the first page.
 
+## API-904 — request rejected: body too large
+
+- **Level:** DEBUG
+- **Category / Topic:** API / Errors
+- **External source:** yes
+- **Description:** A request body exceeded maxRequestBodyBytes and was rejected before the decoder read it.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
+| remoteAddr | string | true | Client address. |
+| limitBytes | int | true | The configured maxRequestBodyBytes the body exceeded. |
+
+**Client response**
+
+- **Problem type:** `weave-adapters:payload-too-large`
+- **Detail:** The request body exceeds the {{limitBytes}} byte limit.
+- **Impacts:** `request_rejected`
+
+**Example:** `{"eventId":"API-904","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"POST","path":"/api/v1/scopes"},"data":{"limitBytes":1048576}}`
+
+**Troubleshooting:** The limit is three orders of magnitude above any single resource this adapter accepts, so a genuine client should never reach it — treat a hit as a malformed or hostile request first, and raise maxRequestBodyBytes only after confirming the payload is legitimate. The byte count is not logged because the body was never read; only the limit is known.
+
+## API-905 — request rejected: unsupported media type
+
+- **Level:** DEBUG
+- **Category / Topic:** API / Errors
+- **External source:** yes
+- **Description:** A request carried a body whose Content-Type is not application/json.
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
+| remoteAddr | string | true | Client address. |
+| contentType | string | false | The media type the caller sent, truncated; "(none)" when the header was absent. |
+
+**Client response**
+
+- **Problem type:** `weave-adapters:unsupported-media-type`
+- **Detail:** The request body must be sent as application/json.
+- **Impacts:** `request_rejected`
+
+**Example:** `{"eventId":"API-905","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"POST","path":"/api/v1/scopes"},"data":{"contentType":"text/plain"}}`
+
+**Troubleshooting:** Client-side fault. The adapter speaks one media type on the request side; a caller sending form data or no Content-Type at all lands here. Note this fires before decoding, so a body that is valid JSON but mislabelled is still rejected — the header is the contract, not the bytes.
+
 ## BACKEND-101 — dhcp backend call failed
 
 - **Level:** ERROR

@@ -21,6 +21,8 @@ Tested:
 	  - TestValidate_ShouldReportProblems: valid and invalid configs, including all errors joined.
 	  - TestValidate_ShouldRejectEmptyTokensFileWhenAuthEnabled: no silent empty allow-list.
 	  - TestValidate_ShouldAllowEmptyTokensFileWhenAuthDisabled: the dev hatch needs no file.
+	  - TestValidate_ShouldRejectAnUnboundedRequestBody: 0 and negative are startup
+	    errors, not an "unlimited" setting.
 
 Tested elsewhere:
 
@@ -30,8 +32,9 @@ Tested elsewhere:
 Declined:
 
 	Validate's non-ValidationErrors branch and fieldError's default case: defensive
-	  and unreachable today (only *Config is validated; only Port/LogSeverity carry
-	  tags), so they are documented in-code rather than tested.
+	  and unreachable today (only *Config is validated, and every tagged field —
+	  Port, LogSeverity, MaxRequestBodyBytes — has a bespoke message), so they are
+	  documented in-code rather than tested.
 
 Additional Remarks:
 
@@ -43,6 +46,7 @@ Additional Remarks:
 package config
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -59,6 +63,8 @@ func TestCoreKeys_ShouldPreserveTheEstablishedFlagAndEnvNames(t *testing.T) {
 		KeyLogSeverity:    {"log-severity", "WEAVE_ADAPTER_LOG_SEVERITY"},
 		KeyAuthTokensFile: {"auth-tokens-file", "WEAVE_ADAPTER_AUTH_TOKENS_FILE"},
 		KeyDisableAuth:    {"disable-auth", "WEAVE_ADAPTER_DISABLE_AUTH"},
+
+		KeyMaxRequestBodyBytes: {"max-request-body-bytes", "WEAVE_ADAPTER_MAX_REQUEST_BODY_BYTES"},
 	}
 
 	// ACT / ASSERT
@@ -133,31 +139,31 @@ func TestValidate_ShouldReportProblems(t *testing.T) {
 	}{
 		{
 			name: "valid config",
-			cfg:  Config{Port: 8444, DisableHTTPS: true, LogSeverity: "info", AuthTokensFile: "tokens.toml"},
+			cfg:  Config{Port: 8444, DisableHTTPS: true, LogSeverity: "info", MaxRequestBodyBytes: 1, AuthTokensFile: "tokens.toml"},
 		},
 		{
 			name:    "port too low",
-			cfg:     Config{Port: 0, DisableHTTPS: true, LogSeverity: "info", AuthTokensFile: "tokens.toml"},
+			cfg:     Config{Port: 0, DisableHTTPS: true, LogSeverity: "info", MaxRequestBodyBytes: 1, AuthTokensFile: "tokens.toml"},
 			wantErr: []string{"port must be between"},
 		},
 		{
 			name:    "port too high",
-			cfg:     Config{Port: 70000, DisableHTTPS: true, LogSeverity: "info"},
+			cfg:     Config{Port: 70000, DisableHTTPS: true, LogSeverity: "info", MaxRequestBodyBytes: 1},
 			wantErr: []string{"port must be between"},
 		},
 		{
 			name:    "unknown severity",
-			cfg:     Config{Port: 8444, DisableHTTPS: true, LogSeverity: "trace"},
+			cfg:     Config{Port: 8444, DisableHTTPS: true, LogSeverity: "trace", MaxRequestBodyBytes: 1},
 			wantErr: []string{"logSeverity must be"},
 		},
 		{
 			name:    "https enabled",
-			cfg:     Config{Port: 8444, DisableHTTPS: false, LogSeverity: "info"},
+			cfg:     Config{Port: 8444, DisableHTTPS: false, LogSeverity: "info", MaxRequestBodyBytes: 1},
 			wantErr: []string{"disableHttps must be true"},
 		},
 		{
 			name:    "all problems joined",
-			cfg:     Config{Port: 0, DisableHTTPS: false, LogSeverity: "trace"},
+			cfg:     Config{Port: 0, DisableHTTPS: false, LogSeverity: "trace", MaxRequestBodyBytes: 1},
 			wantErr: []string{"port must be between", "logSeverity must be", "disableHttps must be true"},
 		},
 	}
@@ -189,7 +195,7 @@ func TestValidate_ShouldRejectEmptyTokensFileWhenAuthEnabled(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE — auth on, but nowhere to read tokens from.
-	cfg := Config{Port: 8444, DisableHTTPS: true, LogSeverity: "info", AuthTokensFile: ""}
+	cfg := Config{Port: 8444, DisableHTTPS: true, LogSeverity: "info", MaxRequestBodyBytes: 1, AuthTokensFile: ""}
 
 	// ACT
 	err := cfg.Validate()
@@ -199,11 +205,32 @@ func TestValidate_ShouldRejectEmptyTokensFileWhenAuthEnabled(t *testing.T) {
 	assert.Contains(t, err.Error(), "authTokensFile must be set")
 }
 
+func TestValidate_ShouldRejectAnUnboundedRequestBody(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the two values an operator might expect to mean "no limit".
+	for _, size := range []int{0, -1} {
+		t.Run(strconv.Itoa(size), func(t *testing.T) {
+			t.Parallel()
+
+			cfg := Config{Port: 8444, DisableHTTPS: true, LogSeverity: "info", MaxRequestBodyBytes: size}
+
+			// ACT
+			err := cfg.Validate()
+
+			// ASSERT — refused at startup rather than read as unlimited, which
+			// would leave the server reading a body until it ran out of memory.
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "maxRequestBodyBytes must be at least 1 byte")
+		})
+	}
+}
+
 func TestValidate_ShouldAllowEmptyTokensFileWhenAuthDisabled(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE
-	cfg := Config{Port: 8444, DisableHTTPS: true, LogSeverity: "info", DisableAuth: true}
+	cfg := Config{Port: 8444, DisableHTTPS: true, LogSeverity: "info", MaxRequestBodyBytes: 1, DisableAuth: true}
 
 	// ACT / ASSERT — the dev escape hatch needs no token file.
 	require.NoError(t, cfg.Validate())
