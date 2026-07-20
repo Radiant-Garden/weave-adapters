@@ -244,6 +244,12 @@ func (c *Client) CreateScope(ctx context.Context, in ScopeInput) (Scope, error) 
 		return Scope{}, c.backendError(ctx, opCreateScope, err)
 	}
 
+	// A create is the operation most likely to reuse a subnet, so this is the
+	// path the drift ledger exists for rather than an afterthought on it: a
+	// scope created on a subnet that held one before derives the same wadaptID
+	// as its predecessor, and this is where that becomes observable.
+	c.reportDrift(ctx, scopes)
+
 	// The scope Windows created must be the subnet the client described. If it
 	// is not, the identity we are about to hand back in a Location header would
 	// name a different resource.

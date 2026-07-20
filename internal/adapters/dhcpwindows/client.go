@@ -13,8 +13,13 @@
 // service each declare the one method they need. That is also what stops such
 // an interface growing to mirror the implementation as write support lands.
 //
-// M3a is backend-read-only: every command here reads, no value is interpolated
-// into any script, and a read-only service account serves every endpoint.
+// No value is interpolated into any script: every script body is a Go constant,
+// and the values a command needs travel through the child process environment.
+// That rule holds for the create path as it did when every command was a read.
+//
+// The account is *not* read-only and cannot be through this transport — the
+// cmdlets reach DHCP through WMI, which gates on Administrators. See
+// docs/dhcp-backend.md.
 package dhcpwindows
 
 import (
@@ -50,8 +55,9 @@ var (
 	ErrDuplicateWadaptID = errors.New("two scopes derived the same wadaptID")
 )
 
-// Client reads scopes from a Windows DHCP server. It is safe for concurrent
-// use: it holds only configuration, and each call spawns its own process.
+// Client reads and creates scopes on a Windows DHCP server. It is safe for
+// concurrent use: each call spawns its own process, and the one piece of
+// mutable state it holds — the drift ledger — takes its own lock.
 type Client struct {
 	runner runner
 	// commandTimeout bounds one backend invocation. It is applied here rather
@@ -61,6 +67,11 @@ type Client struct {
 	commandTimeout time.Duration
 	serverName     string
 	namespaceKey   []byte
+	// drift remembers each identity's last-seen attributes so a subnet that is
+	// deleted and recreated can be noticed. It is the one piece of mutable
+	// state on this client, carries its own lock, and is usable zero — which is
+	// why *Client must not be copied, as go vet's copylocks enforces.
+	drift driftLedger
 }
 
 // NewClient returns a client reading from the configured server.
@@ -133,12 +144,67 @@ func (c *Client) ListScopes(ctx context.Context) ([]Scope, error) {
 		return nil, c.backendError(ctx, opListScopes, err)
 	}
 
+	c.reportDrift(ctx, scopes)
+
 	// One comparator, on the encoded string, matching the resume comparison.
 	slices.SortFunc(scopes, func(a, b Scope) int {
 		return cmp.Compare(a.WadaptID, b.WadaptID)
 	})
 
 	return scopes, nil
+}
+
+// reportDrift records the listing against the ledger and emits DHCP-002 for
+// every identity whose scope changed materially.
+//
+// Called from every path that produces identified scopes, because a listing is
+// a listing however it was obtained — and a create is the operation most likely
+// to reuse a subnet, so observing it is the point rather than an extra.
+//
+// One event per drifted identity, not one summarizing all of them: each names a
+// distinct wadaptID an operator has to reconcile separately, and a single line
+// listing five would be filtered as one.
+func (c *Client) reportDrift(ctx context.Context, scopes []Scope) {
+	for _, report := range c.drift.observe(scopes) {
+		events.Emit(ctx, adapterevents.DHCP002,
+			"wadaptId", report.wadaptID,
+			"scopeId", report.scopeID,
+			"changed", strings.Join(changedFields(report.was, report.now), ", "),
+		)
+	}
+}
+
+// changedFields names the attributes that differ, so the event says what moved
+// rather than only that something did.
+//
+// Values are deliberately not logged. A scope name is operator-supplied free
+// text and the ranges are network topology; naming the fields is enough to
+// decide whether this was an edit or a recreate, and the DHCP server's own
+// change history holds the values.
+func changedFields(was, now fingerprint) []string {
+	var changed []string
+
+	if was.name != now.name {
+		changed = append(changed, "name")
+	}
+
+	if was.startRange != now.startRange {
+		changed = append(changed, "startRange")
+	}
+
+	if was.endRange != now.endRange {
+		changed = append(changed, "endRange")
+	}
+
+	if was.subnetMask != now.subnetMask {
+		changed = append(changed, "subnetMask")
+	}
+
+	if was.leaseDurationSeconds != now.leaseDurationSeconds {
+		changed = append(changed, "leaseDurationSeconds")
+	}
+
+	return changed
 }
 
 // Operation labels carried by BACKEND-101, so an operator can tell a failing
