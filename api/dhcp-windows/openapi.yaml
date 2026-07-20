@@ -17,9 +17,13 @@ info:
     REST adapter exposing a Windows Server DHCP server behind the uniform
     weave-adapters HTTP API.
 
-    Read-only. Every operation here is a GET, and the adapter issues no writes
-    to the DHCP server on any path, so a read-only service account is
-    sufficient. Mutations arrive in a later milestone.
+    Scope creation is the one mutation specified so far; every other operation
+    is a GET. Further mutations arrive in a later milestone.
+
+    ⚠️ The adapter requires local administrator on the DHCP host. The
+    DhcpServer cmdlets reach DHCP through WMI, which gates on Administrators —
+    DHCP Users and DHCP Administrators were both measured as insufficient, for
+    reads as well as writes. See docs/dhcp-backend.md.
 
     ⚠️ TLS is not implemented. Bearer tokens cross the wire in clear, so this
     adapter is lab-only until that changes — it must not carry traffic on a

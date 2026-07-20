@@ -226,10 +226,11 @@ is what ends a version-dependent investigation in one request.
 
 ## Security
 
-**M3a interpolates no value into any script.** The read commands take no
-parameters and are Go constants. The one value they need — the server name —
-arrives through the child process environment (`exec.Cmd.Env`, read as
-`$env:WADAPT_*`) and is splatted onto the cmdlet.
+**No value is interpolated into any script.** Every script body is a Go
+constant. The read commands take no parameters at all; the values the create
+path needs, and the server name every command needs, arrive through the child
+process environment (`exec.Cmd.Env`, read as `$env:WADAPT_*`) and are splatted
+onto the cmdlet.
 
 **That is the binding rule for every future script, including mutations.** No
 quoting, no injection surface, no temp file, it works with `-Command`, and
@@ -239,8 +240,10 @@ execution policy stays irrelevant. An earlier draft of the plan specified
 `Invoke-Command`/`Start-Process`/`Start-Job`), and getting a real `param()`
 block requires `-File`, which makes execution policy relevant again.
 
-The adapter is also **backend-read-only**: a read-only service account serves
-every endpoint, because identity is derived rather than written back.
+Identity is still **derived, never written back**, so no request causes a write
+the caller did not ask for. That is what survives of the original
+backend-read-only property; the account itself is not read-only, and cannot be
+through this transport — see "What privilege the adapter needs" above.
 
 ## Verified against a live WS2022 host
 
