@@ -15,15 +15,16 @@ Tested:
 
 	Probe.Check
 	  - TestProbeCheck_ShouldReportHealthyWithOperatorFields: a good read yields
-	    healthy plus the fields that end an investigation in one request.
+	    healthy, with server and identity as SEPARATE fields plus the rest of
+	    what ends an investigation in one request.
 	  - TestProbeCheck_ShouldReportUnavailableWhenTheBackendFails: every backend
 	    failure mode makes the component unavailable, carrying the reason.
 	  - TestProbeCheck_ShouldNotServe200WhenScopesCannotBeRead: the status maps to
 	    503, so weave stops routing rather than being told a broken adapter is fine.
 	  - TestProbeCheck_ShouldBoundItsOwnRuntime: the probe applies its own shorter
 	    timeout rather than inheriting the caller's.
-	  - TestProbeCheck_ShouldLabelAnUnsetServer: an empty identity reads as
-	    "(unset)" rather than as a blank field.
+	  - TestProbeCheck_ShouldLabelTheLocalHostExplicitly: an empty dhcp.server
+	    reads as "(local host)" rather than as a blank field.
 	  - TestProbeCheck_ShouldEmitBackendEventOnFailure: the failure is cataloged
 	    once, by the client that classified it.
 
@@ -96,9 +97,10 @@ const emptyProbeOutput = `{
 // probeWith returns a probe backed by the given fake runner.
 func probeWith(f *fakeRunner) *Probe {
 	return &Probe{
-		client:  clientWith(f),
-		timeout: time.Second,
-		server:  "dhcp01.example.test",
+		client:   clientWith(f),
+		timeout:  time.Second,
+		target:   "dhcp01.example.test",
+		identity: "identity01.example.test",
 	}
 }
 
@@ -122,7 +124,12 @@ func TestProbeCheck_ShouldReportHealthyWithOperatorFields(t *testing.T) {
 	// ASSERT — green means the module is present, permissions are right, and
 	// the server answered a real query.
 	assert.Equal(t, health.StatusHealthy, result.Status)
+	// Two distinct fields, and the values differ on purpose: "server" is who we
+	// queried, "identity" is whose wadaptIDs we derive. They were one field once,
+	// and a probe timing out while showing the identity name under "server" sent
+	// a reader hunting a network path to a host nothing had tried to reach.
 	assert.Equal(t, "dhcp01.example.test", result.Fields["server"])
+	assert.Equal(t, "identity01.example.test", result.Fields["identity"])
 	assert.Equal(t, "3", result.Fields["scopeCount"])
 
 	// The shell version is what ends a version-dependent investigation in one
@@ -232,7 +239,10 @@ func TestProbeCheck_ShouldReportUnavailableWhenTheBackendFails(t *testing.T) {
 			// words where it produced any.
 			assert.Equal(t, health.StatusUnavailable, result.Status)
 			assert.Contains(t, result.Detail, tc.wantDetail)
+			// Carried on the failure path too: an unreachable backend is exactly
+			// when someone needs to know which host was addressed.
 			assert.Equal(t, "dhcp01.example.test", result.Fields["server"])
+			assert.Equal(t, "identity01.example.test", result.Fields["identity"])
 		})
 	}
 }
@@ -302,18 +312,22 @@ func TestProbeCheck_ShouldBoundItsOwnRuntime(t *testing.T) {
 	assert.LessOrEqual(t, seen, 250*time.Millisecond)
 }
 
-func TestProbeCheck_ShouldLabelAnUnsetServer(t *testing.T) {
+func TestProbeCheck_ShouldLabelTheLocalHostExplicitly(t *testing.T) {
 	t.Parallel()
 
-	// ARRANGE — identity.serverName is required, so this is a defensive label
-	// rather than an expected state; a blank field would read as a bug.
+	// ARRANGE — an empty dhcp.server is the DEFAULT and the common case: it means
+	// the local machine. Unlike identity.serverName, which is required, this one
+	// is expected to be blank.
 	probe := &Probe{
-		client:  clientWith(&fakeRunner{stdout: []byte(healthyProbeOutput)}),
-		timeout: time.Second,
+		client:   clientWith(&fakeRunner{stdout: []byte(healthyProbeOutput)}),
+		timeout:  time.Second,
+		identity: "identity01.example.test",
 	}
 
-	// ACT / ASSERT
-	assert.Equal(t, "(unset)", probe.Check(context.Background()).Fields["server"])
+	// ACT / ASSERT — rendered as words rather than left empty. A blank value in a
+	// health response reads as "unconfigured", which is the opposite of what an
+	// empty dhcp.server means.
+	assert.Equal(t, "(local host)", probe.Check(context.Background()).Fields["server"])
 }
 
 //nolint:paralleltest // installs the process-global emitter hook

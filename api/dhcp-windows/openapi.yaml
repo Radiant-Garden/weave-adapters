@@ -519,7 +519,16 @@ components:
             Operator-useful detail about this component, as flat strings. The
             keys are diagnostic rather than contractual — a client must not
             switch on them.
+
+            For `dhcp-server`, note that `server` and `identity` are different
+            things and are separately configured: `server` is the host the query
+            was sent to (`(local host)` when unset, which is the default), while
+            `identity` is the provisioned name every `wadaptId` derives from. A
+            fleet of IDs that changed without any scope changing is explained by
+            the second, never the first.
           example:
+            server: (local host)
+            identity: dhcp01.example.test
             scopeCount: '3'
             psVersion: 5.1.20348.558
             psEdition: Desktop

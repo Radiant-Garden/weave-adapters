@@ -31,7 +31,18 @@ type probeResult struct {
 type Probe struct {
 	client  *Client
 	timeout time.Duration
-	server  string
+
+	// target is the connection target (dhcp.server), empty for the local host.
+	// identity is the provisioned name every wadaptID derives from
+	// (identity.serverName).
+	//
+	// Two fields because they answer two different questions and are separately
+	// configurable. Reporting one under a label that reads like the other is not
+	// a cosmetic slip: a probe that times out while showing an identity name in
+	// a field called "server" sends whoever reads it hunting a network path to a
+	// host nothing ever tried to reach.
+	target   string
+	identity string
 }
 
 // NewProbe returns a health probe for the given client.
@@ -44,9 +55,10 @@ type Probe struct {
 // without it the deadline bounds the process but not the call.
 func NewProbe(client *Client, cfg Config) *Probe {
 	return &Probe{
-		client:  client,
-		timeout: cfg.ProbeTimeout,
-		server:  cfg.ServerName,
+		client:   client,
+		timeout:  cfg.ProbeTimeout,
+		target:   cfg.Server,
+		identity: cfg.ServerName,
 	}
 }
 
@@ -88,29 +100,58 @@ func (p *Probe) Check(ctx context.Context) health.Result {
 		return health.Result{
 			Status: health.StatusUnavailable,
 			Detail: err.Error(),
-			Fields: map[string]string{"server": p.serverLabel()},
+			Fields: p.operatorFields(),
 		}
 	}
 
 	return health.Result{
 		Status: health.StatusHealthy,
 		Detail: "dhcp server reachable and scopes readable",
-		Fields: map[string]string{
-			"server":     p.serverLabel(),
-			"scopeCount": strconv.Itoa(len(result.Scopes)),
-			"psVersion":  result.PSVersion,
-			"psEdition":  result.PSEdition,
-		},
+		Fields: withFields(p.operatorFields(),
+			"scopeCount", strconv.Itoa(len(result.Scopes)),
+			"psVersion", result.PSVersion,
+			"psEdition", result.PSEdition,
+		),
 	}
 }
 
-// serverLabel names the server for an operator reading the health response.
-func (p *Probe) serverLabel() string {
-	if p.server == "" {
-		return "(unset)"
+// operatorFields are the fields every result carries, healthy or not.
+//
+// Both are here because a failing probe is exactly when the difference matters.
+// "server" answers "who did we ask?", which is what an unreachable backend sends
+// someone to check. "identity" answers "whose IDs are we deriving?", which is
+// what explains a fleet of wadaptIDs that changed without any scope changing —
+// and it is otherwise visible only in the DHCP-001 line at startup, long
+// scrolled away by the time anyone polls health.
+func (p *Probe) operatorFields() map[string]string {
+	return map[string]string{
+		"server":   p.targetLabel(),
+		"identity": p.identity,
+	}
+}
+
+// targetLabel names the host the query is sent to.
+//
+// An empty dhcp.server means the local machine, which is the default and the
+// common case. Rendering that as "" would read as "unconfigured" in a health
+// response, so it says what it means.
+func (p *Probe) targetLabel() string {
+	if p.target == "" {
+		return "(local host)"
 	}
 
-	return p.server
+	return p.target
+}
+
+// withFields returns fields extended with the given key/value pairs. An odd
+// trailing key is dropped rather than panicking: a malformed diagnostic must not
+// take down the health endpoint it was describing.
+func withFields(fields map[string]string, pairs ...string) map[string]string {
+	for i := 0; i+1 < len(pairs); i += 2 {
+		fields[pairs[i]] = pairs[i+1]
+	}
+
+	return fields
 }
 
 // probe runs the health query. It lives on Client rather than on Probe so that

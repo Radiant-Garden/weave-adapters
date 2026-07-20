@@ -95,8 +95,9 @@ type HealthComponent struct {
 	Detail string `json:"detail,omitempty"`
 
 	// Fields Operator-useful detail about this component, as flat strings. The keys are diagnostic rather than contractual — a client must not switch on them.
+	// For `dhcp-server`, note that `server` and `identity` are different things and are separately configured: `server` is the host the query was sent to (`(local host)` when unset, which is the default), while `identity` is the provisioned name every `wadaptId` derives from. A fleet of IDs that changed without any scope changing is explained by the second, never the first.
 	//
-	// Example: {"psEdition":"Desktop","psVersion":"5.1.20348.558","scopeCount":"3"}
+	// Example: {"identity":"dhcp01.example.test","psEdition":"Desktop","psVersion":"5.1.20348.558","scopeCount":"3","server":"(local host)"}
 	Fields map[string]string `json:"fields,omitempty"`
 
 	// Name Stable identifier for the component. `core` is the adapter process; `dhcp-server` is the DHCP backend.

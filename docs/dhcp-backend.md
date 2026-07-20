@@ -135,6 +135,25 @@ Each failed request therefore logs **two** lines by design: `BACKEND-101` at
 ERROR with the cause, and `BACKEND-102`/`103`/`104` at WARN recording what the
 client was told. See `docs/events.md`.
 
+## Reading the health component
+
+`/api/v1/health`'s `dhcp-server` entry carries flat diagnostic fields. Two of
+them are easy to confuse, and they are configured separately:
+
+| Field | Means | Config key |
+|---|---|---|
+| `server` | the host the query was sent to; `(local host)` when unset, the default | `dhcp.server` |
+| `identity` | the provisioned name every `wadaptID` derives from | `identity.serverName` |
+
+They were one field once, labelled `server` but populated from the identity. A
+probe that timed out while displaying an identity name under `server` sent a
+reader hunting a network path to a host nothing had ever tried to reach. If IDs
+changed without any scope changing, `identity` is the field that explains it —
+`server` never will.
+
+`scopeCount`, `psVersion` and `psEdition` round out the entry; the shell version
+is what ends a version-dependent investigation in one request.
+
 ## Security
 
 **M3a interpolates no value into any script.** The read commands take no
