@@ -100,13 +100,18 @@ type fakeRunner struct {
 	// text itself — notably that nothing was interpolated into it.
 	scripts []string
 
+	// envs records the parameters passed alongside each script, which is where
+	// every runtime value must travel.
+	envs []map[string]string
+
 	// onRun observes the context the caller handed down, so a test can assert
 	// on the deadline actually applied rather than on the field it came from.
 	onRun func(ctx context.Context)
 }
 
-func (f *fakeRunner) run(ctx context.Context, script string) ([]byte, []byte, error) {
+func (f *fakeRunner) run(ctx context.Context, script string, env map[string]string) ([]byte, []byte, error) {
 	f.scripts = append(f.scripts, script)
+	f.envs = append(f.envs, env)
 
 	if f.onRun != nil {
 		f.onRun(ctx)

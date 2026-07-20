@@ -184,3 +184,95 @@ ConvertTo-Json -InputObject @{
   psEdition  = [string]$PSVersionTable.PSEdition
 } -Depth 5
 `
+
+// Environment variables carrying createScopeScript's parameters.
+//
+// Every value a create needs travels this way. Nothing is interpolated into the
+// script text — see the runner interface for why that rule exists, and why the
+// obvious alternatives (-ArgumentList, a param() block) are not available with
+// -Command.
+const (
+	envScopeID          = "WADAPT_SCOPE_ID"
+	envScopeName        = "WADAPT_SCOPE_NAME"
+	envScopeStartRange  = "WADAPT_SCOPE_START"
+	envScopeEndRange    = "WADAPT_SCOPE_END"
+	envScopeSubnetMask  = "WADAPT_SCOPE_MASK"
+	envScopeDescription = "WADAPT_SCOPE_DESCRIPTION"
+	envScopeLease       = "WADAPT_SCOPE_LEASE"
+	envScopeState       = "WADAPT_SCOPE_STATE"
+	envScopeType        = "WADAPT_SCOPE_TYPE"
+)
+
+// conflictMarker is what createScopeScript prints when the subnet already holds
+// a scope.
+//
+// A marker rather than the shell's own error text, because that text is
+// localized — the WS2022 host this was developed against answers in German, so
+// matching English would pass in review and fail in production. The script
+// decides while it still has structured data; Go reads a stable ASCII token.
+const conflictMarker = "WADAPT_CONFLICT"
+
+// createScopeScript adds one scope and emits it in the same projection
+// listScopesScript uses, so a create and a read cannot disagree about shape.
+//
+// The subnet is checked BEFORE the create rather than classified afterwards.
+// Windows permits one scope per subnet, and that is the one failure a client
+// can act on, so it earns a clean answer instead of an error message parsed out
+// of a localized exception. Everything else keeps its own message and becomes a
+// backend error, because inventing categories for failures nobody has observed
+// is how a taxonomy fills with entries that never match.
+//
+// ⚠️ That check is not atomic. Two creates racing on one subnet can both pass
+// it, and the loser then fails inside Add-DhcpServerv4Scope and surfaces as a
+// generic backend error rather than a 409. Accepted rather than hidden: the
+// scope is still not created twice, Windows guarantees that, and the honest
+// alternative — parsing localized exception text — trades a rare wrong status
+// code for a common one.
+//
+// scopeId arrives computed rather than derived here: Go needs it anyway to
+// build the wadaptID, and computing it twice in two languages is how the two
+// come to disagree.
+//
+// -PassThru returns the created scope, so there is no re-read to race with
+// another client's edit. Parameters are typed before use — the cmdlet wants
+// [IPAddress] and [TimeSpan], and the coercion PowerShell applies to a bare
+// string is not always the one intended.
+//
+// Optional parameters are added only when their variable is non-empty, which is
+// what makes "omitted" mean "Windows applies its own default" rather than "the
+// adapter chose one for you". A scope created without a lease duration gets the
+// server's default, and that default stays the server's to change.
+const createScopeScript = scriptPreamble + `$params = @{}
+if ($env:` + envServerName + `) { $params['ComputerName'] = $env:` + envServerName + ` }
+
+$existing = @(Get-DhcpServerv4Scope @params |
+  Where-Object { $_.ScopeId.IPAddressToString -eq $env:` + envScopeID + ` })
+if ($existing.Count -gt 0) {
+  Write-Output '` + conflictMarker + `'
+  exit 0
+}
+
+$create = $params.Clone()
+$create['Name']       = $env:` + envScopeName + `
+$create['StartRange'] = [System.Net.IPAddress]::Parse($env:` + envScopeStartRange + `)
+$create['EndRange']   = [System.Net.IPAddress]::Parse($env:` + envScopeEndRange + `)
+$create['SubnetMask'] = [System.Net.IPAddress]::Parse($env:` + envScopeSubnetMask + `)
+
+if ($env:` + envScopeDescription + `) { $create['Description']   = $env:` + envScopeDescription + ` }
+if ($env:` + envScopeState + `)       { $create['State']         = $env:` + envScopeState + ` }
+if ($env:` + envScopeType + `)        { $create['Type']          = $env:` + envScopeType + ` }
+if ($env:` + envScopeLease + `)       { $create['LeaseDuration'] = [TimeSpan]::FromSeconds([int]$env:` + envScopeLease + `) }
+
+$scope = Add-DhcpServerv4Scope @create -PassThru |
+  Select-Object @{n='scopeId';e={$_.ScopeId.IPAddressToString}},
+                @{n='subnetMask';e={$_.SubnetMask.IPAddressToString}},
+                @{n='startRange';e={$_.StartRange.IPAddressToString}},
+                @{n='endRange';e={$_.EndRange.IPAddressToString}},
+                @{n='name';e={$_.Name}},
+                @{n='description';e={$_.Description}},
+                @{n='state';e={[string]$_.State}},
+                @{n='type';e={[string]$_.Type}},
+                @{n='superscopeName';e={[string]$_.SuperscopeName}},
+                @{n='leaseDurationSeconds';e={[int]$_.LeaseDuration.TotalSeconds}}
+ConvertTo-Json -InputObject @($scope) -Depth 5
+`

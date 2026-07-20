@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -12,6 +13,10 @@ import (
 // target. Values reach a script this way rather than by string interpolation;
 // see listScopesScript.
 const envServerName = "WADAPT_DHCP_SERVER"
+
+// envPrefix namespaces every variable a script reads, so a value this package
+// passes cannot be confused with one the host environment already had.
+const envPrefix = "WADAPT_"
 
 // waitDelayGrace bounds how long Wait may block after the context kills the
 // process.
@@ -31,7 +36,18 @@ const waitDelayGrace = 2 * time.Second
 // keeps the whole package OS-agnostic Go that happens to shell out: the tests
 // run on darwin against a fake, and no build tags are needed anywhere.
 type runner interface {
-	run(ctx context.Context, script string) (stdout, stderr []byte, err error)
+	// env carries the script's parameters. This is the ONLY way a runtime value
+	// reaches a script: nothing is interpolated into the script text, ever.
+	//
+	// That is not stylistic. powershell.exe -Command takes one string, so a
+	// value spliced into it is code — a scope description containing
+	// '; Remove-DhcpServerv4Scope -ScopeId 10.0.0.0 ;# would execute. And the
+	// obvious fix does not exist here: -Command has no -ArgumentList (that
+	// belongs to Invoke-Command/Start-Process/Start-Job), and a real param()
+	// block needs -File, which would make execution policy relevant again.
+	// The child environment has none of those problems: no quoting, no parsing,
+	// no temp file.
+	run(ctx context.Context, script string, env map[string]string) (stdout, stderr []byte, err error)
 }
 
 // execRunner runs scripts through a real powershell.exe.
@@ -50,8 +66,8 @@ type execRunner struct {
 // stdout and corrupt the JSON. -NonInteractive stops the shell prompting into a
 // pipe nobody is reading. Execution policy is not a concern — it governs script
 // *files*, not an inline -Command.
-func (r execRunner) run(ctx context.Context, script string) ([]byte, []byte, error) {
-	return r.runArgs(ctx, "-NoProfile", "-NonInteractive", "-Command", script)
+func (r execRunner) run(ctx context.Context, script string, env map[string]string) ([]byte, []byte, error) {
+	return r.runArgs(ctx, env, "-NoProfile", "-NonInteractive", "-Command", script)
 }
 
 // runArgs is run's plumbing, split from its argument list so the tests can
@@ -59,7 +75,7 @@ func (r execRunner) run(ctx context.Context, script string) ([]byte, []byte, err
 // a copy of it. That distinction is the point: a test that built its own
 // exec.Cmd would keep passing if WaitDelay were removed from here, which is
 // exactly the regression it exists to catch.
-func (r execRunner) runArgs(ctx context.Context, args ...string) ([]byte, []byte, error) {
+func (r execRunner) runArgs(ctx context.Context, env map[string]string, args ...string) ([]byte, []byte, error) {
 	// G204: launching a subprocess is this package's entire purpose, so the
 	// finding cannot be designed away — but neither input is attacker-reachable.
 	// r.path is operator-provisioned configuration (dhcp.powershellPath), the
@@ -83,6 +99,18 @@ func (r execRunner) runArgs(ctx context.Context, args ...string) ([]byte, []byte
 	// What matters for injection is the other direction — that the target
 	// travels here instead of being built into the command text.
 	cmd.Env = append(cmd.Environ(), envServerName+"="+r.server)
+
+	// Script parameters, each under the WADAPT_ prefix. A caller cannot reach
+	// anything else in the child's environment: a key outside the prefix is
+	// dropped rather than set, so a bug upstream cannot overwrite PATH or
+	// PSModulePath and change which module the shell loads.
+	for key, value := range env {
+		if !strings.HasPrefix(key, envPrefix) {
+			continue
+		}
+
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
 
 	var stdout, stderr bytes.Buffer
 

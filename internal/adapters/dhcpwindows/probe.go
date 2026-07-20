@@ -158,7 +158,7 @@ func withFields(fields map[string]string, pairs ...string) map[string]string {
 // every backend call goes through one place — the same classification, the same
 // stderr handling, and the same event on failure.
 func (c *Client) probe(ctx context.Context) (probeResult, error) {
-	stdout, stderr, err := c.runner.run(ctx, probeScript)
+	stdout, stderr, err := c.runner.run(ctx, probeScript, nil)
 	if err != nil {
 		return probeResult{}, c.backendError(ctx, opProbe, runError(err, stderr))
 	}

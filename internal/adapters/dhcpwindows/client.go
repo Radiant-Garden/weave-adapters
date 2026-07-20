@@ -119,7 +119,7 @@ func (c *Client) ListScopes(ctx context.Context) ([]Scope, error) {
 	ctx, cancel := c.bounded(ctx)
 	defer cancel()
 
-	stdout, stderr, err := c.runner.run(ctx, listScopesScript)
+	stdout, stderr, err := c.runner.run(ctx, listScopesScript, nil)
 	if err != nil {
 		return nil, c.backendError(ctx, opListScopes, runError(err, stderr))
 	}
@@ -144,8 +144,9 @@ func (c *Client) ListScopes(ctx context.Context) ([]Scope, error) {
 // Operation labels carried by BACKEND-101, so an operator can tell a failing
 // health poll from a failing request in the log.
 const (
-	opListScopes = "listScopes"
-	opProbe      = "probe"
+	opListScopes  = "listScopes"
+	opProbe       = "probe"
+	opCreateScope = "createScope"
 )
 
 // backendError emits BACKEND-101 and returns the error unchanged.

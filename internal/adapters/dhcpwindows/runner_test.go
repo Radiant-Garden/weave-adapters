@@ -82,10 +82,10 @@ func requireUnixShell(t *testing.T) {
 // the production exec configuration — WaitDelay included — with only the shell
 // and its argument list swapped. A test that assembled its own exec.Cmd would
 // keep passing if WaitDelay were deleted from runner.go.
-func sh(ctx context.Context, t *testing.T, server, script string) ([]byte, []byte, error) {
+func sh(ctx context.Context, t *testing.T, server, script string, env map[string]string) ([]byte, []byte, error) {
 	t.Helper()
 
-	return execRunner{path: "/bin/sh", server: server}.runArgs(ctx, "-c", script)
+	return execRunner{path: "/bin/sh", server: server}.runArgs(ctx, env, "-c", script)
 }
 
 func TestExecRunner_ShouldReturnStdoutAndStderrSeparately(t *testing.T) {
@@ -93,7 +93,7 @@ func TestExecRunner_ShouldReturnStdoutAndStderrSeparately(t *testing.T) {
 	requireUnixShell(t)
 
 	// ARRANGE / ACT
-	stdout, stderr, err := sh(context.Background(), t, "", `echo '[]'; echo 'a warning' >&2`)
+	stdout, stderr, err := sh(context.Background(), t, "", `echo '[]'; echo 'a warning' >&2`, nil)
 
 	// ASSERT — stdout has to stay pure JSON: anything the shell says on stderr
 	// leaking into it would break the decode, which is the failure mode
@@ -109,7 +109,7 @@ func TestExecRunner_ShouldReportANonZeroExit(t *testing.T) {
 
 	// ARRANGE / ACT — what $ErrorActionPreference = 'Stop' turns a permissions
 	// failure into, instead of an empty pipeline and a zero exit.
-	_, stderr, err := sh(context.Background(), t, "", `echo 'Access is denied.' >&2; exit 5`)
+	_, stderr, err := sh(context.Background(), t, "", `echo 'Access is denied.' >&2; exit 5`, nil)
 
 	// ASSERT
 	require.Error(t, err)
@@ -125,7 +125,7 @@ func TestExecRunner_ShouldPassTheServerThroughTheEnvironment(t *testing.T) {
 
 	// ACT — the script reads it from the environment, exactly as
 	// listScopesScript does with $env:WADAPT_DHCP_SERVER.
-	stdout, _, err := sh(context.Background(), t, server, `printf '%s' "$`+envServerName+`"`)
+	stdout, _, err := sh(context.Background(), t, server, `printf '%s' "$`+envServerName+`"`, nil)
 
 	// ASSERT — this is the whole injection-free parameter path, end to end
 	// against a real child process rather than asserted on a string.
@@ -142,7 +142,7 @@ func TestExecRunner_ShouldReturnATimeoutWhenTheContextExpires(t *testing.T) {
 	defer cancel()
 
 	// ACT
-	_, _, err := sh(ctx, t, "", "sleep 10")
+	_, _, err := sh(ctx, t, "", "sleep 10", nil)
 
 	// ASSERT — a timeout and a shell fault have different fixes (raise
 	// dhcp.commandTimeout versus repair the host), so they must not arrive as
@@ -165,7 +165,7 @@ func TestExecRunner_ShouldNotBlockPastTheDeadlineOnAWedgedChild(t *testing.T) {
 
 	// ACT
 	go func() {
-		_, _, err := sh(ctx, t, "", "sleep 30 & sleep 30")
+		_, _, err := sh(ctx, t, "", "sleep 30 & sleep 30", nil)
 		done <- err
 	}()
 
@@ -189,7 +189,7 @@ func TestExecRunner_ShouldFailWhenTheShellIsMissing(t *testing.T) {
 	runner := execRunner{path: filepathJoinNonexistent(t)}
 
 	// ACT
-	_, _, err := runner.run(context.Background(), "whatever")
+	_, _, err := runner.run(context.Background(), "whatever", nil)
 
 	// ASSERT — an error rather than empty output, so the health probe reports
 	// unhealthy instead of the endpoint 500ing on every request.
