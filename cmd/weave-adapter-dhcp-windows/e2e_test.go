@@ -42,6 +42,17 @@ Tested:
 	    backend error, which means the conflict marker survived a real round trip.
 	  - TestE2E_ShouldRejectABadCreateBeforeReachingTheBackend: four rejections,
 	    and nothing reached the DHCP server.
+	  - TestE2E_ShouldUpdateAScopeWithoutMovingItsIdentity: PATCH changes the
+	    mutable attributes, the wadaptID holds, and a merge leaves omitted fields.
+	  - TestE2E_ShouldResizeAScopeWithinItsSubnet: a range change binds both
+	    -StartRange and -EndRange on a real Set, and the identity holds.
+	  - TestE2E_ShouldRejectAResizeThatLeavesTheSubnet: an out-of-subnet range is a
+	    400 the adapter enforces, and the scope is not half-changed.
+	  - TestE2E_ShouldDeleteAScope: DELETE is 204, the scope is gone from both the
+	    item route and the collection, and a second delete is the 404 weave counts
+	    as already-deleted.
+	  - TestE2E_ShouldAnswer404ForMutationsOnAnUnknownScope: PATCH and DELETE on an
+	    identity the host does not hold are both 404.
 
 Tested elsewhere:
 
@@ -80,12 +91,14 @@ Additional Remarks:
 	not a fake compiled into production code.
 
 	THE WRITE TESTS MUTATE THE HOST. They create on 198.51.100.0/24 (RFC 5737
-	TEST-NET-2) and remove it through PowerShell directly, because there is no
-	DELETE endpoint until M3b. reserveTestSubnet pre-cleans as well as
-	post-cleans, so a run that died mid-test does not poison every run after it.
-	A cleanup that fails prints the exact command to run by hand rather than
-	failing quietly, since a leftover scope surfaces later as a 409 on create,
-	which reads like a conflict bug and is not one.
+	TEST-NET-2) and clean up through PowerShell directly, deliberately NOT through
+	the DELETE endpoint even though M3b added one: cleanup must not depend on the
+	thing under test, or a broken DELETE would leave scopes behind while its own
+	test failed. reserveTestSubnet pre-cleans as well as post-cleans, so a run
+	that died mid-test does not poison every run after it. A cleanup that fails
+	prints the exact command to run by hand rather than failing quietly, since a
+	leftover scope surfaces later as a 409 on create, which reads like a conflict
+	bug and is not one.
 
 	The identity inputs come from harness_test.go's startAdapter and are FIXED
 	constants. TestE2E_ShouldDeriveStableIdentitiesAcrossARestart compares
@@ -585,10 +598,11 @@ func powershell() string {
 // removeScope deletes a scope directly, bypassing the adapter.
 //
 // Test code reaching around the thing under test is normally a smell, and here
-// it is the only option: there is no DELETE endpoint until M3b, and a gate that
-// creates scopes on a shared DHCP server without removing them would leave the
-// host dirtier after every CI run — and the *next* run would meet its own
-// leftover as a 409 and fail for the wrong reason.
+// it is deliberate: cleanup must not depend on the DELETE endpoint M3b added,
+// because a broken DELETE would then leave scopes behind on a shared host while
+// its own test failed. A gate that created scopes without removing them would
+// leave the host dirtier after every CI run, and the *next* run would meet its
+// own leftover as a 409 and fail for the wrong reason.
 //
 // -Force because a scope holding leases will not delete without it. Failures
 // are reported rather than swallowed: a scope this gate could not clean up is a
@@ -779,4 +793,176 @@ func TestE2E_ShouldRejectABadCreateBeforeReachingTheBackend(t *testing.T) {
 	// a fake: validation happens before the backend is touched.
 	page := a.listScopes(t, "scopeId="+testSubnet)
 	assert.Empty(t, page.Items, "a rejected create reached the DHCP server")
+}
+
+// DHCP server; running them concurrently would put N powershell.exe spawns on a shared
+// host and make a slow query look like a flaky test.
+//
+//nolint:paralleltest // each case starts its own adapter process and mutates the one real
+func TestE2E_ShouldUpdateAScopeWithoutMovingItsIdentity(t *testing.T) {
+	// ARRANGE
+	a := startE2E(t)
+	a.requireHealthyBackend(t)
+	reserveTestSubnet(t)
+
+	status, created, _ := a.createScope(t, createBody("e2e-update"))
+	require.Equal(t, http.StatusCreated, status)
+
+	item := a.base + "/api/v1/scopes/" + created.WadaptID
+
+	// ACT — change the mutable attributes, leaving the range alone.
+	status, body := patch(t, item, a.token, `{"name":"e2e-renamed","leaseDurationSeconds":3600,"state":"Inactive"}`)
+
+	// ASSERT — 200 with the changed attributes and, crucially, the SAME identity:
+	// a merge must never move the wadaptID, or weave would bind to the wrong object.
+	require.Equal(t, http.StatusOK, status, "body: %s", body)
+
+	var updated scope
+	require.NoError(t, json.Unmarshal(body, &updated))
+	assert.Equal(t, created.WadaptID, updated.WadaptID, "an update must not move the identity")
+	assert.Equal(t, testSubnet, updated.ScopeID)
+	assert.Equal(t, "e2e-renamed", updated.Name)
+	assert.Equal(t, 3600, updated.LeaseDurationSeconds)
+	assert.Equal(t, "Inactive", updated.State)
+
+	// The omitted fields are unchanged, which is what "merge" means: the range and
+	// the description the create set are still there because the update did not
+	// mention them.
+	assert.Equal(t, testStartRange, updated.StartRange)
+	assert.Equal(t, "created by the e2e gate", updated.Description)
+
+	// A fresh GET reflects it, so the change reached the server rather than only
+	// the response body.
+	getStatus, getBody := get(t, item, a.token)
+	require.Equal(t, http.StatusOK, getStatus)
+
+	var fetched scope
+	require.NoError(t, json.Unmarshal(getBody, &fetched))
+	assert.Equal(t, updated, fetched)
+}
+
+// DHCP server; running them concurrently would put N powershell.exe spawns on a shared
+// host and make a slow query look like a flaky test.
+//
+//nolint:paralleltest // each case starts its own adapter process and mutates the one real
+func TestE2E_ShouldResizeAScopeWithinItsSubnet(t *testing.T) {
+	// ARRANGE — the one host exercise of the range write and of the
+	// both-or-neither splat: Set-DhcpServerv4Scope's -StartRange/-EndRange are
+	// mandatory together, so a resize binding only one would fail on a real shell.
+	a := startE2E(t)
+	a.requireHealthyBackend(t)
+	reserveTestSubnet(t)
+
+	status, created, _ := a.createScope(t, createBody("e2e-resize"))
+	require.Equal(t, http.StatusCreated, status)
+
+	item := a.base + "/api/v1/scopes/" + created.WadaptID
+
+	// ACT — a tighter pool, still inside 198.51.100.0/24.
+	const newStart, newEnd = "198.51.100.20", "198.51.100.190"
+
+	status, body := patch(t, item, a.token, fmt.Sprintf(`{"startRange":%q,"endRange":%q}`, newStart, newEnd))
+
+	// ASSERT — 200, the range changed, and the identity held because the subnet
+	// did not.
+	require.Equal(t, http.StatusOK, status, "body: %s", body)
+
+	var updated scope
+	require.NoError(t, json.Unmarshal(body, &updated))
+	assert.Equal(t, created.WadaptID, updated.WadaptID, "a resize inside the subnet must not move the identity")
+	assert.Equal(t, newStart, updated.StartRange)
+	assert.Equal(t, newEnd, updated.EndRange)
+	assert.Equal(t, testSubnet, updated.ScopeID)
+}
+
+// DHCP server; running them concurrently would put N powershell.exe spawns on a shared
+// host and make a slow query look like a flaky test.
+//
+//nolint:paralleltest // each case starts its own adapter process and mutates the one real
+func TestE2E_ShouldRejectAResizeThatLeavesTheSubnet(t *testing.T) {
+	// ARRANGE
+	a := startE2E(t)
+	a.requireHealthyBackend(t)
+	reserveTestSubnet(t)
+
+	status, created, _ := a.createScope(t, createBody("e2e-badresize"))
+	require.Equal(t, http.StatusCreated, status)
+
+	item := a.base + "/api/v1/scopes/" + created.WadaptID
+
+	// ACT — an end one subnet over, which would change the derived identity.
+	status, body := patch(t, item, a.token, `{"endRange":"198.51.101.10"}`)
+
+	// ASSERT — a 400 naming the range field, and the adapter enforces it rather
+	// than leaving it to Windows: the identity invariant is the adapter's to keep.
+	require.Equal(t, http.StatusBadRequest, status, "body: %s", body)
+	assert.Contains(t, string(body), "weave-adapters:validation-failed")
+	assert.Contains(t, string(body), "endRange")
+
+	// The scope is unchanged — a rejected resize must not have half-applied.
+	getStatus, getBody := get(t, item, a.token)
+	require.Equal(t, http.StatusOK, getStatus)
+
+	var fetched scope
+	require.NoError(t, json.Unmarshal(getBody, &fetched))
+	assert.Equal(t, testEndRange, fetched.EndRange, "a rejected resize must leave the scope as it was")
+}
+
+// DHCP server; running them concurrently would put N powershell.exe spawns on a shared
+// host and make a slow query look like a flaky test.
+//
+//nolint:paralleltest // each case starts its own adapter process and mutates the one real
+func TestE2E_ShouldDeleteAScope(t *testing.T) {
+	// ARRANGE — this test removes the scope itself, so cleanup is best-effort: a
+	// mustSucceed cleanup would fail on the scope the test already deleted. The
+	// pre-clean still runs, so a run that died mid-test does not poison the next.
+	a := startE2E(t)
+	a.requireHealthyBackend(t)
+	removeScope(t, testSubnet, false)
+	t.Cleanup(func() { removeScope(t, testSubnet, false) })
+
+	status, created, _ := a.createScope(t, createBody("e2e-delete"))
+	require.Equal(t, http.StatusCreated, status)
+
+	item := a.base + "/api/v1/scopes/" + created.WadaptID
+
+	// ACT — remove it through the adapter.
+	delStatus, delBody := del(t, item, a.token)
+
+	// ASSERT — 204 with no body.
+	require.Equal(t, http.StatusNoContent, delStatus, "body: %s", delBody)
+	assert.Empty(t, delBody, "a 204 carries no body")
+
+	// It is gone: the item route 404s and the collection no longer lists it.
+	getStatus, _ := get(t, item, a.token)
+	assert.Equal(t, http.StatusNotFound, getStatus, "the deleted scope must not resolve")
+
+	page := a.listScopes(t, "scopeId="+testSubnet)
+	assert.Empty(t, page.Items, "the deleted scope must not appear in the collection")
+
+	// A second delete is a 404, which weave counts as already-deleted — the
+	// idempotency a reconciler relies on when it retries a delete it already made.
+	againStatus, _ := del(t, item, a.token)
+	assert.Equal(t, http.StatusNotFound, againStatus, "deleting an already-gone scope is a 404, not a 204")
+}
+
+// DHCP server; running them concurrently would put N powershell.exe spawns on a shared
+// host and make a slow query look like a flaky test.
+//
+//nolint:paralleltest // each case starts its own adapter process and queries the one real
+func TestE2E_ShouldAnswer404ForMutationsOnAnUnknownScope(t *testing.T) {
+	// ARRANGE — a well-formed identity the host does not hold, so nothing this
+	// test does touches a real scope and it needs no cleanup.
+	a := startE2E(t)
+	a.requireHealthyBackend(t)
+
+	item := a.base + "/api/v1/scopes/0000000000000"
+
+	// ACT / ASSERT — PATCH and DELETE on an absent identity are both 404, the
+	// answer weave treats as "target gone, re-create next cycle".
+	patchStatus, patchBody := patch(t, item, a.token, `{"name":"x"}`)
+	assert.Equal(t, http.StatusNotFound, patchStatus, "body: %s", patchBody)
+
+	delStatus, _ := del(t, item, a.token)
+	assert.Equal(t, http.StatusNotFound, delStatus)
 }

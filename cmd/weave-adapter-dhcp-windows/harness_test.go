@@ -167,41 +167,25 @@ func waitReady(t *testing.T, url string) {
 	t.Fatalf("adapter did not accept connections on %s within 15s", url)
 }
 
-// get issues a request, optionally bearing a token, and returns the status and
-// body together so assertions can report both.
-func get(t *testing.T, url, token string) (int, []byte) {
+// doRequest issues one request and returns the status, body and response
+// headers. get/post/patch/del are thin verbs over it, so the four cannot drift
+// in how they attach a token, set the media type, or read the body — and a JSON
+// media type rides on the write verbs even for an empty body, so an empty create
+// is the 400 the decoder gives rather than a 415 for a missing Content-Type.
+func doRequest(t *testing.T, method, url, token, body string) (int, []byte, http.Header) {
 	t.Helper()
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
-	require.NoError(t, err)
-
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
 	}
 
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	req, err := http.NewRequestWithContext(t.Context(), method, url, reader)
 	require.NoError(t, err)
 
-	defer func() { _ = resp.Body.Close() }()
-
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-
-	return resp.StatusCode, body
-}
-
-// post sends a JSON body and returns the status, body and response headers.
-//
-// Headers are returned because Location is the point of the create test: a 201
-// that does not say where the resource lives is a contract failure the body
-// cannot reveal.
-func post(t *testing.T, url, token, body string) (int, []byte, http.Header) {
-	t.Helper()
-
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, url, strings.NewReader(body))
-	require.NoError(t, err)
-
-	req.Header.Set("Content-Type", "application/json")
+	if method == http.MethodPost || method == http.MethodPatch {
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -216,6 +200,46 @@ func post(t *testing.T, url, token, body string) (int, []byte, http.Header) {
 	require.NoError(t, err)
 
 	return resp.StatusCode, payload, resp.Header
+}
+
+// get issues a GET, optionally bearing a token, and returns the status and body.
+func get(t *testing.T, url, token string) (int, []byte) {
+	t.Helper()
+
+	status, body, _ := doRequest(t, http.MethodGet, url, token, "")
+
+	return status, body
+}
+
+// post sends a JSON body and returns the status, body and response headers.
+//
+// Headers are returned because Location is the point of the create test: a 201
+// that does not say where the resource lives is a contract failure the body
+// cannot reveal.
+func post(t *testing.T, url, token, body string) (int, []byte, http.Header) {
+	t.Helper()
+
+	return doRequest(t, http.MethodPost, url, token, body)
+}
+
+// patch sends a JSON merge update and returns the status and body. The write
+// gate uses it for PATCH /api/v1/scopes/{wadaptId}.
+func patch(t *testing.T, url, token, body string) (int, []byte) {
+	t.Helper()
+
+	status, payload, _ := doRequest(t, http.MethodPatch, url, token, body)
+
+	return status, payload
+}
+
+// del sends a DELETE and returns the status and body. The verb carries the
+// intent; there is no request body.
+func del(t *testing.T, url, token string) (int, []byte) {
+	t.Helper()
+
+	status, body, _ := doRequest(t, http.MethodDelete, url, token, "")
+
+	return status, body
 }
 
 // waitFor reaps the process on a channel so the caller can bound the wait.
