@@ -224,6 +224,39 @@ changed without any scope changing, `identity` is the field that explains it —
 `scopeCount`, `psVersion` and `psEdition` round out the entry; the shell version
 is what ends a version-dependent investigation in one request.
 
+## Mutating scopes (M3b write path)
+
+`Set-DhcpServerv4Scope` and `Remove-DhcpServerv4Scope` back the update and delete
+paths. Three cmdlet facts shape the scripts. The first two are from the cmdlet
+reference (Microsoft Learn), **not yet host-verified** — confirm at M3b sign-off:
+
+- **`Set-DhcpServerv4Scope` can resize a scope's range.** It exposes
+  `-StartRange`/`-EndRange` via a `WithRange` parameter set (documented for
+  Windows Server 2016/2019/2022/2025), so a range change is a real `Set`, not a
+  delete-and-recreate. The identity guard still holds: the adapter rejects any
+  resize whose `networkOf(start/end, mask)` would leave the existing subnet, so
+  the derived `wadaptID` never moves.
+- **`-StartRange` and `-EndRange` are mandatory together.** The `WithRange` set
+  requires both; passing one alone binds it with a missing mandatory parameter
+  and fails. So the update script splats the two as a pair or not at all — Go
+  computes effective (provided-or-existing) values and emits both range env vars
+  or neither. This is why the per-field `if ($env:…)` idiom that works for the
+  scalar fields does **not** apply to range. Setting a new range also "discards
+  the previously set IPv4 range" per the docs — expected, and bounded by the
+  identity guard above.
+- **`Remove-DhcpServerv4Scope` is not idempotent.** Removing a scope that is
+  already gone throws under `Stop` → non-zero exit → `502`. The delete path
+  resolves the scope by `wadaptID` first, so a concurrent delete in the window
+  between resolve and remove surfaces as a `502`; weave retries it and the next
+  DELETE resolves as `404`, which weave counts as success. Mirrors the non-atomic
+  create conflict check.
+
+Two behaviours to close at sign-off, both consequences of the range facts above:
+a one-sided range in a single `Set` call must fail (proving the both-or-neither
+splat is required), and a resize must **preserve** the scope's leases,
+reservations and exclusions rather than clear them — it is a `Set`, so it should,
+but it is the one operation that moves the pool.
+
 ## Security
 
 **No value is interpolated into any script.** Every script body is a Go
