@@ -29,6 +29,16 @@ Tested:
 	  - TestScope_ShouldOmitEmptyOptionalFieldsOnly: description and superscopeName
 	    are omitempty; the rest are always present.
 
+	deleteScopeScript / updateScopeScript
+	  - TestUpdateScopeScript_ShouldProjectEveryModelField: the update read-back
+	    projects the same fields the list does — the pair that silently drifts.
+	  - TestMutationScripts_ShouldReadValuesFromTheEnvironment: no value is
+	    interpolated into either write script.
+	  - TestUpdateScopeScript_ShouldSplatRangeAsAPair: -StartRange and -EndRange
+	    share one guard, because the WithRange set is mandatory-both.
+	  Both scripts are also covered by TestScriptPreamble_ShouldOpenEveryScriptWithBothGuards
+	  and TestListScopesScript_ShouldAvoidConstructsPS51CannotParse via the script maps.
+
 Tested elsewhere:
 
 	Decoding real captured output into the model: client_test.go.
@@ -66,8 +76,11 @@ func TestScriptPreamble_ShouldOpenEveryScriptWithBothGuards(t *testing.T) {
 	t.Parallel()
 
 	scripts := map[string]string{
-		"listScopesScript": listScopesScript,
-		"probeScript":      probeScript,
+		"listScopesScript":  listScopesScript,
+		"probeScript":       probeScript,
+		"createScopeScript": createScopeScript,
+		"deleteScopeScript": deleteScopeScript,
+		"updateScopeScript": updateScopeScript,
 	}
 
 	for name, script := range scripts {
@@ -169,8 +182,11 @@ func TestListScopesScript_ShouldAvoidConstructsPS51CannotParse(t *testing.T) {
 	}
 
 	scripts := map[string]string{
-		"listScopesScript": listScopesScript,
-		"probeScript":      probeScript,
+		"listScopesScript":  listScopesScript,
+		"probeScript":       probeScript,
+		"createScopeScript": createScopeScript,
+		"deleteScopeScript": deleteScopeScript,
+		"updateScopeScript": updateScopeScript,
 	}
 
 	for name, script := range scripts {
@@ -218,4 +234,62 @@ func TestScope_ShouldOmitEmptyOptionalFieldsOnly(t *testing.T) {
 	assert.Contains(t, body, `"leaseDurationSeconds":0`)
 	assert.Contains(t, body, `"state":""`)
 	assert.Contains(t, body, `"addressFamily":"ipv4"`)
+}
+
+func TestUpdateScopeScript_ShouldProjectEveryModelField(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the update reads the changed scope back through the shared
+	// projection, so every backend-sourced model field must appear. WadaptID and
+	// AddressFamily are client-set, not projected.
+	clientSet := map[string]bool{"wadaptId": true, "addressFamily": true}
+
+	// ACT / ASSERT — the same drift-catcher the list has: a field added to the
+	// struct but missed in the projection would decode as silently empty on the
+	// update response.
+	for field := range reflect.TypeFor[Scope]().Fields() {
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		if clientSet[name] {
+			continue
+		}
+
+		assert.Contains(t, updateScopeScript, "n='"+name+"'",
+			"Scope.%s is not projected by updateScopeScript", field.Name)
+	}
+}
+
+func TestMutationScripts_ShouldReadValuesFromTheEnvironment(t *testing.T) {
+	t.Parallel()
+
+	scripts := map[string]string{
+		"deleteScopeScript": deleteScopeScript,
+		"updateScopeScript": updateScopeScript,
+	}
+
+	for name, script := range scripts {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// ASSERT — the write scripts take every value through the child
+			// environment, never interpolated into the command text. A format verb
+			// would mean something builds the script at runtime, which is the
+			// injection surface the whole env-passing design exists to keep at zero.
+			assert.Contains(t, script, "$env:"+envScopeID)
+			assert.NotContains(t, script, "%s")
+			assert.NotContains(t, script, "10.0.", "no scope value may be baked into the script")
+		})
+	}
+}
+
+func TestUpdateScopeScript_ShouldSplatRangeAsAPair(t *testing.T) {
+	t.Parallel()
+
+	// ASSERT — -StartRange and -EndRange are a mandatory-together parameter set,
+	// so both are set under one guard. A guard on the end alone would let a
+	// one-sided splat bind the WithRange set with a missing parameter and fail.
+	assert.Contains(t, updateScopeScript, "$set['StartRange']")
+	assert.Contains(t, updateScopeScript, "$set['EndRange']")
+	assert.Contains(t, updateScopeScript, "if ($env:"+envScopeStartRange+")")
+	assert.NotContains(t, updateScopeScript, "if ($env:"+envScopeEndRange+")",
+		"the end must ride inside the start's guard, not have its own")
 }

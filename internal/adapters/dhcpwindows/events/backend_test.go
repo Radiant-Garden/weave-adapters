@@ -64,7 +64,7 @@ func TestBackendCatalog_ShouldRegisterTheCallFailureEvent(t *testing.T) {
 		[]coreevents.FieldDef{
 			{
 				Name: "operation", Type: "string", Required: true,
-				Description: "Which backend call failed (listScopes, probe).",
+				Description: "Which backend call failed (listScopes, createScope, updateScope, deleteScope, probe).",
 			},
 			{
 				Name: "error", Type: "string", Required: true,

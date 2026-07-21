@@ -172,7 +172,7 @@ func run(ctx context.Context, args []string) error {
 	// and mounted twice. etag.Conditional passes non-GET straight through
 	// untouched, so wrapping it does not put an ETag on the 201.
 	scopes := etag.Conditional(dhcpwindows.NewScopesHandler(backend, adapterCfg, cfg.MaxRequestBodyBytes))
-	scope := etag.Conditional(dhcpwindows.NewScopeHandler(backend))
+	scope := etag.Conditional(dhcpwindows.NewScopeHandler(backend, cfg.MaxRequestBodyBytes))
 
 	addr := fmt.Sprintf(":%d", cfg.Port)
 
@@ -199,9 +199,20 @@ func run(ctx context.Context, args []string) error {
 			},
 			// Mounted with POST rather than after it, because a create's
 			// Location header points here and a 201 pointing at a 404 tells a
-			// client the create did not happen.
+			// client the create did not happen. DELETE and PATCH share the same
+			// wrapped handler: etag.Conditional passes non-GET straight through,
+			// so a 204 or a PATCH 200 is served without an ETag while the GET
+			// still gets one.
 			httpserver.Route{
 				Pattern: "GET " + dhcpwindows.ScopeItemPath,
+				Handler: scope,
+			},
+			httpserver.Route{
+				Pattern: "DELETE " + dhcpwindows.ScopeItemPath,
+				Handler: scope,
+			},
+			httpserver.Route{
+				Pattern: "PATCH " + dhcpwindows.ScopeItemPath,
 				Handler: scope,
 			},
 		),

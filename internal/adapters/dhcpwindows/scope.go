@@ -294,3 +294,51 @@ if ($env:` + envScopeLease + `)       { $create['LeaseDuration'] = [TimeSpan]::F
 $scope = Add-DhcpServerv4Scope @create -PassThru |` + scopeProjection +
 	`ConvertTo-Json -InputObject @($scope) -Depth 5
 `
+
+// deleteScopeScript removes one scope by its subnet id.
+//
+// The scopeId arrives through the environment like every other value; nothing
+// is interpolated into the script. -Force suppresses the confirmation prompt
+// that would otherwise hang under -NonInteractive. The command is not
+// idempotent: removing a scope that is already gone throws under Stop and exits
+// non-zero, which the caller surfaces as a backend error rather than a 404 —
+// see DeleteScope.
+const deleteScopeScript = scriptPreamble + serverParams +
+	`$scopeId = [System.Net.IPAddress]::Parse($env:` + envScopeID + `)
+Remove-DhcpServerv4Scope @params -ScopeId $scopeId -Force
+`
+
+// updateScopeScript applies a merge update and emits the changed scope through
+// scopeProjection — the same constant the read and create paths use, so no two
+// paths can describe a different shape.
+//
+// Optional parameters are splatted only when their variable is non-empty, the
+// same idiom create uses, so an omitted field is left as Windows had it rather
+// than cleared.
+//
+// The range is the one exception to that per-field idiom. Set-DhcpServerv4Scope's
+// -StartRange and -EndRange are a mandatory-together parameter set (the WithRange
+// set), so a one-sided change would bind it with a missing parameter and fail.
+// A single guard on StartRange splats both; UpdateScope's env emits the two
+// variables as a pair or not at all, filling any side the caller omitted from
+// the existing scope, so this guard is always all-or-nothing.
+//
+// Values are typed before use — the cmdlet wants [IPAddress] and [TimeSpan], and
+// the coercion PowerShell applies to a bare string is not always the one meant.
+const updateScopeScript = scriptPreamble + serverParams + `
+$set = $params.Clone()
+$set['ScopeId'] = [System.Net.IPAddress]::Parse($env:` + envScopeID + `)
+
+if ($env:` + envScopeName + `)        { $set['Name']          = $env:` + envScopeName + ` }
+if ($env:` + envScopeDescription + `) { $set['Description']   = $env:` + envScopeDescription + ` }
+if ($env:` + envScopeState + `)       { $set['State']         = $env:` + envScopeState + ` }
+if ($env:` + envScopeType + `)        { $set['Type']          = $env:` + envScopeType + ` }
+if ($env:` + envScopeLease + `)       { $set['LeaseDuration'] = [TimeSpan]::FromSeconds([int]$env:` + envScopeLease + `) }
+if ($env:` + envScopeStartRange + `)  {
+  $set['StartRange'] = [System.Net.IPAddress]::Parse($env:` + envScopeStartRange + `)
+  $set['EndRange']   = [System.Net.IPAddress]::Parse($env:` + envScopeEndRange + `)
+}
+
+$scope = Set-DhcpServerv4Scope @set -PassThru |` + scopeProjection +
+	`ConvertTo-Json -InputObject @($scope) -Depth 5
+`

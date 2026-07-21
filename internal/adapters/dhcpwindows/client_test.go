@@ -106,6 +106,12 @@ type fakeRunner struct {
 	stderr []byte
 	err    error
 
+	// stdouts, when non-empty, supplies a distinct stdout per run in order and
+	// is consumed one entry at a time. It exists for the multi-spawn calls —
+	// update lists then sets, so the two spawns must see different output. When
+	// it is empty a run falls back to stdout.
+	stdouts [][]byte
+
 	// scripts records what was asked of it, so a test can assert on the script
 	// text itself — notably that nothing was interpolated into it.
 	scripts []string
@@ -150,7 +156,20 @@ func (f *fakeRunner) run(ctx context.Context, script string, env map[string]stri
 		return nil, nil, errors.Join(ErrBackendCanceled, err)
 	}
 
-	return f.stdout, f.stderr, f.err
+	return f.nextStdout(), f.stderr, f.err
+}
+
+// nextStdout pops the next queued stdout, or returns the single stdout when no
+// queue was configured.
+func (f *fakeRunner) nextStdout() []byte {
+	if len(f.stdouts) == 0 {
+		return f.stdout
+	}
+
+	out := f.stdouts[0]
+	f.stdouts = f.stdouts[1:]
+
+	return out
 }
 
 // filterEnv mirrors runArgs' prefix filter, so what the fake records is what a

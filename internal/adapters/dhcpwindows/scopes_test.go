@@ -120,6 +120,34 @@ type fakeLister struct {
 	// createScope, when set, answers CreateScope. Nil means the fake was built
 	// for a read test and a create reaching it is the test's own mistake.
 	createScope func(ScopeInput) (Scope, error)
+
+	// updated records the input the last UpdateScope received.
+	updated ScopeUpdate
+	// deleteScope and updateScope answer the item route's write verbs. Nil means
+	// the fake was built for a read test and reaching them is the test's mistake.
+	deleteScope func(wadaptID string) error
+	updateScope func(wadaptID string, in ScopeUpdate) (Scope, error)
+}
+
+func (f *fakeLister) DeleteScope(_ context.Context, wadaptID string) error {
+	f.calls++
+
+	if f.deleteScope == nil {
+		return errors.New("deleteScope not configured for this fake")
+	}
+
+	return f.deleteScope(wadaptID)
+}
+
+func (f *fakeLister) UpdateScope(_ context.Context, wadaptID string, in ScopeUpdate) (Scope, error) {
+	f.calls++
+	f.updated = in
+
+	if f.updateScope == nil {
+		return Scope{}, errors.New("updateScope not configured for this fake")
+	}
+
+	return f.updateScope(wadaptID, in)
 }
 
 func (f *fakeLister) CreateScope(_ context.Context, in ScopeInput) (Scope, error) {

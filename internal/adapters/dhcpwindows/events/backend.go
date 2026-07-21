@@ -77,7 +77,7 @@ func init() {
 		Fields: []coreevents.FieldDef{
 			{
 				Name: "operation", Type: "string", Required: true,
-				Description: "Which backend call failed (listScopes, probe).",
+				Description: "Which backend call failed (listScopes, createScope, updateScope, deleteScope, probe).",
 			},
 			{
 				Name: "error", Type: "string", Required: true,
@@ -159,7 +159,7 @@ func init() {
 
 			Fields: append(coreevents.CallerFields(), coreevents.FieldDef{
 				Name: "operation", Type: "string", Required: true,
-				Description: "Which backend call failed (listScopes).",
+				Description: "Which backend call failed (listScopes, createScope, updateScope, deleteScope).",
 			}),
 			Example: `{"eventId":"` + string(r.id) + `","caller":{"subject":"weave-prod","role":"service",` +
 				`"remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"GET",` +

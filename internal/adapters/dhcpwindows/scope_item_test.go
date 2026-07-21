@@ -27,12 +27,37 @@ Tested:
 	    route reaches the same backend as the collection and must not collapse
 	    the distinction weave reads.
 
+	ScopeHandler.ServeHTTP (method switch)
+	  - TestScopeItem_ShouldAnswer405ForAnUnsupportedMethod: the default arm is a
+	    405 naming the allowed verbs, never a fall-through to GET.
+	ScopeHandler.delete
+	  - TestScopeItem_ShouldAnswer204OnDelete: the removal path, no body.
+	  - TestScopeItem_ShouldAnswer404WhenDeletingAnUnknownScope: absent is 404, the
+	    answer weave treats as already-deleted, and the id is echoed.
+	  - TestScopeItem_ShouldMapDeleteBackendFailuresToTheirOwnStatusCodes: a backend
+	    fault on delete keeps its 502/504 rather than reading as a 404.
+	ScopeHandler.update / updateProblemFor
+	  - TestScopeItem_ShouldAnswer200WithTheUpdatedScope: the success path, body
+	    carrying the scope as it now exists.
+	  - TestScopeItem_ShouldPassTheDecodedUpdateToTheBackend: only the provided
+	    fields reach the backend, as pointers.
+	  - TestScopeItem_ShouldRejectAnUpdateAssertingADerivedField: sending scopeId is
+	    a 400, not a silent drop — the identity cannot be set by a client.
+	  - TestScopeItem_ShouldAnswer404WhenUpdatingAnUnknownScope: absent is 404.
+	  - TestScopeItem_ShouldAnswer400ForAResizeThatLeavesTheSubnet: an out-of-subnet
+	    range is a validation error naming the offending range field.
+	  - TestScopeItem_ShouldRejectAnInvalidUpdateBeforeTouchingTheBackend: a bad body
+	    is a 400 with the backend never called.
+
 Tested elsewhere:
 
 	problemFor's mapping and cause preservation: scopes_test.go, which owns it.
-	wadaptID derivation: identity_test.go. ETag and 304: scopes_test.go — the
-	wrapper is applied identically by the binary and is not this file's to
-	re-prove.
+	ScopeUpdate.Validate and env: update_test.go. DeleteScope/UpdateScope against
+	the fake runner: mutate_test.go. wadaptID derivation: identity_test.go. ETag
+	and 304: scopes_test.go — the wrapper is applied identically by the binary and
+	is not this file's to re-prove. The body-limit, media-type and malformed-JSON
+	rejections belong to requestbody; this file asserts only that update delegates
+	to it.
 
 Declined:
 
@@ -44,18 +69,29 @@ Declined:
 
 Additional Remarks:
 
-	The handler is constructed with NewScopeHandler(backend) and takes only the
-	reader. That is deliberate and is asserted by construction rather than by a
-	test: scopeLister has no CreateScope, so an item route that grew a write
-	would not compile.
+	The handler now serves GET, DELETE and PATCH, so its backend is
+	scopeItemBackend (lister + deleter + updater) rather than the bare reader it
+	took when the route was read-only. The collection handler still takes only
+	lister + creator, so neither route can reach past its own verbs — asserted by
+	construction rather than by a test, since the interfaces would not compile
+	otherwise.
+
+	The identity-preserving range check and the two-spawn resolve live on the
+	client (mutate.go), so this file drives a fake backend and asserts only the
+	handler's own mapping — status codes, the 204/404/405 shapes, and that a
+	validation failure names the field. The out-of-subnet case is exercised end to
+	end against the real client in mutate_test.go.
 */
 package dhcpwindows
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -64,21 +100,45 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 )
 
-// getScope drives the item handler through a mux, so the path wildcard is
-// populated the way it is in the binary. Calling the handler directly would
-// leave r.PathValue empty and quietly test nothing.
-func getScope(t *testing.T, backend scopeLister, wadaptID string) *httptest.ResponseRecorder {
+// itemMux mounts the item handler on the three verbs the binary serves, so the
+// path wildcard is populated the way it is in production. Calling the handler
+// directly would leave r.PathValue empty and quietly test nothing.
+func itemMux(backend scopeItemBackend) *http.ServeMux {
+	mux := http.NewServeMux()
+	h := NewScopeHandler(backend, testMaxBodyBytes)
+	mux.Handle("GET "+ScopeItemPath, h)
+	mux.Handle("DELETE "+ScopeItemPath, h)
+	mux.Handle("PATCH "+ScopeItemPath, h)
+
+	return mux
+}
+
+// itemRequest drives the item handler for one method and identity, through the
+// mux so r.PathValue is populated.
+func itemRequest(t *testing.T, backend scopeItemBackend, method, wadaptID, body string) *httptest.ResponseRecorder {
 	t.Helper()
 
-	mux := http.NewServeMux()
-	mux.Handle("GET "+ScopeItemPath, NewScopeHandler(backend))
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
 
-	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, ScopesPath+"/"+wadaptID, nil)
+	req := httptest.NewRequestWithContext(t.Context(), method, ScopesPath+"/"+wadaptID, reader)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
 	rec := httptest.NewRecorder()
-
-	mux.ServeHTTP(rec, req)
+	itemMux(backend).ServeHTTP(rec, req)
 
 	return rec
+}
+
+// getScope drives a GET on the item route.
+func getScope(t *testing.T, backend scopeItemBackend, wadaptID string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	return itemRequest(t, backend, http.MethodGet, wadaptID, "")
 }
 
 func TestScopeItem_ShouldServeTheScopeMatchingTheWadaptId(t *testing.T) {
@@ -122,7 +182,7 @@ func TestScopeItem_ShouldResolveTheLocationACreateReturns(t *testing.T) {
 
 	// ACT — fetch exactly the URL the create handed back.
 	mux := http.NewServeMux()
-	mux.Handle("GET "+ScopeItemPath, NewScopeHandler(&fakeLister{scopes: []Scope{created}}))
+	mux.Handle("GET "+ScopeItemPath, NewScopeHandler(&fakeLister{scopes: []Scope{created}}, testMaxBodyBytes))
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, location, nil)
 	rec := httptest.NewRecorder()
@@ -232,4 +292,227 @@ func TestScopeItem_ShouldMapBackendFailuresToTheirOwnStatusCodes(t *testing.T) {
 			assert.Equal(t, tc.wantType, problem.Type)
 		})
 	}
+}
+
+func TestScopeItem_ShouldAnswer405ForAnUnsupportedMethod(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — PUT is not one of the three verbs the item route serves. Driven
+	// straight through the handler so its own default arm answers, the way it
+	// must when the mux is absent (in the binary the router 405s first).
+	handler := NewScopeHandler(&fakeLister{scopes: scopesFor(t, "10.0.1.0")}, testMaxBodyBytes)
+
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodPut, ScopesPath+"/anything", nil)
+	rec := httptest.NewRecorder()
+
+	// ACT
+	handler.ServeHTTP(rec, req)
+
+	// ASSERT — a 405, never a fall-through that serves the scope for a verb the
+	// route does not implement.
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+	assert.NotContains(t, rec.Body.String(), `"wadaptId"`, "an unsupported method must not serve the scope")
+}
+
+func TestScopeItem_ShouldAnswer204OnDelete(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	var deleted string
+
+	backend := &fakeLister{deleteScope: func(wadaptID string) error {
+		deleted = wadaptID
+
+		return nil
+	}}
+	target := scopesFor(t, "10.0.30.0")[0].WadaptID
+
+	// ACT
+	rec := itemRequest(t, backend, http.MethodDelete, target, "")
+
+	// ASSERT — 204 with no body, and the path identity reaches the backend.
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, rec.Body.String(), "a 204 carries no body")
+	assert.Equal(t, target, deleted)
+}
+
+func TestScopeItem_ShouldAnswer404WhenDeletingAnUnknownScope(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the backend reports the identity names nothing.
+	absent := scopesFor(t, "10.0.99.0")[0].WadaptID
+	backend := &fakeLister{deleteScope: func(wadaptID string) error {
+		return fmt.Errorf("%w: %s", ErrScopeNotFound, wadaptID)
+	}}
+
+	// ACT
+	rec := itemRequest(t, backend, http.MethodDelete, absent, "")
+
+	// ASSERT — 404, the answer weave treats as already-deleted, and the id is
+	// echoed so a reconciling client can tell which delete it was.
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	var problem apierror.Problem
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &problem))
+	assert.Equal(t, "weave-adapters:not-found", problem.Type)
+	assert.Contains(t, problem.Detail, absent)
+}
+
+func TestScopeItem_ShouldMapDeleteBackendFailuresToTheirOwnStatusCodes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		err        error
+		wantStatus int
+	}{
+		{"unavailable", ErrBackendUnavailable, http.StatusBadGateway},
+		{"timeout", ErrBackendTimeout, http.StatusGatewayTimeout},
+		{"malformed", ErrBackendMalformed, http.StatusBadGateway},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ARRANGE
+			backend := &fakeLister{deleteScope: func(string) error {
+				return fmt.Errorf("%w: powershell exited 1", tc.err)
+			}}
+
+			// ACT
+			rec := itemRequest(t, backend, http.MethodDelete, "anything", "")
+
+			// ASSERT — a backend fault on delete keeps its own code. Collapsing it
+			// to a 404 would tell a reconciling client the scope was already gone
+			// when the adapter simply could not reach the server.
+			assert.Equal(t, tc.wantStatus, rec.Code)
+		})
+	}
+}
+
+func TestScopeItem_ShouldAnswer200WithTheUpdatedScope(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	updated := scopesFor(t, "10.0.30.0")[0]
+	updated.Name = "renamed"
+	backend := &fakeLister{updateScope: func(string, ScopeUpdate) (Scope, error) { return updated, nil }}
+
+	// ACT
+	rec := itemRequest(t, backend, http.MethodPatch, updated.WadaptID, `{"name":"renamed"}`)
+
+	// ASSERT
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
+
+	var got Scope
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, updated.WadaptID, got.WadaptID)
+	assert.Equal(t, "renamed", got.Name)
+
+	// The bare resource, not a page envelope.
+	assert.NotContains(t, rec.Body.String(), "items")
+}
+
+func TestScopeItem_ShouldPassTheDecodedUpdateToTheBackend(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	updated := scopesFor(t, "10.0.30.0")[0]
+	backend := &fakeLister{updateScope: func(string, ScopeUpdate) (Scope, error) { return updated, nil }}
+
+	// ACT
+	rec := itemRequest(t, backend, http.MethodPatch, updated.WadaptID,
+		`{"name":"renamed","leaseDurationSeconds":3600}`)
+
+	// ASSERT — the provided fields arrive as non-nil pointers; the omitted ones
+	// stay nil, which is how the backend knows to leave them unchanged.
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	require.NotNil(t, backend.updated.Name)
+	assert.Equal(t, "renamed", *backend.updated.Name)
+	require.NotNil(t, backend.updated.LeaseDurationSeconds)
+	assert.Equal(t, 3600, *backend.updated.LeaseDurationSeconds)
+	assert.Nil(t, backend.updated.Description, "an omitted field must not reach the backend as a value")
+	assert.Nil(t, backend.updated.State)
+}
+
+func TestScopeItem_ShouldRejectAnUpdateAssertingADerivedField(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	backend := &fakeLister{updateScope: func(string, ScopeUpdate) (Scope, error) {
+		return Scope{}, errors.New("the backend must not be reached")
+	}}
+
+	// ACT — scopeId is derived and not a field of ScopeUpdate, so
+	// DisallowUnknownFields rejects it rather than letting a client believe it
+	// moved the scope's identity.
+	rec := itemRequest(t, backend, http.MethodPatch, "anyid", `{"name":"x","scopeId":"10.0.0.0"}`)
+
+	// ASSERT
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Zero(t, backend.calls)
+}
+
+func TestScopeItem_ShouldAnswer404WhenUpdatingAnUnknownScope(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	absent := scopesFor(t, "10.0.99.0")[0].WadaptID
+	backend := &fakeLister{updateScope: func(wadaptID string, _ ScopeUpdate) (Scope, error) {
+		return Scope{}, fmt.Errorf("%w: %s", ErrScopeNotFound, wadaptID)
+	}}
+
+	// ACT
+	rec := itemRequest(t, backend, http.MethodPatch, absent, `{"name":"x"}`)
+
+	// ASSERT — 404, which weave reads as "target gone, re-create next cycle".
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestScopeItem_ShouldAnswer400ForAResizeThatLeavesTheSubnet(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the client method rejects a range that would move the identity,
+	// naming the offending field.
+	backend := &fakeLister{updateScope: func(string, ScopeUpdate) (Scope, error) {
+		return Scope{}, &rangeOutsideSubnetError{scopeID: "10.0.30.0", fields: []string{"endRange"}}
+	}}
+
+	// ACT
+	rec := itemRequest(t, backend, http.MethodPatch, "someid", `{"endRange":"10.0.31.250"}`)
+
+	// ASSERT — a 400 naming the field that actually left the subnet, not a
+	// hardcoded one, and the subnet reaches the client.
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	var problem apierror.Problem
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &problem))
+	assert.Equal(t, "weave-adapters:validation-failed", problem.Type)
+	require.Len(t, problem.Errors, 1)
+	assert.Equal(t, "endRange", problem.Errors[0].Field)
+	assert.Contains(t, problem.Errors[0].Message, "10.0.30.0")
+}
+
+func TestScopeItem_ShouldRejectAnInvalidUpdateBeforeTouchingTheBackend(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	backend := &fakeLister{updateScope: func(string, ScopeUpdate) (Scope, error) {
+		return Scope{}, errors.New("the backend must not be reached")
+	}}
+
+	// ACT — a negative lease and an unknown state, both invalid.
+	rec := itemRequest(t, backend, http.MethodPatch, "someid",
+		`{"leaseDurationSeconds":-1,"state":"Paused"}`)
+
+	// ASSERT — 400 with every failure at once, and the backend never spawned.
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Zero(t, backend.calls)
+
+	var problem apierror.Problem
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &problem))
+	assert.Len(t, problem.Errors, 2)
 }

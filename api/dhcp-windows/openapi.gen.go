@@ -273,6 +273,47 @@ type ScopeState string
 // Example: Dhcp
 type ScopeType string
 
+// ScopeUpdate A merge update to a scope. Every field is optional: a field that is present is changed, one that is absent is left as it was, so a client sends only what it means to modify.
+// The fields a scope's identity derives from are absent by design and rejected if sent rather than ignored, because the identity must not move under an update:
+//   - `scopeId` — the subnet address, derived and immutable. - `subnetMask` — with the range it defines the subnet, so changing it
+//     would change the identity.
+//   - `wadaptId` — the derived identity itself.
+//
+// `startRange` and `endRange` may be changed to resize the pool, but only within the existing subnet: a range that would fall in a different subnet is a `400`, for the same identity reason. Send them together — the backend sets the range as a pair.
+// A present-but-empty free-text field is a `400` rather than a clear: omit the field to leave it unchanged. Clearing a description is not expressible in this version.
+type ScopeUpdate struct {
+	// Description New free-text description. Omit to leave unchanged; an empty string is rejected rather than treated as a clear.
+	//
+	// Example: reconciled by weave
+	Description string `json:"description,omitempty"`
+
+	// EndRange New last address of the pool. Must be at or after `startRange`, inside the existing subnet, and sent together with `startRange`.
+	//
+	// Example: 10.0.30.250
+	EndRange string `json:"endRange,omitempty"`
+
+	// LeaseDurationSeconds New lease duration in whole seconds.
+	//
+	// Example: 691200
+	LeaseDurationSeconds int `json:"leaseDurationSeconds,omitempty"`
+
+	// Name New administrative name.
+	//
+	// Example: lab-vlan-30
+	Name string `json:"name,omitempty"`
+
+	// StartRange New first address of the pool. Must stay inside the existing subnet, and be sent together with `endRange`.
+	//
+	// Example: 10.0.30.10
+	StartRange string `json:"startRange,omitempty"`
+
+	// State New scope state.
+	State ScopeState `json:"state,omitempty"`
+
+	// Type New scope type.
+	Type ScopeType `json:"type,omitempty"`
+}
+
 // IfNoneMatch defines model for IfNoneMatch.
 type IfNoneMatch = string
 
@@ -336,3 +377,6 @@ type GetScopeParams struct {
 
 // CreateScopeJSONRequestBody defines body for CreateScope for application/json ContentType.
 type CreateScopeJSONRequestBody = ScopeCreate
+
+// UpdateScopeJSONRequestBody defines body for UpdateScope for application/json ContentType.
+type UpdateScopeJSONRequestBody = ScopeUpdate

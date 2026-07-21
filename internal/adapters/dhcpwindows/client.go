@@ -218,6 +218,8 @@ const (
 	opListScopes  = "listScopes"
 	opProbe       = "probe"
 	opCreateScope = "createScope"
+	opDeleteScope = "deleteScope"
+	opUpdateScope = "updateScope"
 )
 
 // backendError emits BACKEND-101 and returns the error unchanged.

@@ -19,6 +19,9 @@ Tested:
 	  - TestScopeCreate_ShouldNotAcceptDerivedFields: a client cannot assert scopeId, wadaptId, addressFamily or superscopeName.
 	  - TestScopeCreate_ShouldBeASubsetOfTheServedScope: every field a client may send comes back under the same name and shape.
 	  - TestScopeCreate_ShouldMatchTheHandWrittenInput: the spec and adapter.ScopeInput agree field for field — the handler decodes into it and rejects unknown fields, so a drift here 400s a spec-conformant client.
+	  - TestScopeUpdate_ShouldMatchTheHandWrittenStruct: the generated ScopeUpdate and adapter.ScopeUpdate agree, pointer-vs-value aside — the merge-update contract.
+	  - TestScopeUpdate_ShouldNotAcceptDerivedFields: an update cannot assert scopeId, subnetMask, wadaptId or any other immutable/derived field, and every field it carries is optional.
+	  - TestScopeUpdate_ShouldBeASubsetOfTheServedScope: every field a client may PATCH comes back under the same name and shape.
 	  - TestScope_ShouldRoundTripThroughTheHandWrittenStruct: a populated scope survives both types byte-identically.
 	  - TestScopeList_ShouldMatchTheSharedPageEnvelope: the adapter's list schema is the shared envelope with a concrete item.
 	  - TestHealthResponse_ShouldMatchTheHandWrittenStruct: same for the health shape, including its component entries.
@@ -211,6 +214,57 @@ func TestScopeCreate_ShouldMatchTheHandWrittenInput(t *testing.T) {
 	// handler rejects unknown fields, so a client following the published spec
 	// would get a 400 for a field the document told it to send.
 	assert.Equal(t, handWritten, generated)
+}
+
+func TestScopeUpdate_ShouldMatchTheHandWrittenStruct(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE / ACT
+	generated := jsonshape.Of(t, ScopeUpdate{})
+	handWritten := jsonshape.Of(t, adapter.ScopeUpdate{})
+
+	// ASSERT — the merge-update body the handler decodes into. The hand-written
+	// side uses pointers so absent is distinct from provided, and the generated
+	// side uses value types with omitempty; jsonshape sees through both to the
+	// same wire kind, so a real field-set or optionality drift still fails here.
+	assert.Equal(t, handWritten, generated)
+}
+
+func TestScopeUpdate_ShouldNotAcceptDerivedFields(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE / ACT
+	update := jsonshape.Of(t, ScopeUpdate{})
+
+	// ASSERT — the identity inputs must not be settable on an update: changing
+	// them would move the scope's derived identity, so they are absent from the
+	// schema and DisallowUnknownFields rejects a client that sends one.
+	for _, derived := range []string{"scopeId", "subnetMask", "wadaptId", "addressFamily", "superscopeName"} {
+		assert.NotContains(t, update, derived,
+			"%s is immutable or derived; a client must not be able to set it on an update", derived)
+	}
+
+	// A merge changes only what is sent, so every field it carries is optional.
+	for name, field := range update {
+		assert.True(t, field.OmitEmpty,
+			"ScopeUpdate.%s must be omissible, or an absent field would not be left unchanged", name)
+	}
+}
+
+func TestScopeUpdate_ShouldBeASubsetOfTheServedScope(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — every field a client may PATCH must exist on the representation it
+	// gets back, under the same name and shape, or updating a scope through this
+	// API would be silently lossy.
+	update := jsonshape.Of(t, ScopeUpdate{})
+	served := jsonshape.Of(t, Scope{})
+
+	// ACT / ASSERT
+	for name, field := range update {
+		require.Contains(t, served, name, "ScopeUpdate.%s has no counterpart on Scope", name)
+		assert.Equal(t, served[name].Kind, field.Kind, "%s changes type between update and read", name)
+	}
 }
 
 func TestScope_ShouldMatchTheHandWrittenStruct(t *testing.T) {

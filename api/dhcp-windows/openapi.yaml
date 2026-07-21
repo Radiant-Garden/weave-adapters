@@ -256,6 +256,87 @@ paths:
         '504':
           $ref: '#/components/responses/BackendTimeout'
 
+    delete:
+      tags: [scopes]
+      operationId: deleteScope
+      summary: Delete a scope by its adapter identity
+      description: >-
+        Removes the scope on the identified subnet. Answers `204` with no body.
+
+        Idempotent from a reconciling client's point of view: a `wadaptId` this
+        server does not hold is a `404`, which weave treats as already-deleted.
+        Unconditional — there is no `If-Match` write side in this version, so a
+        delete is last-write-wins.
+      parameters:
+        - $ref: '#/components/parameters/WadaptIdPath'
+      responses:
+        '204':
+          $ref: '#/components/responses/NoContent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '502':
+          $ref: '#/components/responses/BackendFailed'
+        '504':
+          $ref: '#/components/responses/BackendTimeout'
+
+    patch:
+      tags: [scopes]
+      operationId: updateScope
+      summary: Update a scope's mutable attributes
+      description: >-
+        Merge-updates the scope: a field present in the body is changed and an
+        omitted one is left as it was, so a client sends only what it means to
+        modify. Returns the scope as it now exists.
+
+        The fields a scope's identity derives from are not accepted — `scopeId`,
+        `subnetMask` and `wadaptId` are rejected rather than ignored, because a
+        scope's identity derives from its subnet and must never move under an
+        update.
+
+        `startRange` and `endRange` may be changed together to resize the pool,
+        but the new range must stay inside the existing subnet; a range that
+        would leave it is a `400`, since it would change the identity.
+
+        Unconditional — no `If-Match`. Writes are last-write-wins.
+      parameters:
+        - $ref: '#/components/parameters/WadaptIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ScopeUpdate'
+      responses:
+        '200':
+          description: The scope as it now exists.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Scope'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '413':
+          $ref: '#/components/responses/PayloadTooLarge'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '500':
+          $ref: '#/components/responses/Internal'
+        '502':
+          $ref: '#/components/responses/BackendFailed'
+        '504':
+          $ref: '#/components/responses/BackendTimeout'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -487,6 +568,15 @@ components:
           schema:
             $ref: '../common/errors.yaml#/components/schemas/Problem'
 
+    NoContent:
+      description: >-
+        The scope was deleted. No body. A 204 means a scope was actually
+        removed — a delete of a scope this server does not hold is a 404, not a
+        silent 204.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+
   schemas:
     ScopeList:
       type: object
@@ -605,6 +695,73 @@ components:
           description: >-
             Which protocol the scope serves. Defaults to `Dhcp` when omitted,
             matching the cmdlet.
+
+    ScopeUpdate:
+      type: object
+      description: >-
+        A merge update to a scope. Every field is optional: a field that is
+        present is changed, one that is absent is left as it was, so a client
+        sends only what it means to modify.
+
+        The fields a scope's identity derives from are absent by design and
+        rejected if sent rather than ignored, because the identity must not move
+        under an update:
+
+        - `scopeId` — the subnet address, derived and immutable.
+        - `subnetMask` — with the range it defines the subnet, so changing it
+          would change the identity.
+        - `wadaptId` — the derived identity itself.
+
+        `startRange` and `endRange` may be changed to resize the pool, but only
+        within the existing subnet: a range that would fall in a different
+        subnet is a `400`, for the same identity reason. Send them together —
+        the backend sets the range as a pair.
+
+        A present-but-empty free-text field is a `400` rather than a clear: omit
+        the field to leave it unchanged. Clearing a description is not
+        expressible in this version.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: New administrative name.
+          example: lab-vlan-30
+        description:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: >-
+            New free-text description. Omit to leave unchanged; an empty string
+            is rejected rather than treated as a clear.
+          example: reconciled by weave
+        leaseDurationSeconds:
+          type: integer
+          minimum: 1
+          description: New lease duration in whole seconds.
+          example: 691200
+        state:
+          allOf:
+            - $ref: '#/components/schemas/ScopeState'
+          description: New scope state.
+        type:
+          allOf:
+            - $ref: '#/components/schemas/ScopeType'
+          description: New scope type.
+        startRange:
+          type: string
+          format: ipv4
+          description: >-
+            New first address of the pool. Must stay inside the existing subnet,
+            and be sent together with `endRange`.
+          example: 10.0.30.10
+        endRange:
+          type: string
+          format: ipv4
+          description: >-
+            New last address of the pool. Must be at or after `startRange`,
+            inside the existing subnet, and sent together with `startRange`.
+          example: 10.0.30.250
 
     Scope:
       type: object

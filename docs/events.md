@@ -305,7 +305,7 @@
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| operation | string | true | Which backend call failed (listScopes, probe). |
+| operation | string | true | Which backend call failed (listScopes, createScope, updateScope, deleteScope, probe). |
 | error | string | true | The failure, including the shell's own stderr where it produced any. |
 
 **Example:** `{"eventId":"BACKEND-101","data":{"operation":"listScopes","error":"dhcp backend unavailable: powershell exited 1: Get-DhcpServerv4Scope : Access is denied."}}`
@@ -324,7 +324,7 @@
 | subject | string | false | Authenticated caller, empty when auth is disabled. |
 | role | string | false | Caller role, empty when auth is disabled. |
 | remoteAddr | string | true | Client address. |
-| operation | string | true | Which backend call failed (listScopes). |
+| operation | string | true | Which backend call failed (listScopes, createScope, updateScope, deleteScope). |
 
 **Client response**
 
@@ -348,7 +348,7 @@
 | subject | string | false | Authenticated caller, empty when auth is disabled. |
 | role | string | false | Caller role, empty when auth is disabled. |
 | remoteAddr | string | true | Client address. |
-| operation | string | true | Which backend call failed (listScopes). |
+| operation | string | true | Which backend call failed (listScopes, createScope, updateScope, deleteScope). |
 
 **Client response**
 
@@ -372,7 +372,7 @@
 | subject | string | false | Authenticated caller, empty when auth is disabled. |
 | role | string | false | Caller role, empty when auth is disabled. |
 | remoteAddr | string | true | Client address. |
-| operation | string | true | Which backend call failed (listScopes). |
+| operation | string | true | Which backend call failed (listScopes, createScope, updateScope, deleteScope). |
 
 **Client response**
 
