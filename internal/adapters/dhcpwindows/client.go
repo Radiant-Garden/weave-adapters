@@ -391,8 +391,7 @@ func runError(err error, stderr []byte) error {
 		return err
 	}
 
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 		return fmt.Errorf("%w: powershell exited %d%s",
 			ErrBackendUnavailable, exitErr.ExitCode(), stderrContext(stderr))
 	}

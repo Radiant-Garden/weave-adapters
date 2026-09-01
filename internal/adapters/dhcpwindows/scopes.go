@@ -249,8 +249,7 @@ func (h *ScopesHandler) parseQuery(query url.Values) (pagination.Params, string,
 
 	params, pageErr := h.pages.Parse(query)
 
-	var apiErr *apierror.Error
-	if errors.As(pageErr, &apiErr) {
+	if apiErr, ok := errors.AsType[*apierror.Error](pageErr); ok {
 		fieldErrors = append(fieldErrors, apiErr.FieldErrors()...)
 	} else if pageErr != nil {
 		// Not a validation error at all, so it is not this function's to

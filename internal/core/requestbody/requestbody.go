@@ -110,8 +110,7 @@ func requireJSON(r *http.Request) error {
 // sending a body this adapter cannot read, which is a 400 whatever the
 // underlying json error was.
 func decodeError(err error, limit int) error {
-	var tooLarge *http.MaxBytesError
-	if errors.As(err, &tooLarge) {
+	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 		return apierror.New(catalog.API904, "limitBytes", limit)
 	}
 

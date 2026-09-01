@@ -211,8 +211,7 @@ func updateProblemFor(err error, wadaptID string) error {
 		return apierror.NotFound("scope " + truncateWadaptID(wadaptID))
 	}
 
-	var rangeErr *rangeOutsideSubnetError
-	if errors.As(err, &rangeErr) {
+	if rangeErr, ok := errors.AsType[*rangeOutsideSubnetError](err); ok {
 		fieldErrors := make([]apierror.FieldError, 0, len(rangeErr.fields))
 		for _, field := range rangeErr.fields {
 			fieldErrors = append(fieldErrors,

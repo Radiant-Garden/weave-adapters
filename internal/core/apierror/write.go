@@ -82,11 +82,10 @@ func WriteProblem(w http.ResponseWriter, problem Problem) {
 }
 
 // asError resolves any error to an *Error, mapping an unrecognized one onto the
-// internal catch-all. errors.As is used rather than a type assertion so a
+// internal catch-all. errors.AsType is used rather than a type assertion so a
 // wrapped *Error still resolves to its own taxonomy entry.
 func asError(err error) *Error {
-	var apiErr *Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*Error](err); ok {
 		return apiErr
 	}
 
