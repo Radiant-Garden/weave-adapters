@@ -1,9 +1,8 @@
 package middleware
 
 import (
-	"crypto/rand"
-	"fmt"
 	"net/http"
+	"uuid"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
@@ -66,16 +65,14 @@ func usableRequestID(id string) bool {
 }
 
 // newRequestID returns a random UUIDv4-formatted string.
+//
+// Go 1.27's uuid package sets the version and variant bits and renders the
+// lowercase hex-and-dash form of RFC 9562, which is byte-for-byte what the
+// hand-rolled generator this replaced produced. Its random component comes from
+// a cryptographically secure source, so the note that used to live here — that
+// crypto/rand fails by panicking rather than by returning an error, and that a
+// shared placeholder ID would silently merge unrelated requests' traces — is
+// now the standard library's to keep.
 func newRequestID() string {
-	var b [16]byte
-
-	// Since Go 1.24 crypto/rand.Read never returns an error; it panics if the
-	// system source fails. There is no fallback to write here — a shared
-	// placeholder ID would silently merge unrelated requests' traces.
-	_, _ = rand.Read(b[:])
-
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
-
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return uuid.NewV4().String()
 }
