@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
+	"runtime/pprof"
 	"uuid"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
@@ -9,8 +11,9 @@ import (
 )
 
 // RequestID accepts an inbound X-Request-Id or generates one, echoes it in the
-// response header, and populates the caller/request context the events system
-// reads. It runs before Logging so the request-completed event's ExternalSource
+// response header, populates the caller/request context the events system
+// reads, and labels the serving goroutine so runtime output carries the ID too.
+// It runs before Logging so the request-completed event's ExternalSource
 // guard (remoteAddr present) is satisfied. Auth later fills in subject/role.
 func RequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +35,25 @@ func RequestID(next http.Handler) http.Handler {
 			RemoteAddr: r.RemoteAddr,
 		})
 
-		next.ServeHTTP(w, r.WithContext(ctx))
+		// Label the goroutine with the same ID. Since Go 1.27 the runtime prints
+		// pprof labels in traceback headers, so this carries the request ID into
+		// the two places the caller context cannot reach: the traceback of a
+		// panic Recovery never sees, and the all-goroutine dump a SIGQUIT
+		// produces.
+		//
+		// The second is the one worth the cost here. This adapter blocks a
+		// request's goroutine on a powershell.exe spawn, so a wedged backend
+		// shows up as goroutines parked in exec — and without a label, a dump
+		// says how many are stuck but not which requests they belong to.
+		//
+		// It does not duplicate API-011: that event already carries requestId
+		// for a *recovered* panic. This covers the ones that never reach it.
+		//
+		// Operators who do not want it can set GODEBUG=tracebacklabels=0; the
+		// opt-out is expected to stay indefinitely, so no config key here.
+		pprof.Do(ctx, pprof.Labels("requestId", id), func(ctx context.Context) {
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
 	})
 }
 

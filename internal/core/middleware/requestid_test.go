@@ -9,6 +9,7 @@ Tested:
     - TestRequestID_ShouldPassThroughWhenPresent: an inbound ID is preserved.
     - TestRequestID_ShouldReplaceAnUnusableInboundID: oversized or control-byte IDs are regenerated, not echoed.
     - TestRequestID_ShouldBoundThePathItPutsInTheCallerContext: the path is truncated once, at the entry point.
+    - TestRequestID_ShouldLabelTheServingGoroutineWithTheID: the ID reaches the goroutine's traceback header.
   usableRequestID
     - Covered through TestRequestID_ShouldReplaceAnUnusableInboundID.
   newRequestID
@@ -29,10 +30,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
@@ -52,6 +55,33 @@ func TestRequestID_ShouldGenerateWhenAbsent(t *testing.T) {
 
 	// ASSERT
 	assert.Regexp(t, uuidV4, rw.Header().Get("X-Request-Id"))
+}
+
+func TestRequestID_ShouldLabelTheServingGoroutineWithTheID(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// The label is asserted through a stack dump rather than through
+	// pprof.Labels, because the dump is the thing operators actually read: since
+	// Go 1.27 the runtime prints goroutine labels in traceback headers, and that
+	// header is what ties a parked goroutine to the request that parked it.
+	var stack string
+
+	h := RequestID(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		stack = string(debug.Stack())
+	}))
+	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/", nil)
+	req.Header.Set("X-Request-Id", "label-me-42")
+
+	rw := httptest.NewRecorder()
+
+	// ACT
+	h.ServeHTTP(rw, req)
+
+	// ASSERT
+	require.NotEmpty(t, stack, "the handler must have run for the dump to mean anything")
+	assert.Contains(t, stack, `{requestId: "label-me-42"}`,
+		"the traceback header should name the request the goroutine is serving")
 }
 
 func TestRequestID_ShouldPassThroughWhenPresent(t *testing.T) {
