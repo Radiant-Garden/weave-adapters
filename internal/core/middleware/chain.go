@@ -6,7 +6,10 @@
 // deferred with the rest of Prometheus.
 package middleware
 
-import "net/http"
+import (
+	"net/http"
+	"slices"
+)
 
 // requestIDHeader is the inbound/outbound correlation header.
 const requestIDHeader = "X-Request-Id"
@@ -17,8 +20,8 @@ type Middleware func(http.Handler) http.Handler
 // Chain wraps h with the given middleware. The first middleware is the
 // outermost layer — it runs first on the way in and last on the way out.
 func Chain(h http.Handler, mws ...Middleware) http.Handler {
-	for i := len(mws) - 1; i >= 0; i-- {
-		h = mws[i](h)
+	for _, mw := range slices.Backward(mws) {
+		h = mw(h)
 	}
 
 	return h
