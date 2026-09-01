@@ -90,7 +90,7 @@ explicit.
 
 ## Local development
 
-**Prerequisites:** Go 1.26+, [Task](https://taskfile.dev), `golangci-lint` v2,
+**Prerequisites:** Go 1.27+, [Task](https://taskfile.dev), `golangci-lint` v2,
 and Docker (for the local container).
 
 Common tasks (`task --list` shows them all):

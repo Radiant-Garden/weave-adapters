@@ -612,7 +612,8 @@ func removeScope(t *testing.T, subnet string, mustSucceed bool) {
 	t.Helper()
 
 	script := fmt.Sprintf(
-		`$ErrorActionPreference = 'Stop'; Remove-DhcpServerv4Scope -ScopeId %s -Force`, subnet)
+		`$ErrorActionPreference = 'Stop'; Remove-DhcpServerv4Scope -ScopeId %s -Force`, subnet,
+	)
 
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 30*time.Second)
 	defer cancel()
@@ -656,7 +657,8 @@ func createBody(name string) string {
 	return fmt.Sprintf(
 		`{"name":%q,"startRange":%q,"endRange":%q,"subnetMask":%q,`+
 			`"description":"created by the e2e gate","leaseDurationSeconds":691200}`,
-		name, testStartRange, testEndRange, testSubnetMask)
+		name, testStartRange, testEndRange, testSubnetMask,
+	)
 }
 
 // createScope posts a body and returns status, decoded scope and headers.

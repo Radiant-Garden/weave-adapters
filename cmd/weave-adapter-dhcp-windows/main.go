@@ -255,7 +255,8 @@ func buildAuth(ctx context.Context, cfg *config.Config) ([]middleware.Middleware
 		if verifier.Len() > 0 {
 			return nil, fmt.Errorf(
 				"all %d tokens in %q have expired: run `token gen --label <name>` to mint a replacement",
-				verifier.Len(), cfg.AuthTokensFile)
+				verifier.Len(), cfg.AuthTokensFile,
+			)
 		}
 
 		return nil, fmt.Errorf("no tokens configured in %q: run `token gen --label <name>` or set disableAuth",

@@ -184,7 +184,8 @@ func (c *Config) Validate() error {
 		// The message says there is no unlimited setting, which is the mistake a 0
 		// most likely was.
 		errs = append(errs, fmt.Errorf(
-			"maxRequestBodyBytes must be at least 1 byte (there is no unlimited setting), got %d", c.MaxRequestBodyBytes))
+			"maxRequestBodyBytes must be at least 1 byte (there is no unlimited setting), got %d", c.MaxRequestBodyBytes,
+		))
 	}
 
 	if !c.DisableHTTPS {

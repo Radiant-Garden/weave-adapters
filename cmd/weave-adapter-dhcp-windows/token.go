@@ -165,7 +165,8 @@ func runTokenGen(args []string, p *printer, now func() time.Time) error {
 		return fmt.Errorf(
 			"token %q was saved to %s but could not be displayed, and cannot be recovered: "+
 				"run `token revoke --label %s`, then generate it again: %w",
-			entry.Label, *path, entry.Label, p.err)
+			entry.Label, *path, entry.Label, p.err,
+		)
 	}
 
 	return nil

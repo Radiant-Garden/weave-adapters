@@ -137,7 +137,8 @@ func validateRoute(pattern string) {
 		panic(fmt.Sprintf(
 			"httpserver: route pattern %q must be method-qualified, e.g. \"GET /api/v1/scopes\"; "+
 				"a path-only pattern matches every method and would answer 200 where the API promises 405",
-			pattern))
+			pattern,
+		))
 	}
 
 	// Reserved paths are rejected by path, not by whole pattern: it is the
@@ -146,7 +147,8 @@ func validateRoute(pattern string) {
 		panic(fmt.Sprintf(
 			"httpserver: route pattern %q targets %s, which this package owns; "+
 				"an adapter route there would shadow the endpoint weave polls",
-			pattern, path))
+			pattern, path,
+		))
 	}
 
 	// A catch-all matches every path the standard routes did not claim, so the
@@ -156,7 +158,8 @@ func validateRoute(pattern string) {
 		panic(fmt.Sprintf(
 			"httpserver: route pattern %q is a catch-all; it would swallow the router's own 404, "+
 				"which is where the problem+json error shape for unknown paths comes from",
-			pattern))
+			pattern,
+		))
 	}
 }
 

@@ -103,6 +103,16 @@ linters:
     paths:
       - vendor$
       - third_party$
+    rules:
+      # The event catalogs are declarative tables. Topic and FieldDef.Type are
+      # display-only metadata: internal/docgen Fprintf's them into
+      # docs/events.md and nothing else reads them, so they are prose, not keys.
+      # Naming "string" or "Lifecycle" adds indirection to data whose whole
+      # virtue is reading as data, and generate-check already diffs the rendered
+      # doc, so a typo surfaces there rather than silently.
+      - linters:
+          - goconst
+        path: (internal/core/events/catalog|internal/adapters/[^/]+/events)/
 
   settings:
     dupl:
@@ -115,6 +125,12 @@ linters:
     goconst:
       min-len: 3
       min-occurrences: 4
+      # Table-driven cases spell their inputs inline on purpose -- the table is
+      # meant to read as data. Hoisting a fixture string to a constant moves the
+      # input away from the case that uses it, which makes the test harder to
+      # read without making it safer. New in golangci-lint v2.12; goconst
+      # counted no test strings before it.
+      ignore-tests: true
     gocyclo:
       min-complexity: 13
     nolintlint:
@@ -131,7 +147,8 @@ formatters:
     - gofumpt
   settings:
     gofumpt:
-      extra-rules: true
+      extra:
+        group-params: true
   exclusions:
     generated: lax
     paths:
