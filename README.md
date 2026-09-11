@@ -30,6 +30,9 @@ scopes, reservations, and leases the same way.
 🚧 **Work in progress.**
 
 - [`docs/cli.md`](docs/cli.md) — command and flag reference.
+- [`docs/windows-service.md`](docs/windows-service.md) — running the adapter
+  under the Windows Service Control Manager: install, the LocalSystem
+  requirement, where the log goes, and what to read when it will not start.
 - [`docs/token-management.md`](docs/token-management.md) — how weave
   authenticates, and how tokens are generated, stored, and rotated.
 - [`docs/events.md`](docs/events.md) — the generated event catalog.

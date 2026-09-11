@@ -10,7 +10,12 @@ the extension for brevity.
 ```
 weave-adapter-dhcp-windows [flags]              # run the adapter
 weave-adapter-dhcp-windows token <command>      # manage tokens
+weave-adapter-dhcp-windows service <command>    # manage the Windows service
 ```
+
+Started by the Windows Service Control Manager, the binary detects that and
+runs as a service with no flag involved — see
+[windows-service.md](windows-service.md).
 
 ## Running the adapter
 
@@ -23,6 +28,7 @@ $ weave-adapter-dhcp-windows --port 8444
 | `--port` | int | `8444` | TCP port to listen on (1–65535) |
 | `--config` | string | none | Path to a TOML config file |
 | `--log-severity` | string | `info` | Log level: `debug`, `info`, `warn`, `error` |
+| `--log-file` | string | none | Write the log here instead of stdout. **Required for a service:** the SCM discards stdout, so a service without it logs nowhere |
 | `--disable-https` | bool | `true` | Must stay `true` — HTTPS is not implemented yet, so `false` is a startup error rather than a silent no-op |
 | `--auth-tokens-file` | string | `tokens.toml` | Path to the bearer token store, read once at startup |
 | `--disable-auth` | bool | `false` | Development only: serves every route unauthenticated, and says so loudly at startup (`SYS-006`) |
@@ -115,6 +121,91 @@ $ weave-adapter-dhcp-windows token revoke --label weave-staging
 An unknown label is an error, so a typo can never look like a successful
 revocation while the real token stays live.
 
+## Windows service management
+
+Every command here needs an **elevated** prompt — the Service Control Manager
+refuses all of them to a non-administrator — and every one of them operates on
+the fixed service name `wadapt-dhcp-windows`.
+
+```console
+$ weave-adapter-dhcp-windows service install --config C:\ProgramData\weave-adapters\config.toml --i-understand-this-runs-as-localsystem
+$ weave-adapter-dhcp-windows service start
+$ weave-adapter-dhcp-windows service status
+$ weave-adapter-dhcp-windows service stop
+$ weave-adapter-dhcp-windows service uninstall --yes
+```
+
+| Command | Does |
+|---|---|
+| `install` | Registers the service, sets its recovery behaviour, and locks down its files |
+| `uninstall` | Stops it, deletes the registration, removes its Event Log source. Needs `--yes` |
+| `start` / `stop` | Starts or stops it, waiting for the transition to finish |
+| `status` | What the SCM knows: state, start type, registered path, drain budget, recovery |
+| `secure` | Re-applies the file lockdown without touching the registration |
+
+### `service install`
+
+| Flag | Required | Meaning |
+|---|---|---|
+| `--config` | **yes** | Absolute path to the TOML config file |
+| `--i-understand-this-runs-as-localsystem` | **yes** | Acknowledges the privilege grant |
+
+`--config` is mandatory rather than optional, and the reason is worth
+understanding before you work around it. `identity.namespaceKey` has no
+command-line flag by design — an argv entry is readable by any local user —
+and a service has no private environment either: both the machine-wide
+variables and a service's own `Environment` value live in registry locations
+every local account can read. **The config file is the only channel left**, so
+a service installed without one cannot start at all.
+
+Install refuses a configuration that would not start, rather than registering
+it and letting the SCM retry three times before anyone looks. It resolves the
+file **without the process environment** — the elevated shell you are typing
+in is not the environment the service will get — and rejects:
+
+- any relative path (`authTokensFile`, `logFile`, `dhcp.powershellPath`), since
+  a service resolves them against `C:\Windows\System32`;
+- anything the server itself would reject, a missing `identity.namespaceKey`
+  most often.
+
+See [windows-service.md](windows-service.md) for what it registers and why.
+
+### `service uninstall`
+
+```console
+$ weave-adapter-dhcp-windows service uninstall
+This stops wadapt-dhcp-windows, deletes its registration, and removes its Event Log source.
+Re-run with --yes to proceed.
+```
+
+### `service status`
+
+```console
+$ weave-adapter-dhcp-windows service status
+wadapt-dhcp-windows
+  state:        Running
+  start type:   automatic
+  binary:       "C:\Program Files\weave-adapters\weave-adapter-dhcp-windows.exe" --config "C:\ProgramData\weave-adapters\config.toml"
+  drain budget: 20s
+  recovery:     restarts on failure, including a clean non-zero exit
+```
+
+The last line is the one to read. If it says **`WILL NOT restart on a clean
+non-zero exit`**, the restart schedule is registered but inert: Windows runs
+failure actions only for a process that dies *without* reporting stopped,
+which is not how a configuration failure exits. Reinstall to fix it.
+
+### `service secure`
+
+```console
+$ weave-adapter-dhcp-windows service secure --config C:\ProgramData\weave-adapters\config.toml
+```
+
+Locks the config file, the token store and the **log directory** to `SYSTEM`
+and the local `Administrators` group, and nothing else. `install` does this
+already; run it again after `token gen` creates a store that did not exist at
+install time, or after moving either path.
+
 ## Exit codes and output
 
 | Code | Meaning |
@@ -127,8 +218,9 @@ deliberate:
 
 - **Adapter startup** failures emit a structured `SYS-005` event, because they
   are operational outcomes an operator's log pipeline should capture.
-- **Token command** failures print `error: <message>` to stderr. A duplicate
-  label is a typo, not a startup failure, and does not belong in the event log.
+- **Token and service command** failures print `error: <message>` to stderr. A
+  duplicate label or a forgotten `--config` is a typo, not a startup failure,
+  and does not belong in the event log.
 
 ```console
 $ weave-adapter-dhcp-windows token gen --label weave-prod
