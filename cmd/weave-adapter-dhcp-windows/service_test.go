@@ -56,6 +56,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -128,6 +129,39 @@ func factoryFor(m *fakeManager, opened *bool) managerFactory {
 
 		return m, nil
 	}
+}
+
+// Windows-shaped paths for the config bodies below.
+//
+// They do not need to exist: install validates the configuration, it does not
+// open the token store or the log. They DO need to be Windows-absolute,
+// because the service-path rule applies Windows rules on every host -- which
+// is the point, and which is why t.TempDir() cannot be used for these values
+// even though it is used for the config file itself.
+const (
+	//nolint:gosec // G101: a path to the store, not a credential — the same exemption config.KeyAuthTokensFile carries.
+	winTokenStore = `C:\ProgramData\weave-adapters\tokens.toml`
+	winLogFile    = `C:\ProgramData\weave-adapters\adapter.log`
+)
+
+// writeServiceConfig writes a config file install will accept, and returns its
+// path.
+func writeServiceConfig(t *testing.T, extra string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+
+	body := "" +
+		"logFile = '" + winLogFile + "'\n" +
+		"authTokensFile = '" + winTokenStore + "'\n" +
+		"[identity]\n" +
+		"namespaceKey = 'install-namespace-key-0123456789'\n" +
+		"serverName = 'dhcp01.install.test'\n" +
+		extra
+
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	return path
 }
 
 func TestRunService_ShouldRequireACommand(t *testing.T) {
@@ -233,10 +267,15 @@ func TestRunServiceInstall_ShouldRegisterAnAbsoluteUnquotedDefinition(t *testing
 	var out bytes.Buffer
 
 	m := &fakeManager{}
-	relative := filepath.Join("etc", "config.toml")
+
+	// A relative --config, to prove the registration resolves it: the path the
+	// SCM records must not depend on where the installer happened to be run.
+	cfg := writeServiceConfig(t, "")
+	rel, err := filepath.Rel(mustGetwd(t), cfg)
+	require.NoError(t, err)
 
 	// ACT
-	err := runService([]string{"install", "--" + consentFlag, "--config", relative}, &out, factoryFor(m, nil))
+	err = runService([]string{"install", "--" + consentFlag, "--config", rel}, &out, factoryFor(m, nil))
 
 	// ASSERT
 	require.NoError(t, err)
@@ -268,7 +307,8 @@ func TestRunServiceInstall_ShouldPassTheDrainBudgetThrough(t *testing.T) {
 	m := &fakeManager{}
 
 	// ACT
-	err := runService([]string{"install", "--" + consentFlag, "--config", "cfg.toml"}, &out, factoryFor(m, nil))
+	err := runService([]string{"install", "--" + consentFlag, "--config", writeServiceConfig(t, "")},
+		&out, factoryFor(m, nil))
 
 	// ASSERT
 	// It becomes the service's PreshutdownTimeout. The binary owns one value
@@ -289,7 +329,8 @@ func TestRunServiceInstall_ShouldReportAnAlreadyInstalledService(t *testing.T) {
 	m := &fakeManager{installErr: winsvc.ErrAlreadyInstalled}
 
 	// ACT
-	err := runService([]string{"install", "--" + consentFlag, "--config", "cfg.toml"}, &out, factoryFor(m, nil))
+	err := runService([]string{"install", "--" + consentFlag, "--config", writeServiceConfig(t, "")},
+		&out, factoryFor(m, nil))
 
 	// ASSERT
 	require.ErrorIs(t, err, winsvc.ErrAlreadyInstalled)
@@ -451,4 +492,114 @@ func TestPreshutdownDescription_ShouldNameTheDefaultWhenUnset(t *testing.T) {
 	// ARRANGE / ACT / ASSERT
 	assert.Contains(t, preshutdownDescription(0), "default")
 	assert.Equal(t, "45s", preshutdownDescription(45*time.Second))
+}
+
+// mustGetwd returns the working directory, failing the test rather than the
+// caller having to handle an error that cannot happen in practice.
+func mustGetwd(t *testing.T) string {
+	t.Helper()
+
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+
+	return wd
+}
+
+func TestRunServiceInstall_ShouldRefuseAConfigurationThatCannotStart(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		body    string
+		wantErr string
+	}{
+		"should refuse a relative token store": {
+			body: "authTokensFile = 'tokens.toml'\n" +
+				"[identity]\nnamespaceKey = 'install-namespace-key-0123456789'\nserverName = 'd.test'\n",
+			// The trap the phase is named for, and the likeliest one: it is the
+			// shipped default, so an operator who never set the key gets it.
+			wantErr: "authTokensFile",
+		},
+		"should refuse a relative log file": {
+			body: "logFile = 'logs\\\\adapter.log'\n" +
+				"authTokensFile = '" + winTokenStore + "'\n" +
+				"[identity]\nnamespaceKey = 'install-namespace-key-0123456789'\nserverName = 'd.test'\n",
+			wantErr: "logFile",
+		},
+		"should refuse a relative powershell path": {
+			body: "authTokensFile = '" + winTokenStore + "'\n" +
+				"[dhcp]\npowershellPath = 'bin\\\\pwsh.exe'\n" +
+				"[identity]\nnamespaceKey = 'install-namespace-key-0123456789'\nserverName = 'd.test'\n",
+			wantErr: "dhcp.powershellPath",
+		},
+		"should refuse a missing identity key": {
+			// Not a path rule, but the same principle: a configuration the
+			// server would reject must not be registered as a service that
+			// will retry it three times before anyone looks.
+			body:    "authTokensFile = '" + winTokenStore + "'\n[identity]\nserverName = 'd.test'\n",
+			wantErr: "identity.namespaceKey",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// ARRANGE
+			var out bytes.Buffer
+
+			path := filepath.Join(t.TempDir(), "config.toml")
+			require.NoError(t, os.WriteFile(path, []byte(tc.body), 0o600))
+
+			m := &fakeManager{}
+
+			// ACT
+			err := runService([]string{"install", "--" + consentFlag, "--config", path}, &out, factoryFor(m, nil))
+
+			// ASSERT
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.Empty(t, m.installed, "a service was registered for a configuration that cannot start")
+		})
+	}
+}
+
+func TestRunServiceInstall_ShouldAcceptABarePowerShellName(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	var out bytes.Buffer
+
+	m := &fakeManager{}
+	cfg := writeServiceConfig(t, "[dhcp]\npowershellPath = 'powershell.exe'\n")
+
+	// ACT
+	err := runService([]string{"install", "--" + consentFlag, "--config", cfg}, &out, factoryFor(m, nil))
+
+	// ASSERT
+	// The shipped default. Go's LookPath does not search the working directory
+	// on Windows, so a bare name cannot resolve against C:\Windows\System32 the
+	// way a relative path does — and a rule that rejected it would be one
+	// nobody could satisfy.
+	require.NoError(t, err)
+	assert.Len(t, m.installed, 1)
+}
+
+func TestRunServiceInstall_ShouldRefuseAMissingConfigFile(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	var out bytes.Buffer
+
+	m := &fakeManager{}
+	absent := filepath.Join(t.TempDir(), "not-there.toml")
+
+	// ACT
+	err := runService([]string{"install", "--" + consentFlag, "--config", absent}, &out, factoryFor(m, nil))
+
+	// ASSERT
+	// Registering a service that points at a file which is not there
+	// guarantees a failed start, three SCM retries, and an operator reading
+	// Event Viewer for something the installer could see.
+	require.Error(t, err)
+	assert.Empty(t, m.installed)
 }

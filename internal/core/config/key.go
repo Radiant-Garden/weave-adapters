@@ -39,6 +39,34 @@ func (t Type) String() string {
 	}
 }
 
+// PathKind classifies a key whose value names a location on disk.
+//
+// It is declared per key, by whoever registers it, because only the owner
+// knows whether a value is a path at all and whether a bare name is legitimate
+// for it. The alternative — a list of path keys kept somewhere central — could
+// not see an adapter's keys from core, and would go stale the first time
+// somebody added one.
+type PathKind int
+
+const (
+	// NotAPath is the default: the value names no location.
+	NotAPath PathKind = iota
+
+	// FilePath is a filesystem path. Under a service it must be absolute.
+	FilePath
+
+	// CommandPath is an executable: either an absolute path, or a bare command
+	// name resolved through PATH.
+	//
+	// The bare-name case is not a loophole. Go's exec.LookPath does not search
+	// the working directory on Windows, so a bare name cannot silently resolve
+	// against C:\Windows\System32 the way a relative path does — which is the
+	// entire trap this classification exists to catch. Rejecting bare names
+	// would also reject the shipped default for dhcp.powershellPath, making a
+	// rule nobody could satisfy.
+	CommandPath
+)
+
 // Key is one registered configuration key. Registration is what makes the
 // loader generic: core owns the precedence machinery and knows nothing about
 // which keys exist, so an adapter declares its own without editing core.
@@ -65,6 +93,16 @@ type Key struct {
 	Default any
 	// Usage is the flag's help text.
 	Usage string
+	// Path classifies the value as a location on disk, so the service
+	// installer and the service startup path can refuse one that would not
+	// resolve the same way from a service's working directory.
+	//
+	// Under the Service Control Manager the working directory is
+	// C:\Windows\System32, so a relative path resolves somewhere nobody
+	// intended and the service fails at startup with a file-not-found an
+	// operator reads as a bug.
+	Path PathKind
+
 	// NoFlag suppresses this key's CLI flag, leaving it settable only from the
 	// environment or a config file.
 	//

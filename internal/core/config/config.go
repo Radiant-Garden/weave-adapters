@@ -93,6 +93,7 @@ func CoreKeys() Spec {
 		{
 			Name: KeyLogFile,
 			Type: TypeString,
+			Path: FilePath,
 			// No default, and empty means stdout -- today's behaviour, kept
 			// exactly. A default path would start writing files on developer
 			// machines that never asked for one, and the only context that
@@ -104,6 +105,7 @@ func CoreKeys() Spec {
 		{
 			Name:    KeyAuthTokensFile,
 			Type:    TypeString,
+			Path:    FilePath,
 			Default: DefaultAuthTokensFile,
 			Usage:   "path to the bearer token store",
 		},

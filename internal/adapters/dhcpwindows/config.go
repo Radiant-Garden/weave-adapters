@@ -96,8 +96,14 @@ func Keys() config.Spec {
 			Usage:   "DHCP server to query; empty means the local host",
 		},
 		{
-			Name:    KeyPowerShellPath,
-			Type:    config.TypeString,
+			Name: KeyPowerShellPath,
+			Type: config.TypeString,
+			// CommandPath, not FilePath: the default is the bare name
+			// powershell.exe, resolved through PATH, and Go's LookPath does
+			// not search the working directory on Windows — so a bare name
+			// cannot resolve against the SCM's C:\Windows\System32 the way a
+			// relative path would.
+			Path:    config.CommandPath,
 			Default: defaultPowerShellPath,
 			Usage:   "path to powershell.exe or pwsh",
 		},

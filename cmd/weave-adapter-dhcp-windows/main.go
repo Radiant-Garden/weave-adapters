@@ -293,6 +293,18 @@ func runWith(ctx context.Context, args []string, l launch) (io.Closer, error) {
 		return nil, fmt.Errorf("loading config: %w", err)
 	}
 
+	// Belt and braces to the installer's own check, and not redundant with it.
+	// The installer resolves without the environment, deliberately, so a
+	// relative path arriving from a machine-wide variable is invisible to it —
+	// this is the only altitude that can see one. It costs a map walk at
+	// startup and turns a file-not-found an operator reads as a bug into a
+	// message that names the key and the working directory.
+	if l.mode == runModeService {
+		if err := config.CheckServicePaths(values); err != nil {
+			return nil, fmt.Errorf("this configuration cannot work as a service:\n%w", err)
+		}
+	}
+
 	// Before the first Emit, and its failure is returned rather than logged:
 	// a log sink that could not be opened is the one error that cannot report
 	// itself through the log.

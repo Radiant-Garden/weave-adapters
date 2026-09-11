@@ -71,6 +71,21 @@ func Load(spec Spec, args []string) (*Values, error) {
 	return load(spec, args, os.Environ)
 }
 
+// LoadWithoutEnvironment is Load with the process environment excluded, so the
+// result is what a *different* process would resolve from the same file and
+// arguments.
+//
+// It exists for the service installer, and the distinction is not academic.
+// The installer runs in an elevated operator's shell; the service runs under
+// the SCM with the machine environment. A value exported in that shell —
+// identity.namespaceKey most damagingly — would make every check the installer
+// runs pass, and then be absent at every single boot. Validating against an
+// environment the service will not have is worse than not validating, because
+// it produces a confident yes.
+func LoadWithoutEnvironment(spec Spec, args []string) (*Values, error) {
+	return load(spec, args, func() []string { return nil })
+}
+
 // load is the testable core of Load with an injectable environment source.
 func load(spec Spec, args []string, environ func() []string) (*Values, error) {
 	index, err := spec.index()

@@ -620,6 +620,22 @@ func TestRunServer_ShouldWriteStartupFailureToTheLogFile(t *testing.T) {
 		"the startup failure must reach the log file, which is the whole reason logFile exists")
 }
 
+// serviceArgs builds arguments a service-mode run will accept.
+//
+// Service mode now checks that every path-valued key is absolute under
+// WINDOWS rules, on any host, so a test driving runModeService has to supply
+// one even on macOS. The store is never opened -- these runs pass
+// --disable-auth -- but the check does not know that, and it should not: a
+// path rule that made an exception for the current auth setting would stop
+// applying the moment somebody turned auth back on.
+func serviceArgs(t *testing.T, extra ...string) []string {
+	t.Helper()
+
+	base := []string{"--auth-tokens-file", `C:\ProgramData\weave-adapters\tokens.toml`, "--disable-auth"}
+
+	return withIdentity(t, append(base, extra...)...)
+}
+
 //nolint:paralleltest // installs the event recorder, which is process-global
 func TestRun_ShouldReportTheConsoleRunMode(t *testing.T) {
 	// ARRANGE
@@ -656,7 +672,7 @@ func TestRunWith_ShouldInvokeReadyOnceTheListenerIsBound(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	ready := make(chan struct{})
 
-	args := withIdentity(t, "--port", strconv.Itoa(freePort(t)), "--disable-auth")
+	args := serviceArgs(t, "--port", strconv.Itoa(freePort(t)))
 
 	errCh := make(chan error, 1)
 
@@ -712,7 +728,10 @@ func TestRunWith_ShouldNotInvokeReadyWhenStartupFails(t *testing.T) {
 	t.Cleanup(func() { _ = held.Close() })
 
 	// ACT
-	closer, runErr := runWith(t.Context(), withIdentity(t, "--port", strconv.Itoa(port), "--disable-auth"), launch{
+	// serviceArgs, not bare args: without an absolute token-store path this
+	// would now fail the service-mode path check instead of the bind, and
+	// pass for a reason that has nothing to do with what it asserts.
+	closer, runErr := runWith(t.Context(), serviceArgs(t, "--port", strconv.Itoa(port)), launch{
 		mode:  runModeService,
 		ready: func() { invoked.Store(true) },
 	})

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows"
+	"github.com/radiantgarden/weave-adapters/internal/core/config"
 	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
 )
 
@@ -122,6 +124,36 @@ func runServiceInstall(args []string, p *printer, newManager managerFactory) err
 			"identity.namespaceKey cannot be passed as a flag (argv is readable by any local user) " +
 			"and every environment channel under the SCM is readable from the registry, so the config " +
 			"file is the only way the service can be given it")
+	}
+
+	// Resolved the way the server will, and WITHOUT the environment. This
+	// shell is an elevated operator's; the service gets the machine
+	// environment under the SCM. A value exported here would make every check
+	// below pass and then be absent at every boot, which is a confident yes
+	// for a service that cannot start — worse than not checking.
+	//
+	// Checking the whole resolved configuration rather than the flags this
+	// command was handed is what catches a relative authTokensFile set inside
+	// the TOML, which is where it is most likely to be.
+	values, err := config.LoadWithoutEnvironment(
+		append(config.CoreKeys(), dhcpwindows.Keys()...),
+		[]string{"--config", *configPath},
+	)
+	if err != nil {
+		return fmt.Errorf("service install: reading %q: %w", *configPath, err)
+	}
+
+	// Validated as fully as the server will, not merely parsed. The commonest
+	// way for a service to fail every start is a configuration that would have
+	// been rejected at the first console run — a missing identity.namespaceKey
+	// above all — and the difference between catching it here and catching it
+	// on the host is an error the operator reads now versus one they read in
+	// Event Viewer after the SCM has retried three times.
+	_, coreErr := config.Core(values)
+	_, adapterErr := dhcpwindows.NewConfig(values)
+
+	if err := errors.Join(config.CheckServicePaths(values), coreErr, adapterErr); err != nil {
+		return fmt.Errorf("service install: this configuration would not start as a service:\n%w", err)
 	}
 
 	binPath, err := os.Executable()
