@@ -51,6 +51,15 @@ var version = "0.0.0-dev"
 // collide with the first's while looking like a different service.
 const serviceName = "wadapt-dhcp-windows"
 
+// What services.msc shows. The display name leads with weave because that is
+// what an operator scanning the list is looking for, and the description says
+// what breaks if the service is stopped rather than restating the name.
+const (
+	serviceDisplayName = "weave DHCP adapter (Windows)"
+	serviceDescription = "Serves this host's Windows DHCP scopes to weave over the uniform adapter HTTP API. " +
+		"While this is stopped, weave cannot read or change DHCP on this server."
+)
+
 // Run modes, as reported by SYS-001's runMode field.
 const (
 	runModeConsole = "console"
@@ -75,7 +84,17 @@ func main() {
 
 	var err error
 
-	if isTokenCommand(args) {
+	switch {
+	case isServiceCommand(args):
+		err = runService(args[1:], os.Stdout, winsvc.NewManager)
+		if err != nil {
+			// A CLI mistake is not a startup failure, the same reasoning the
+			// token arm applies: an operator who forgot --config gets a plain
+			// message, never a structured SYS-005 claiming the adapter failed
+			// to start.
+			fmt.Fprintln(os.Stderr, "error:", err)
+		}
+	case isTokenCommand(args):
 		err = runToken(args[1:], os.Stdout, time.Now)
 		if err != nil {
 			// A CLI mistake (bad flag, duplicate label) is not a startup
@@ -84,13 +103,19 @@ func main() {
 			// structured log line claiming the adapter failed to start.
 			fmt.Fprintln(os.Stderr, "error:", err)
 		}
-	} else {
+	default:
 		err = runServer(args)
 	}
 
 	if err != nil {
 		os.Exit(1)
 	}
+}
+
+// isServiceCommand reports whether args invoke service management rather than
+// a server run.
+func isServiceCommand(args []string) bool {
+	return len(args) > 0 && args[0] == "service"
 }
 
 // isTokenCommand reports whether args invoke token management rather than a
