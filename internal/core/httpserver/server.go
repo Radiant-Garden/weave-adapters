@@ -57,10 +57,13 @@ const (
 	openAPIContentType = "application/yaml"
 )
 
-// shutdownGrace bounds the drain. A var rather than a const so the drain-overran
-// path can be tested without a test that sleeps for the real grace period; no
-// production code assigns it.
-var shutdownGrace = 15 * time.Second
+// DefaultShutdownGrace bounds the drain when a caller sets no other value.
+//
+// It is exported because the binary needs the same number twice: the server
+// drains within it, and the Windows service runner derives the WaitHint it
+// reports to the SCM from it. A service that promises the SCM less time than
+// the server actually takes gets killed mid-drain.
+const DefaultShutdownGrace = 15 * time.Second
 
 // ErrShutdownIncomplete reports that the drain grace period expired with
 // requests still in flight. It exists so a caller can tell a failed shutdown
@@ -70,7 +73,9 @@ var ErrShutdownIncomplete = errors.New("shutdown did not complete within the gra
 
 // Server wraps net/http.Server with the adapter's standard routes.
 type Server struct {
-	httpServer *http.Server
+	httpServer    *http.Server
+	shutdownGrace time.Duration
+	ready         func()
 }
 
 // Route is one adapter-supplied route: a net/http.ServeMux pattern and the
@@ -92,10 +97,12 @@ type Option func(*settings)
 // through the With* functions, so a field added here is not a breaking change
 // at any call site.
 type settings struct {
-	inner        []middleware.Middleware
-	routes       []Route
-	spec         []byte
-	writeTimeout time.Duration
+	inner         []middleware.Middleware
+	routes        []Route
+	spec          []byte
+	writeTimeout  time.Duration
+	shutdownGrace time.Duration
+	ready         func()
 }
 
 // WithInnerMiddleware adds middlewares inside the standard chain —
@@ -192,11 +199,43 @@ func WithWriteTimeout(d time.Duration) Option {
 	return func(s *settings) { s.writeTimeout = d }
 }
 
+// WithShutdownGrace bounds the drain at d rather than DefaultShutdownGrace.
+//
+// It is an Option rather than a package var for two reasons. A var that
+// production code must never assign is a seam pretending to be a setting, and
+// the binary genuinely needs to own this number: the Windows service runner
+// reports a WaitHint derived from the same value, and the two drifting apart is
+// what gets a legitimate drain cut short by the SCM. A non-positive d is
+// ignored, so a zero-valued config cannot silently disable the drain.
+func WithShutdownGrace(d time.Duration) Option {
+	return func(s *settings) {
+		if d > 0 {
+			s.shutdownGrace = d
+		}
+	}
+}
+
+// WithReadyFunc registers a callback invoked once, immediately after the listen
+// address is bound and before the server starts accepting.
+//
+// It exists because "started" and "serving" are different facts and only the
+// second one is worth announcing. Under the Windows SCM, reporting Running when
+// the serving goroutine merely launched makes `sc start` succeed for a service
+// that dies a millisecond later on a port conflict — the operator is told the
+// service came up, and the failure surfaces later as an outage rather than as a
+// failed start.
+//
+// The callback runs on Run's goroutine before Serve is called, so it must not
+// block. It is not invoked at all when the bind fails, which is the whole point.
+func WithReadyFunc(ready func()) Option {
+	return func(s *settings) { s.ready = ready }
+}
+
 // New builds a Server listening on addr with the given health handler mounted
 // at GET /api/v1/health, wrapped in the standard middleware chain (recovery →
 // request-ID → logging → inner → problem-errors).
 func New(addr string, healthHandler http.Handler, opts ...Option) *Server {
-	var set settings
+	set := settings{shutdownGrace: DefaultShutdownGrace}
 
 	for _, opt := range opts {
 		opt(&set)
@@ -215,6 +254,8 @@ func New(addr string, healthHandler http.Handler, opts ...Option) *Server {
 	}
 
 	return &Server{
+		shutdownGrace: set.shutdownGrace,
+		ready:         set.ready,
 		httpServer: &http.Server{
 			Addr:              addr,
 			Handler:           NewHandler(mux, set.inner...),
@@ -336,6 +377,13 @@ func (s *Server) Run(ctx context.Context) error {
 	// The resolved address, not the configured one — port 0 picks a real port.
 	events.Emit(ctx, catalog.SYS002, "addr", listener.Addr().String())
 
+	// After the bind and the event, before the first Accept: everything a
+	// caller means by "ready" has happened, and nothing that could still fail
+	// at startup remains.
+	if s.ready != nil {
+		s.ready()
+	}
+
 	errCh := make(chan error, 1)
 
 	go func() {
@@ -354,7 +402,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 		// Background (not ctx): ctx is already cancelled, so the drain must run
 		// on a fresh deadline or Shutdown would return immediately.
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.shutdownGrace)
 		defer cancel()
 
 		shutdownErr := s.httpServer.Shutdown(shutdownCtx)
@@ -374,7 +422,7 @@ func (s *Server) Run(ctx context.Context) error {
 			// the version of this line an operator would act on wrongly.
 			events.Emit(shutdownCtx, catalog.SYS007,
 				"error", shutdownErr.Error(),
-				"graceSeconds", int(shutdownGrace.Seconds()),
+				"graceSeconds", int(s.shutdownGrace.Seconds()),
 			)
 
 			return fmt.Errorf("%w: %w", ErrShutdownIncomplete, shutdownErr)

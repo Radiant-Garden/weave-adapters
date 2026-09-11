@@ -39,6 +39,16 @@ import (
 // version is the adapter version, overridable via -ldflags at build time.
 var version = "0.0.0-dev"
 
+// drainBudget is how long in-flight requests get after shutdown begins.
+//
+// It lives here, in the binary, because two components need the same number and
+// they are in packages that must not know about each other: the HTTP server
+// drains within it, and the Windows service runner reports a WaitHint to the
+// SCM derived from it. Promising the SCM less time than the server takes gets a
+// legitimate drain killed; the two drifting apart is only avoidable if one
+// place owns the value.
+const drainBudget = httpserver.DefaultShutdownGrace
+
 // main owns the three things run must not: signal wiring, the CLI-vs-server
 // split, and the process exit code. It is the only place that calls os.Exit, so
 // every startup path stays testable through run.
@@ -188,6 +198,7 @@ func run(ctx context.Context, args []string) error {
 		httpserver.WithInnerMiddleware(authMiddleware...),
 		httpserver.WithOpenAPISpec(apispec.Spec()),
 		httpserver.WithWriteTimeout(writeTimeout),
+		httpserver.WithShutdownGrace(drainBudget),
 		httpserver.WithRoutes(
 			httpserver.Route{
 				Pattern: "GET " + dhcpwindows.ScopesPath,

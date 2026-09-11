@@ -42,6 +42,13 @@ Tested elsewhere:
   demo resource through it, which is the case New itself cannot cover since it
   always builds its own mux.
 
+  WithShutdownGrace -> - TestRun_ShouldReportAnIncompleteShutdownRatherThanClaimItDrained:
+                         a 50ms grace really does bound the drain.
+                       - TestWithShutdownGrace_ShouldIgnoreANonPositiveDuration: a
+                         zero-valued config cannot disable the drain.
+  WithReadyFunc     -> - TestRun_ShouldInvokeTheReadyCallbackOnceTheListenerIsBound
+                       - TestRun_ShouldNotInvokeTheReadyCallbackWhenTheBindFails
+
 Declined:
   The Serve-error-racing-a-context-cancel path. Run now drains errCh after
   Shutdown so the error cannot be swallowed, but provoking that race
@@ -54,9 +61,11 @@ Additional Remarks:
   with each other, and drive shutdown via context cancel (not a real signal) so
   they behave identically on Windows and Unix.
 
-  TestRun_ShouldReportAnIncompleteShutdownRatherThanClaimItDrained overrides the
-  package-level shutdownGrace so it costs 50ms rather than the real 15s. That is
-  why the var exists; nothing in production assigns it.
+  TestRun_ShouldReportAnIncompleteShutdownRatherThanClaimItDrained passes
+  WithShutdownGrace(50ms) so it costs 50ms rather than the real 15s. It used to
+  reach into a package-level var, which is why it could not run in parallel; the
+  option replaced the var because the binary needs to own that number anyway --
+  the Windows service runner derives its SCM WaitHint from the same value.
 
   Tests that install the event recorder mutate the process-global emitter hook
   and therefore cannot run in parallel.
@@ -73,6 +82,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -628,17 +638,12 @@ func TestRun_ShouldReturnErrorWhenAddressUnavailable(t *testing.T) {
 	rec.AssertNotEmitted(t, catalog.SYS002)
 }
 
-//nolint:paralleltest // installs the recorder and overrides shutdownGrace, both global
+//nolint:paralleltest // installs the recorder, which is process-global
 func TestRun_ShouldReportAnIncompleteShutdownRatherThanClaimItDrained(t *testing.T) {
 	// ARRANGE — a handler that outlives the grace period, which is what a drain
 	// timeout means in production: a request still in flight when time runs out.
 	rec := eventstest.NewRecorder()
 	t.Cleanup(rec.Install())
-
-	original := shutdownGrace
-	shutdownGrace = 50 * time.Millisecond
-
-	t.Cleanup(func() { shutdownGrace = original })
 
 	inFlight := make(chan struct{})
 	release := make(chan struct{})
@@ -654,7 +659,13 @@ func TestRun_ShouldReportAnIncompleteShutdownRatherThanClaimItDrained(t *testing
 	}
 
 	ctx, cancel := context.WithCancel(t.Context())
-	srv := New("127.0.0.1:0", health.NewHandler("1.2.3", time.Now()), WithInnerMiddleware(blocking))
+	srv := New("127.0.0.1:0", health.NewHandler("1.2.3", time.Now()),
+		WithInnerMiddleware(blocking),
+		// 50ms rather than the real 15s, per-server rather than by reaching
+		// into a package var: this is the setting a binary sets, so the test
+		// drives the same path production does.
+		WithShutdownGrace(50*time.Millisecond),
+	)
 	errCh := make(chan error, 1)
 
 	go func() { errCh <- srv.Run(ctx) }()
@@ -713,4 +724,102 @@ func waitForListenAddr(t *testing.T, rec *eventstest.Recorder) string {
 	t.Fatal("server did not report a listen address within 5s")
 
 	return ""
+}
+
+func TestWithShutdownGrace_ShouldIgnoreANonPositiveDuration(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		grace time.Duration
+		want  time.Duration
+	}{
+		"should keep the default when the duration is zero":     {grace: 0, want: DefaultShutdownGrace},
+		"should keep the default when the duration is negative": {grace: -time.Second, want: DefaultShutdownGrace},
+		"should take a positive duration":                       {grace: time.Second, want: time.Second},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// ARRANGE / ACT
+			// A zero here is an unset config field, not a request to drain
+			// instantly: honouring it would cut every in-flight request at the
+			// moment of shutdown and report SYS-007 for a healthy process.
+			srv := New("127.0.0.1:0", health.NewHandler("1.2.3", time.Now()), WithShutdownGrace(tc.grace))
+
+			// ASSERT
+			assert.Equal(t, tc.want, srv.shutdownGrace)
+		})
+	}
+}
+
+//nolint:paralleltest // installs the recorder, which is process-global
+func TestRun_ShouldInvokeTheReadyCallbackOnceTheListenerIsBound(t *testing.T) {
+	// ARRANGE
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	ready := make(chan struct{})
+	srv := New("127.0.0.1:0", health.NewHandler("1.2.3", time.Now()),
+		WithReadyFunc(func() { close(ready) }),
+	)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errCh := make(chan error, 1)
+
+	go func() { errCh <- srv.Run(ctx) }()
+
+	// ACT
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the ready callback was never invoked")
+	}
+
+	// ASSERT — ready must mean bound, so the address is already resolvable and
+	// the socket already answers. Anything less and a caller that reports
+	// "running" on this signal is lying about a server that may still fail.
+	addr := waitForListenAddr(t, rec)
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+addr+healthPath, nil)
+	require.NoError(t, err)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err, "the socket must answer by the time ready fires")
+
+	_ = resp.Body.Close()
+
+	cancel()
+	require.NoError(t, <-errCh)
+}
+
+//nolint:paralleltest // installs the recorder, which is process-global
+func TestRun_ShouldNotInvokeTheReadyCallbackWhenTheBindFails(t *testing.T) {
+	// ARRANGE — hold the port so the server cannot have it.
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	var lc net.ListenConfig
+
+	held, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = held.Close() })
+
+	var invoked atomic.Bool
+
+	srv := New(held.Addr().String(), health.NewHandler("1.2.3", time.Now()),
+		WithReadyFunc(func() { invoked.Store(true) }),
+	)
+
+	// ACT
+	runErr := srv.Run(t.Context())
+
+	// ASSERT — this is the whole reason the callback exists. A caller that
+	// reported "running" here would tell the operator `sc start` succeeded for
+	// a service that never bound a port.
+	require.Error(t, runErr)
+	assert.False(t, invoked.Load(), "ready fired despite the bind failing")
+	rec.AssertNotEmitted(t, catalog.SYS002)
 }
