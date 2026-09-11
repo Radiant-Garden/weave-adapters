@@ -114,9 +114,11 @@ func (h *handler) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- svc.S
 
 // translate maps an SCM control onto this package's own command set.
 //
-// listing the rest as explicit refusals would restate the default without adding a decision.
+// The default branch is the decision, not an oversight: svc.Cmd has a dozen
+// members and this function exists to accept three of them, so listing the
+// rest as explicit refusals would restate the default without adding anything.
 //
-//nolint:exhaustive // svc.Cmd has a dozen members and this function exists to accept three of them;
+//nolint:exhaustive // the default branch is the decision; see above.
 func translate(cmd svc.Cmd) (Command, bool) {
 	switch cmd {
 	case svc.Interrogate:

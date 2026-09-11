@@ -23,6 +23,9 @@ Tested:
 	                  - TestControllerRun_ShouldGiveUpOnAServeThatOverrunsTheDrainBudget
 	                  - TestControllerRun_ShouldTreatPreShutdownAsAStop
 	                  - TestControllerRun_ShouldStopWhenAStopArrivesBeforeServeIsReady
+	                  - TestControllerRun_ShouldDrainWhenAStopArrivesBeforeReadyAndServeWedges
+	                  - TestControllerRun_ShouldAdvanceTheCheckpointWhenAStopArrivesBeforeReady
+	                  - TestControllerRun_ShouldNotHangWhenTheRequestChannelClosesAndServeWedges
 
 Tested elsewhere:
 
@@ -56,6 +59,12 @@ Additional Remarks:
 	mid-life is never restarted; too strict and the SCM restarts a service the
 	operator deliberately stopped. Both branches were measured against a real
 	SCM before this code existed, and both are asserted below.
+
+	Three tests wedge serve rather than letting it return on cancel, and they
+	exist because a serve that returns promptly hides every missing backstop.
+	The stop-before-ready path shipped broken for exactly that reason: it fell
+	into the running phase, which has no ticker and no backstop, and the test
+	that covered it passed because its fake serve was well behaved.
 
 	Every test drives requests through an unbuffered channel, matching the
 	Windows handler's own: the control callback blocks sending into it on the
@@ -608,4 +617,102 @@ func TestControllerRun_ShouldStopWhenAStopArrivesBeforeServeIsReady(t *testing.T
 	assert.NotContains(t, f.rec.states(), StateRunning)
 	assert.Equal(t, StateStopped, f.rec.last(t).State)
 	assert.Zero(t, f.outcome.Code)
+}
+
+func TestControllerRun_ShouldDrainWhenAStopArrivesBeforeReadyAndServeWedges(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// The stop-before-ready path used to fall into the running phase, which has
+	// neither the checkpoint ticker nor the backstop. A serve that returned
+	// promptly on cancel hid it; one that wedges does not.
+	wedged := make(chan struct{})
+
+	t.Cleanup(func() { close(wedged) })
+
+	serve := func(ctx context.Context, _ func()) error {
+		<-ctx.Done()
+		<-wedged // never signals ready, and never returns
+
+		return nil
+	}
+
+	f := start(t, serve)
+
+	// ACT
+	f.requests <- CmdStop
+
+	f.wait(t)
+
+	// ASSERT
+	// Without the fix this hangs forever, which under a real SCM is a service
+	// parked at STOP_PENDING until someone kills the process.
+	require.ErrorIs(t, f.err, ErrServeOverran)
+	assert.Zero(t, f.outcome.Code, "a requested stop exits zero even when serve wedged")
+	assert.Equal(t, StateStopped, f.rec.last(t).State)
+	assert.NotContains(t, f.rec.states(), StateRunning)
+}
+
+func TestControllerRun_ShouldAdvanceTheCheckpointWhenAStopArrivesBeforeReady(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	release := make(chan struct{})
+	serve := func(ctx context.Context, _ func()) error {
+		<-ctx.Done()
+		<-release
+
+		return nil
+	}
+
+	f := start(t, serve)
+
+	// ACT
+	f.requests <- CmdStop
+
+	// The SCM needs the checkpoint to move on this path too, or it stops
+	// waiting on a drain that began before the service ever reported Running.
+	waitFor(t, func() bool {
+		rep, ok := f.rec.latest()
+
+		return ok && rep.State == StateStopPending && rep.CheckPoint >= 3
+	}, "the checkpoint to advance on the stop-before-ready path")
+
+	close(release)
+	f.wait(t)
+
+	// ASSERT
+	assert.Equal(t, StateStopped, f.rec.last(t).State)
+	assert.Zero(t, f.outcome.Code)
+}
+
+func TestControllerRun_ShouldNotHangWhenTheRequestChannelClosesAndServeWedges(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// The SCM never closes the channel, so this guards the one path that
+	// bypasses the draining loop rather than a production scenario.
+	wedged := make(chan struct{})
+
+	t.Cleanup(func() { close(wedged) })
+
+	serve := func(ctx context.Context, ready func()) error {
+		ready()
+		<-ctx.Done()
+		<-wedged
+
+		return nil
+	}
+
+	f := start(t, serve)
+	waitFor(t, f.rec.reachedRunning, "running")
+
+	// ACT
+	close(f.requests)
+	f.wait(t)
+
+	// ASSERT
+	require.ErrorIs(t, f.err, ErrServeOverran)
+	assert.Zero(t, f.outcome.Code)
+	assert.Equal(t, StateStopped, f.rec.last(t).State)
 }

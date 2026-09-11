@@ -49,9 +49,11 @@ tasks:
       # and Linux cannot:
       #
       #   omitted: check (fmt/vet/lint) — golangci-lint is not on the runner by
-      #     design, and lint results are platform-independent, so ci.yml already
-      #     covers them on ubuntu. Adding it here would mean asking infra to pin
-      #     a second toolchain for a duplicate signal.
+      #     design. Lint results are not platform-independent — the //go:build
+      #     windows files need their own pass — but `task lint` now makes that
+      #     pass by cross-compiling on ubuntu, so it still needs no toolchain
+      #     here. Adding it would mean asking infra to pin a second one for a
+      #     duplicate signal.
       #   omitted: generate-check — docgen output diffed against git, which is
       #     line-ending sensitive; a CRLF checkout would fail it spuriously.
       #   omitted: vulncheck — fetches govulncheck@latest at run time. Unpinned
@@ -169,6 +171,13 @@ tasks:
       # smoke_test.go uses look unused and the linter reports three false
       # positives.
       - golangci-lint run --build-tags smoke,e2e ./...
+      # Again for windows/amd64. Lint results are NOT platform-independent: the
+      # //go:build windows files are invisible to the run above, and the first
+      # thing this caught was a gosec integer-overflow finding on the SCM wait
+      # hint that no host-GOOS run could ever see. Cross-compilation, so it
+      # needs no Windows host and belongs on the ubuntu gate rather than the
+      # WS2022 one.
+      - GOOS=windows GOARCH=amd64 golangci-lint run ./...
 
   lint-fix:
     desc: Run golangci-lint with autofix
@@ -198,6 +207,16 @@ tasks:
     desc: Tidy go.mod / go.sum
     cmds:
       - go mod tidy
+
+  tidy-check:
+    desc: Fail if go.mod / go.sum are not tidy
+    cmds:
+      # ci.yml has always carried this and `task ci` did not, so a stale go.mod
+      # passed the local gate and turned the push red -- which is exactly what
+      # happened when winsvc made golang.org/x/sys a direct dependency and
+      # nothing local noticed it was still marked // indirect. -diff reports
+      # without rewriting, so the gate never edits the tree it is checking.
+      - go mod tidy -diff
 
   generate:
     desc: Run code/doc generators (event-catalog docs, api/common OpenAPI types)
@@ -255,6 +274,7 @@ tasks:
     desc: Full local CI gate — mirrors the GitHub Actions pipeline
     cmds:
       - task: check
+      - task: tidy-check
       - task: generate-check
       - task: build
       - task: build-windows

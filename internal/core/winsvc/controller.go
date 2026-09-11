@@ -250,8 +250,14 @@ func (c *Controller) Run(ctx context.Context, requests <-chan Command) (Outcome,
 		return outcome, err
 	}
 
-	if done, outcome, err := s.running(); done {
-		return outcome, err
+	// A stop that arrived during startup has already begun the drain, so the
+	// running phase must be skipped: it has neither the checkpoint ticker nor
+	// the backstop, and entering it leaves a wedged serve hanging forever with
+	// the SCM parked at STOP_PENDING and no ErrServeOverran ever returned.
+	if !s.stopped {
+		if done, outcome, err := s.running(); done {
+			return outcome, err
+		}
 	}
 
 	return s.draining()
@@ -409,7 +415,18 @@ func (s *session) abandon() (Outcome, error) {
 		s.cancel()
 	}
 
-	return s.finish(<-s.result)
+	// Bounded like the drain is. This is the one path that does not run the
+	// draining loop, so waiting on serve unconditionally here would reintroduce
+	// the hang the backstop exists to prevent.
+	backstop := time.NewTimer(s.c.cfg.DrainBudget + s.c.cfg.DrainMargin)
+	defer backstop.Stop()
+
+	select {
+	case err := <-s.result:
+		return s.finish(err)
+	case <-backstop.C:
+		return s.finish(ErrServeOverran)
+	}
 }
 
 // report sends a status and remembers it, so Interrogate can answer with the
