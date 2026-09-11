@@ -48,8 +48,10 @@ working directory. `bin\pwsh.exe` is not.
 
 ### 2. `logFile` set
 
-The SCM discards stdout. A service without `logFile` runs correctly and logs
-nowhere. The critical events also go to the Event Log (below), but the file is
+The SCM discards stdout, so a service without `logFile` runs correctly and
+logs nowhere. **Install refuses without it**, and so does a service start —
+the same treatment a relative path gets, because it is the same class of
+failure. The critical events also reach the Event Log (below), but the file is
 the complete stream.
 
 The log is opened for **append** — a restart does not erase the run that
@@ -115,7 +117,7 @@ respects `DHCP Users`, at the cost of parsing tabular text.
 | Start type | Automatic, **not** delayed | Measured: the local DHCP Server service reaches Running about **4 seconds** after we do. Delaying would trade a 4-second window where health honestly answers 503 for ~2 minutes with no adapter at all |
 | Recovery | Restart after 5s, 10s, 60s; counter resets after 24h | Widening, so a transient cause clears early while a real one does not loop every 5 seconds forever. The reset stops the last interval becoming permanent |
 | Recovery on clean failure | **Enabled** | Without this flag Windows runs failure actions only for a process that dies *without* reporting stopped — which is not how a config failure exits, so the schedule would be registered and inert |
-| `PreshutdownTimeout` | The drain budget **plus margin** | A hard wall, not something progress extends. Set to the deadline rather than the budget so the SCM does not stop waiting at the moment a full-length drain reports stopped |
+| `PreshutdownTimeout` | The HTTP drain budget **plus margin** — 20s for a 15s drain | A hard wall, not something progress extends. Set to the deadline rather than the budget so the SCM does not stop waiting at the moment a full-length drain reports stopped. `service status` shows it as **pre-shutdown**, which is deliberately not called the drain budget: the drain itself is the shorter number |
 | Dependencies | **none** | A hard dependency on `DHCPServer` would make the service un-startable on a host targeting a remote server through `dhcp.server` |
 | File ACLs | SYSTEM + Administrators, inheritance off | See below |
 
@@ -230,9 +232,11 @@ alive. Close it and retry.
 
 ### The service will not stop
 
-Check the drain. A stop waits for in-flight requests, bounded by the drain
-budget `service status` reports. If it times out, `SYS-007` is in the log and
-the requests were cut off.
+Check the drain. A stop waits for in-flight requests, bounded by the HTTP
+drain budget — which is *shorter* than the **pre-shutdown** figure `service
+status` reports; that one is the wall the SCM allows, deliberately a little
+longer so a full-length drain can report that it finished. If the drain times
+out, `SYS-007` is in the log and the requests were cut off.
 
 ---
 

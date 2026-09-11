@@ -13,8 +13,9 @@ import (
 // not guess it.
 const ServiceWorkingDirectory = `C:\Windows\System32`
 
-// CheckServicePaths reports every path-valued key whose value would resolve
-// somewhere else when the process runs as a service.
+// CheckServicePaths reports every configured path that a service could not
+// use: one that would resolve somewhere else, and one that is not set at all
+// when a service cannot do without it.
 //
 // Under the SCM the working directory is C:\Windows\System32 rather than
 // wherever the operator installed the adapter, so a relative path silently
@@ -40,11 +41,28 @@ func CheckServicePaths(v *Values) error {
 
 	for _, name := range names {
 		key := v.spec[name]
-		if key.Path == NotAPath || key.Type != TypeString {
+		if key.Type != TypeString {
 			continue
 		}
 
-		if err := checkPath(key, v.String(name)); err != nil {
+		value := v.String(name)
+
+		if key.ServiceRequired && value == "" {
+			errs = append(errs, fmt.Errorf(
+				"%s is not set, and a service needs it: the Service Control Manager discards stdout, "+
+					"so the adapter would run correctly and log nowhere. Set an absolute path (%s, or the "+
+					"%s key in the config file)",
+				key.Name, FlagName(key.Name), key.Name,
+			))
+
+			continue
+		}
+
+		if key.Path == NotAPath {
+			continue
+		}
+
+		if err := checkPath(key, value); err != nil {
 			errs = append(errs, err)
 		}
 	}

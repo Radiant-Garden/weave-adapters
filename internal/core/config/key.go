@@ -103,6 +103,16 @@ type Key struct {
 	// operator reads as a bug.
 	Path PathKind
 
+	// ServiceRequired marks a key that may be unset from a console but must
+	// be set when the process runs as a service.
+	//
+	// It exists for logFile. The SCM discards stdout, so a service without
+	// one runs correctly and logs nowhere — the same class of failure as a
+	// relative path, and it deserves the same treatment: an error at install
+	// time rather than a silently mute service somebody notices during an
+	// incident.
+	ServiceRequired bool
+
 	// NoFlag suppresses this key's CLI flag, leaving it settable only from the
 	// environment or a config file.
 	//

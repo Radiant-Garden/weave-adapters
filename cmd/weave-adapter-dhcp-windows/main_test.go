@@ -620,22 +620,6 @@ func TestRunServer_ShouldWriteStartupFailureToTheLogFile(t *testing.T) {
 		"the startup failure must reach the log file, which is the whole reason logFile exists")
 }
 
-// serviceArgs builds arguments a service-mode run will accept.
-//
-// Service mode now checks that every path-valued key is absolute under
-// WINDOWS rules, on any host, so a test driving runModeService has to supply
-// one even on macOS. The store is never opened -- these runs pass
-// --disable-auth -- but the check does not know that, and it should not: a
-// path rule that made an exception for the current auth setting would stop
-// applying the moment somebody turned auth back on.
-func serviceArgs(t *testing.T, extra ...string) []string {
-	t.Helper()
-
-	base := []string{"--auth-tokens-file", `C:\ProgramData\weave-adapters\tokens.toml`, "--disable-auth"}
-
-	return withIdentity(t, append(base, extra...)...)
-}
-
 //nolint:paralleltest // installs the event recorder, which is process-global
 func TestRun_ShouldReportTheConsoleRunMode(t *testing.T) {
 	// ARRANGE
@@ -672,13 +656,18 @@ func TestRunWith_ShouldInvokeReadyOnceTheListenerIsBound(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	ready := make(chan struct{})
 
-	args := serviceArgs(t, "--port", strconv.Itoa(freePort(t)))
+	// Console mode: the readiness callback is a property of the server, not
+	// of how the process was started, and service mode now demands a
+	// Windows-absolute logFile that a test on this host could not also open.
+	// That SYS-001 carries runMode=service is asserted by the gate, against a
+	// real service, where it means something.
+	args := withIdentity(t, "--port", strconv.Itoa(freePort(t)), "--disable-auth")
 
 	errCh := make(chan error, 1)
 
 	go func() {
 		closer, err := runWith(ctx, args, launch{
-			mode:  runModeService,
+			mode:  runModeConsole,
 			ready: func() { close(ready) },
 		})
 		if closer != nil {
@@ -699,7 +688,6 @@ func TestRunWith_ShouldInvokeReadyOnceTheListenerIsBound(t *testing.T) {
 	// This is what the SCM arm reports Running from, so it has to mean bound —
 	// otherwise `sc start` succeeds for a service that dies a moment later.
 	rec.AssertEmitted(t, catalog.SYS002)
-	rec.AssertData(t, catalog.SYS001, "runMode", runModeService)
 
 	cancel()
 	require.NoError(t, <-errCh)
@@ -728,11 +716,11 @@ func TestRunWith_ShouldNotInvokeReadyWhenStartupFails(t *testing.T) {
 	t.Cleanup(func() { _ = held.Close() })
 
 	// ACT
-	// serviceArgs, not bare args: without an absolute token-store path this
-	// would now fail the service-mode path check instead of the bind, and
-	// pass for a reason that has nothing to do with what it asserts.
-	closer, runErr := runWith(t.Context(), serviceArgs(t, "--port", strconv.Itoa(port)), launch{
-		mode:  runModeService,
+	// Console mode, so this fails on the BIND and not on the service-mode
+	// path check — a test that passed for the wrong reason would assert
+	// nothing about readiness at all.
+	closer, runErr := runWith(t.Context(), withIdentity(t, "--port", strconv.Itoa(port), "--disable-auth"), launch{
+		mode:  runModeConsole,
 		ready: func() { invoked.Store(true) },
 	})
 	if closer != nil {
@@ -798,6 +786,52 @@ func TestReportOutcome_ShouldEmitSYS005OnlyForAStartupFailure(t *testing.T) {
 			} else {
 				rec.AssertNotEmitted(t, catalog.SYS005)
 			}
+		})
+	}
+}
+
+//nolint:paralleltest // installs the event recorder, which is process-global
+func TestRunWith_ShouldRefuseAConsoleConfigurationInServiceMode(t *testing.T) {
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	tests := map[string]struct {
+		args    []string
+		wantErr string
+	}{
+		"should refuse a relative token store": {
+			// The shipped default, so this is what an operator who set
+			// nothing gets. Under the SCM it resolves against System32.
+			args:    []string{"--log-file", `C:\ProgramData\weave-adapters\a.log`},
+			wantErr: "authTokensFile",
+		},
+		"should refuse an unset log file": {
+			// A service with no log file runs correctly and logs nowhere: the
+			// SCM discards stdout. Same class of failure as a relative path,
+			// so it gets the same treatment.
+			args:    []string{"--auth-tokens-file", `C:\ProgramData\weave-adapters\t.toml`},
+			wantErr: "logFile is not set",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			// ARRANGE
+			args := withIdentity(t, append(tc.args, "--disable-auth")...)
+
+			// ACT
+			closer, err := runWith(t.Context(), args, launch{mode: runModeService, ready: func() {}})
+			if closer != nil {
+				_ = closer.Close()
+			}
+
+			// ASSERT
+			// Refused before anything binds or opens, so the failure is a
+			// message naming the key rather than a file-not-found at 3am.
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.wantErr)
+			assert.Contains(t, err.Error(), "cannot work as a service")
+			rec.AssertNotEmitted(t, catalog.SYS002)
 		})
 	}
 }

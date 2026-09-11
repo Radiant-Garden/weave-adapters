@@ -351,7 +351,7 @@ func runServiceStatus(args []string, p *printer, deps serviceDeps) error {
 	p.printf("  state:        %s\n", status.State)
 	p.printf("  start type:   %s\n", status.StartType)
 	p.printf("  binary:       %s\n", status.BinPath)
-	p.printf("  drain budget: %s\n", preshutdownDescription(status.PreshutdownTimeout))
+	p.printf("  pre-shutdown: %s\n", preshutdownDescription(status.PreshutdownTimeout))
 
 	// Surfaced because its absence is otherwise invisible, and it is the
 	// difference between a restart schedule that fires and one that does not.

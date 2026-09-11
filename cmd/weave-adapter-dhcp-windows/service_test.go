@@ -516,6 +516,7 @@ func TestRunServiceStatus_ShouldReportAnInstalledService(t *testing.T) {
 	// an operator is looking for when a service will not start.
 	assert.Contains(t, got, `"C:\Program Files\wadapt\a.exe"`)
 	assert.Contains(t, got, "20s")
+	assert.Contains(t, got, "pre-shutdown", "the deadline is not the HTTP drain budget and must not read as it")
 	assert.NotContains(t, got, "WILL NOT restart")
 }
 

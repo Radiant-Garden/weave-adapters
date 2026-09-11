@@ -94,6 +94,9 @@ func CoreKeys() Spec {
 			Name: KeyLogFile,
 			Type: TypeString,
 			Path: FilePath,
+			// Optional from a console, where stdout is a real destination.
+			// Mandatory under the SCM, which discards it.
+			ServiceRequired: true,
 			// No default, and empty means stdout -- today's behaviour, kept
 			// exactly. A default path would start writing files on developer
 			// machines that never asked for one, and the only context that

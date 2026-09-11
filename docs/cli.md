@@ -28,7 +28,7 @@ $ weave-adapter-dhcp-windows --port 8444
 | `--port` | int | `8444` | TCP port to listen on (1–65535) |
 | `--config` | string | none | Path to a TOML config file |
 | `--log-severity` | string | `info` | Log level: `debug`, `info`, `warn`, `error` |
-| `--log-file` | string | none | Write the log here instead of stdout. **Required for a service:** the SCM discards stdout, so a service without it logs nowhere |
+| `--log-file` | string | none | Write the log here instead of stdout. **Required for a service**, and enforced: install and a service start both refuse without it, because the SCM discards stdout |
 | `--disable-https` | bool | `true` | Must stay `true` — HTTPS is not implemented yet, so `false` is a startup error rather than a silent no-op |
 | `--auth-tokens-file` | string | `tokens.toml` | Path to the bearer token store, read once at startup |
 | `--disable-auth` | bool | `false` | Development only: serves every route unauthenticated, and says so loudly at startup (`SYS-006`) |
@@ -165,6 +165,8 @@ in is not the environment the service will get — and rejects:
 
 - any relative path (`authTokensFile`, `logFile`, `dhcp.powershellPath`), since
   a service resolves them against `C:\Windows\System32`;
+- an unset `logFile`, because the SCM discards stdout and the service would
+  run correctly while logging nowhere;
 - anything the server itself would reject, a missing `identity.namespaceKey`
   most often.
 
@@ -185,8 +187,8 @@ $ weave-adapter-dhcp-windows service status
 wadapt-dhcp-windows
   state:        Running
   start type:   automatic
-  binary:       "C:\Program Files\weave-adapters\weave-adapter-dhcp-windows.exe" --config "C:\ProgramData\weave-adapters\config.toml"
-  drain budget: 20s
+  binary:       "C:\Program Files\weave-adapters\weave-adapter-dhcp-windows.exe" --config C:\ProgramData\weave-adapters\config.toml
+  pre-shutdown: 20s
   recovery:     restarts on failure, including a clean non-zero exit
 ```
 
