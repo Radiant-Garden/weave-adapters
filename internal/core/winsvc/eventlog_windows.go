@@ -7,11 +7,15 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"strings"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc/eventlog"
 )
+
+// eventLogKey is where the Application log's sources live. eventlog does not
+// export it, and sourceRegistered needs to look one up.
+const eventLogKey = `SYSTEM\CurrentControlSet\Services\EventLog\Application`
 
 // errSourceNotFound is the "no such registry key" Windows returns for an event
 // log source that was already removed.
@@ -64,13 +68,27 @@ func InstallEventLogSource(source string) error {
 		return nil
 	}
 
-	// x/sys reports this as a plain error string rather than a typed one, so
-	// matching the text is the only option available.
-	if strings.Contains(err.Error(), "registry key already exists") {
+	// Ask the registry rather than match x/sys's error text. The string is
+	// exact today, but it is an unexported implementation detail of a
+	// dependency we do not control, and the failure mode if it changes is an
+	// install that refuses to re-run over its own previous one.
+	if sourceRegistered(source) {
 		return nil
 	}
 
 	return fmt.Errorf("registering the event log source %q (elevated?): %w", source, err)
+}
+
+// sourceRegistered reports whether the event log source key already exists.
+func sourceRegistered(source string) bool {
+	k, err := registry.OpenKey(registry.LOCAL_MACHINE, eventLogKey+`\`+source, registry.QUERY_VALUE)
+	if err != nil {
+		return false
+	}
+
+	_ = k.Close()
+
+	return true
 }
 
 // RemoveEventLogSource deregisters source. A source that is already gone is not

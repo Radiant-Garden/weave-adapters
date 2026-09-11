@@ -68,12 +68,22 @@ type eventLogHandler struct {
 	attrs []slog.Attr
 }
 
-// Enabled accepts every level and lets Handle decide.
+// Enabled accepts INFO and above and lets Handle decide the rest.
 //
-// The filter is per-event rather than per-level: eligibility is a property of
-// the catalog entry, and SYS-001 at INFO belongs here while an INFO request log
-// does not. Answering false by level would drop the anchors.
-func (h *eventLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+// The real filter is per-event rather than per-level: eligibility is a property
+// of the catalog entry, and SYS-001 at INFO belongs here while an INFO request
+// log does not. But the floor still matters, because the fan-out ORs its
+// children -- a handler that answered true at every level would have slog build
+// a record for every slog.Debug breadcrumb in the process, whatever
+// logSeverity said, purely so this handler could drop it.
+//
+// INFO is safe rather than arbitrary: no DEBUG event can carry an EventLogID,
+// since the conformance test in internal/catalogs rejects an ID on anything the
+// eligibility rule excludes, and that rule takes WARN and above plus two INFO
+// anchors.
+func (h *eventLogHandler) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= slog.LevelInfo
+}
 
 // Handle writes one entry, or drops the record when it is not mirrored.
 func (h *eventLogHandler) Handle(_ context.Context, r slog.Record) error {

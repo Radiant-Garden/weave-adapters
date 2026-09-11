@@ -9,6 +9,9 @@ Tested:
 	                - TestEventLogIDOf_ShouldDropARecordTheCatalogDoesNotMirror
 	                - TestEventLogIDOf_ShouldDropARawSlogCall: breadcrumbs stay
 	                  out of an operator's Event Viewer.
+	Enabled      -> - TestEventLogHandlerEnabled_ShouldFloorAtInfo: the fan-out
+	                  ORs its children, so answering true everywhere would build
+	                  a record for every breadcrumb in the process.
 	Handle       -> - TestEventLogHandlerHandle_ShouldRouteBySeverity
 	                - TestEventLogHandlerHandle_ShouldWriteNothingForAnUnmirroredEvent
 	                - TestEventLogHandlerHandle_ShouldReportAWriteFailure
@@ -309,4 +312,22 @@ func TestEventLogHandlerWithGroup_ShouldReturnTheHandlerUnchanged(t *testing.T) 
 	// The entry is a flat string, so there is no nesting to express, and
 	// prefixing keys would change text an operator reads directly.
 	assert.Same(t, slog.Handler(h), got)
+}
+
+func TestEventLogHandlerEnabled_ShouldFloorAtInfo(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	h := &eventLogHandler{w: &fakeEventLog{}}
+
+	// ACT / ASSERT
+	// The floor exists because the fan-out ORs its children: answering true at
+	// every level would have slog build a record for every breadcrumb in the
+	// process, whatever logSeverity said, purely so this handler could drop it.
+	// INFO is safe because no DEBUG event can carry an EventLogID -- the
+	// conformance test in internal/catalogs rejects one.
+	assert.False(t, h.Enabled(t.Context(), slog.LevelDebug))
+	assert.True(t, h.Enabled(t.Context(), slog.LevelInfo))
+	assert.True(t, h.Enabled(t.Context(), slog.LevelWarn))
+	assert.True(t, h.Enabled(t.Context(), slog.LevelError))
 }

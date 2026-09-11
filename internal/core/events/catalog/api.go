@@ -230,16 +230,28 @@ func init() {
 	events.Register(&events.Event{
 		ID:              API012,
 		Level:           slog.LevelWarn,
-		EventLogID:      112,
 		MessageTemplate: "response too large to tag",
 		Description: "A conditionally-read response exceeded the size the ETag wrapper will buffer, so it was " +
 			"streamed through without an ETag. Clients cannot cache it and every poll pays for the full body.",
 		Category: events.CategoryAPI.String(),
 		Topic:    "Request",
-		Fields: []events.FieldDef{
+		// ExternalSource, which it always should have been: etag.Conditional
+		// runs only inside a request, and the emit site already establishes a
+		// caller. The Windows Event Log work is what surfaced the omission --
+		// the "WARN and above, not ExternalSource" rule mirrors an event into
+		// Event Viewer, and this one fires once per oversized response, so a
+		// single mis-paginated route would write an entry per weave poll in
+		// steady state with nothing wrong on the host.
+		//
+		// Marking it correctly is the fix rather than a carve-out: the rule
+		// then drops it for the same reason it drops the rest of the API block,
+		// and the event gains the caller and request groups a request-triggered
+		// event is supposed to carry.
+		ExternalSource: true,
+		Fields: append(events.CallerFields(), []events.FieldDef{
 			{Name: "path", Type: "string", Required: true, Description: "The route that produced the oversized response."},
 			{Name: "limitBytes", Type: "int", Required: true, Description: "The buffering limit that was exceeded."},
-		},
+		}...),
 		Example: `{"eventId":"API-012","data":{"path":"/api/v1/leases","limitBytes":4194304}}`,
 		Troubleshooting: "The route returns an unbounded collection. Add or lower pagination (pageSize) so a page " +
 			"fits the limit, or stop wrapping the handler in etag.Conditional if the resource is genuinely a stream.",

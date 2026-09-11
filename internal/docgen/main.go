@@ -108,6 +108,13 @@ func writeEvent(b *strings.Builder, e *events.Event) {
 		b.WriteString("- **External source:** yes\n")
 	}
 
+	// Published because the number is what an Event Viewer filter matches on,
+	// which makes it an operator-facing contract like the event ID itself. An
+	// undocumented contract is one nobody can use and everybody can break.
+	if e.EventLogID != 0 {
+		fmt.Fprintf(b, "- **Windows Event Log ID:** %d\n", e.EventLogID)
+	}
+
 	fmt.Fprintf(b, "- **Description:** %s\n", e.Description)
 
 	if len(e.Fields) > 0 {

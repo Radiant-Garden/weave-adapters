@@ -15,6 +15,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -88,12 +89,36 @@ func runServer(args []string) error {
 	// CTRL_CLOSE); SIGTERM is a no-op there but keeps Unix dev parity.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 
-	err := run(ctx, args)
+	logClose, err := run(ctx, args)
 
 	// Undeferred so the signal handler is released before the SYS-005 emit
 	// below, rather than staying installed across shutdown reporting.
 	stop()
 
+	outcome := reportOutcome(err)
+
+	// Closed AFTER the outcome is reported, never in run's own defer.
+	//
+	// This ordering is the whole feature. run used to close the log file on its
+	// way out, so by the time SYS-005 was emitted the default handler pointed at
+	// a closed file, the write failed, and slog discards handler errors --
+	// leaving a failed startup with no record anywhere, not even on the console.
+	// That is precisely the case logFile exists to cover.
+	if logClose != nil {
+		_ = logClose.Close()
+	}
+
+	return outcome
+}
+
+// reportOutcome emits SYS-005 for a startup failure and returns the error the
+// process should exit on.
+//
+// Separated from runServer because the log sink has to outlive it and because
+// the SCM arm needs the same reporting: a service that fails to start must say
+// so through the same event, from the one place that decides what counts as a
+// startup failure.
+func reportOutcome(err error) error {
 	// --help is a successful invocation, not a startup failure. The FlagSet has
 	// already written the usage text; without this the operator who asked for it
 	// gets a SYS-005 "startup failed: flag: help requested" and exit 1, while
@@ -119,7 +144,11 @@ func runServer(args []string) error {
 
 // run wires the adapter together and serves until ctx is cancelled. It returns
 // errors rather than exiting so the whole startup path can be driven from tests.
-func run(ctx context.Context, args []string) error {
+//
+// The returned Closer owns the log file, and it is the caller's to close --
+// after the outcome has been reported, not before. It is nil when no file was
+// opened, which includes every failure earlier than the logging setup.
+func run(ctx context.Context, args []string) (io.Closer, error) {
 	// Taken before any work so uptime measures the process, not the server.
 	started := time.Now()
 
@@ -127,7 +156,7 @@ func run(ctx context.Context, args []string) error {
 	// binary is. Core owns the precedence machinery, never the key set.
 	values, err := config.Load(append(config.CoreKeys(), dhcpwindows.Keys()...), args)
 	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return nil, fmt.Errorf("loading config: %w", err)
 	}
 
 	// Both halves are built from one resolved set, and their errors are joined
@@ -136,7 +165,7 @@ func run(ctx context.Context, args []string) error {
 	adapterCfg, adapterErr := dhcpwindows.NewConfig(values)
 
 	if err := errors.Join(coreErr, adapterErr); err != nil {
-		return fmt.Errorf("loading config: %w", err)
+		return nil, fmt.Errorf("loading config: %w", err)
 	}
 
 	// Before the first Emit, and its failure is returned rather than logged:
@@ -144,10 +173,8 @@ func run(ctx context.Context, args []string) error {
 	// itself through the log.
 	_, logClose, err := observability.Setup(cfg.LogSeverity, cfg.LogFile)
 	if err != nil {
-		return fmt.Errorf("setting up logging: %w", err)
+		return nil, fmt.Errorf("setting up logging: %w", err)
 	}
-
-	defer func() { _ = logClose.Close() }()
 
 	// Importing the catalog package registers the core events from init(), which
 	// panics on a contract violation — so by this line the catalog is known good.
@@ -168,7 +195,7 @@ func run(ctx context.Context, args []string) error {
 
 	authMiddleware, err := buildAuth(ctx, cfg)
 	if err != nil {
-		return err
+		return logClose, err
 	}
 
 	// The probe issues a real scope query, so a green dhcp-server component
@@ -237,7 +264,7 @@ func run(ctx context.Context, args []string) error {
 		),
 	)
 
-	return srv.Run(ctx)
+	return logClose, srv.Run(ctx)
 }
 
 // buildAuth loads the token store and returns the authentication middleware, or

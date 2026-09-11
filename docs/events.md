@@ -27,6 +27,7 @@
 
 - **Level:** ERROR
 - **Category / Topic:** API / Request
+- **Windows Event Log ID:** 111
 - **Description:** A handler panicked; the recovery middleware logged it and returned 500.
 
 | Field | Type | Required | Description |
@@ -46,10 +47,14 @@
 
 - **Level:** WARN
 - **Category / Topic:** API / Request
+- **External source:** yes
 - **Description:** A conditionally-read response exceeded the size the ETag wrapper will buffer, so it was streamed through without an ETag. Clients cannot cache it and every poll pays for the full body.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
+| subject | string | false | Authenticated caller, empty when auth is disabled. |
+| role | string | false | Caller role, empty when auth is disabled. |
+| remoteAddr | string | true | Client address. |
 | path | string | true | The route that produced the oversized response. |
 | limitBytes | int | true | The buffering limit that was exceeded. |
 
@@ -301,6 +306,7 @@
 
 - **Level:** ERROR
 - **Category / Topic:** BACKEND / Calls
+- **Windows Event Log ID:** 501
 - **Description:** Emitted when a call to the Windows DHCP backend fails: the shell could not be run, exited non-zero, exceeded its timeout, or returned output that could not be decoded. Emitted by the backend client, which is the layer that knows which of those it was — callers above it (the health probe, resource handlers) trust this event and do not re-emit.
 
 | Field | Type | Required | Description |
@@ -427,6 +433,7 @@
 
 - **Level:** WARN
 - **Category / Topic:** DHCP / Identity
+- **Windows Event Log ID:** 502
 - **Description:** Emitted when a wadaptID that was seen before now carries materially different attributes — name, ranges, subnet mask or lease duration. This is the detection half of the adapter's one accepted silent failure: a wadaptID is derived from the server name and the subnet and nothing else, because the host exposes no creation time and no GUID, so a scope deleted and recreated on the same subnet derives the *same* identity as its predecessor. It cannot be prevented; this makes it visible. A legitimate edit to an existing scope fires it too, which is the accepted cost of having no way to tell the two apart.
 
 | Field | Type | Required | Description |
@@ -443,6 +450,7 @@
 
 - **Level:** WARN
 - **Category / Topic:** HLT / Status
+- **Windows Event Log ID:** 201
 - **Description:** Emitted when the overall health status transitions between healthy, unhealthy, and unavailable. Emitted only on a change, never on an unchanged poll.
 
 | Field | Type | Required | Description |
@@ -458,6 +466,7 @@
 
 - **Level:** INFO
 - **Category / Topic:** SYS / Lifecycle
+- **Windows Event Log ID:** 1
 - **Description:** The adapter process has started and is initializing.
 
 | Field | Type | Required | Description |
@@ -472,6 +481,7 @@
 
 - **Level:** INFO
 - **Category / Topic:** SYS / Lifecycle
+- **Windows Event Log ID:** 2
 - **Description:** The HTTP server is listening and ready to serve requests.
 
 | Field | Type | Required | Description |
@@ -506,6 +516,7 @@
 
 - **Level:** ERROR
 - **Category / Topic:** SYS / Lifecycle
+- **Windows Event Log ID:** 5
 - **Description:** The process failed to start and is exiting non-zero.
 
 | Field | Type | Required | Description |
@@ -520,6 +531,7 @@
 
 - **Level:** WARN
 - **Category / Topic:** SYS / Lifecycle
+- **Windows Event Log ID:** 6
 - **Description:** The adapter started with disableAuth set: every route except health is open to anyone who can reach the port.
 
 **Example:** `{"eventId":"SYS-006","data":{}}`
@@ -530,6 +542,7 @@
 
 - **Level:** ERROR
 - **Category / Topic:** SYS / Lifecycle
+- **Windows Event Log ID:** 7
 - **Description:** The drain grace period expired with requests still in flight; they were cut off.
 
 | Field | Type | Required | Description |

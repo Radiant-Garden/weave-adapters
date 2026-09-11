@@ -54,6 +54,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -229,7 +230,7 @@ func TestRun_ShouldServeHealthUntilContextCancelled(t *testing.T) {
 	args := withIdentity(t, "--port", strconv.Itoa(port), "--auth-tokens-file", tokensPath)
 
 	go func() {
-		errCh <- run(ctx, args)
+		errCh <- runDiscardingCloser(ctx, args)
 	}()
 
 	waitForListening(t, rec)
@@ -366,7 +367,7 @@ func TestRun_ShouldRefuseToStartWithoutTokens(t *testing.T) {
 			t.Cleanup(rec.Install())
 
 			// ACT
-			err := run(t.Context(), withIdentity(t,
+			_, err := run(t.Context(), withIdentity(t,
 				"--port", strconv.Itoa(freePort(t)),
 				"--auth-tokens-file", tt.tokensFile,
 			))
@@ -420,7 +421,7 @@ func TestRun_ShouldReportCoreAndAdapterConfigProblemsTogether(t *testing.T) {
 	// inputs the adapter requires and has no default for.
 	//
 	// ACT
-	err := run(t.Context(), []string{"--port", "70000"})
+	_, err := run(t.Context(), []string{"--port", "70000"})
 
 	// ASSERT — the two configurations are validated separately and joined, so
 	// an operator fixing a misconfigured deployment sees everything in one run
@@ -456,7 +457,7 @@ func TestRun_ShouldRefuseToStartWithoutTheIdentityInputs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) { //nolint:paralleltest // observability.Setup is global
 			// ACT
-			err := run(t.Context(), append(tt.args, "--port", strconv.Itoa(freePort(t)), "--disable-auth"))
+			_, err := run(t.Context(), append(tt.args, "--port", strconv.Itoa(freePort(t)), "--disable-auth"))
 
 			// ASSERT — neither input may be defaulted or guessed: an
 			// auto-generated namespace key regenerating on reinstall, and a
@@ -483,7 +484,7 @@ func TestRun_ShouldWarnLoudlyWhenAuthIsDisabled(t *testing.T) {
 	args := withIdentity(t, "--port", port, "--disable-auth")
 
 	go func() {
-		errCh <- run(ctx, args)
+		errCh <- runDiscardingCloser(ctx, args)
 	}()
 
 	waitForListening(t, rec)
@@ -520,7 +521,7 @@ func TestRun_ShouldReturnErrorWhenConfigInvalid(t *testing.T) {
 	t.Cleanup(rec.Install())
 
 	// ACT — out of range, so Load fails validation.
-	err := run(t.Context(), withIdentity(t, "--port", "70000"))
+	_, err := run(t.Context(), withIdentity(t, "--port", "70000"))
 
 	// ASSERT — startup stops at config; nothing announces itself as running.
 	require.Error(t, err)
@@ -545,9 +546,59 @@ func TestRun_ShouldReturnErrorWhenPortUnavailable(t *testing.T) {
 	tokensPath, _ := tokenStore(t)
 
 	// ACT
-	err = run(t.Context(), withIdentity(t, "--port", strconv.Itoa(port), "--auth-tokens-file", tokensPath))
+	_, err = run(t.Context(), withIdentity(t, "--port", strconv.Itoa(port), "--auth-tokens-file", tokensPath))
 
 	// ASSERT — a bind conflict is a startup error, not a silent no-op.
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "listening on")
+}
+
+// runDiscardingCloser runs the adapter and drops the log closer, for the tests
+// that only care about the error. Tests that configure a log file close it
+// themselves, because what they assert is what reached the file.
+func runDiscardingCloser(ctx context.Context, args []string) error {
+	closer, err := run(ctx, args)
+	if closer != nil {
+		_ = closer.Close()
+	}
+
+	return err
+}
+
+//nolint:paralleltest // runServer installs the process-global slog default via observability.Setup
+func TestRunServer_ShouldWriteStartupFailureToTheLogFile(t *testing.T) {
+	// ARRANGE
+	// A missing token store is the cheapest real startup failure: it happens
+	// after the logging setup, so the file exists by the time it is reported.
+	original := slog.Default()
+
+	t.Cleanup(func() { slog.SetDefault(original) })
+
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "adapter.log")
+
+	args := withIdentity(t,
+		"--port", strconv.Itoa(freePort(t)),
+		"--auth-tokens-file", filepath.Join(dir, "absent.toml"),
+		"--log-file", logPath,
+	)
+
+	// ACT
+	err := runServer(args)
+
+	// ASSERT
+	require.Error(t, err)
+
+	//nolint:gosec // G304: the path is inside this test's own TempDir.
+	written, readErr := os.ReadFile(logPath)
+	require.NoError(t, readErr, "the log file should exist")
+
+	// The regression this pins: run used to close the log file on its way out,
+	// so SYS-005 was emitted into a closed handle, slog discarded the write
+	// error, and a failed startup left no record anywhere -- not in the file,
+	// not on the console. A log that records the start and not the failure is
+	// worse than no log, because it reads as a process that is still running.
+	assert.Contains(t, string(written), "SYS-001", "the start should be recorded")
+	assert.Contains(t, string(written), "SYS-005",
+		"the startup failure must reach the log file, which is the whole reason logFile exists")
 }
