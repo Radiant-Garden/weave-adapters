@@ -44,6 +44,7 @@ const (
 	KeyPort         = "port"
 	KeyDisableHTTPS = "disableHttps"
 	KeyLogSeverity  = "logSeverity"
+	KeyLogFile      = "logFile"
 	//nolint:gosec // G101: a config key name, not a credential — it names the path to the store.
 	KeyAuthTokensFile = "authTokensFile"
 	KeyDisableAuth    = "disableAuth"
@@ -90,6 +91,17 @@ func CoreKeys() Spec {
 			Usage:   "log level: debug|info|warn|error",
 		},
 		{
+			Name: KeyLogFile,
+			Type: TypeString,
+			// No default, and empty means stdout -- today's behaviour, kept
+			// exactly. A default path would start writing files on developer
+			// machines that never asked for one, and the only context that
+			// needs a file is the one where an operator provisioned a place to
+			// put it.
+			Default: "",
+			Usage:   "write the log to this file instead of stdout (required when running as a service)",
+		},
+		{
 			Name:    KeyAuthTokensFile,
 			Type:    TypeString,
 			Default: DefaultAuthTokensFile,
@@ -128,6 +140,12 @@ type Config struct {
 	DisableHTTPS bool
 	// LogSeverity is the log level: debug, info, warn, or error.
 	LogSeverity string
+	// LogFile is where the log stream is written. Empty writes to stdout.
+	//
+	// It matters for exactly one deployment: a process started by the Windows
+	// Service Control Manager has no console and the SCM discards stdout, so
+	// without this the service runs correctly and logs nowhere.
+	LogFile string
 	// AuthTokensFile is the path to the token store the `token` subcommand
 	// manages. It is read once at startup; changes need a restart.
 	AuthTokensFile string
@@ -152,6 +170,7 @@ func Core(v *Values) (*Config, error) {
 		Port:           v.Int(KeyPort),
 		DisableHTTPS:   v.Bool(KeyDisableHTTPS),
 		LogSeverity:    v.String(KeyLogSeverity),
+		LogFile:        v.String(KeyLogFile),
 		AuthTokensFile: v.String(KeyAuthTokensFile),
 		DisableAuth:    v.Bool(KeyDisableAuth),
 

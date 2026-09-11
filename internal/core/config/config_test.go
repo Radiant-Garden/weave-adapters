@@ -56,6 +56,7 @@ func TestCoreKeys_ShouldPreserveTheEstablishedFlagAndEnvNames(t *testing.T) {
 		KeyPort:           {"port", "WEAVE_ADAPTER_PORT"},
 		KeyDisableHTTPS:   {"disable-https", "WEAVE_ADAPTER_DISABLE_HTTPS"},
 		KeyLogSeverity:    {"log-severity", "WEAVE_ADAPTER_LOG_SEVERITY"},
+		KeyLogFile:        {"log-file", "WEAVE_ADAPTER_LOG_FILE"},
 		KeyAuthTokensFile: {"auth-tokens-file", "WEAVE_ADAPTER_AUTH_TOKENS_FILE"},
 		KeyDisableAuth:    {"disable-auth", "WEAVE_ADAPTER_DISABLE_AUTH"},
 

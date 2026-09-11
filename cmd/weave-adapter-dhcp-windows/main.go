@@ -139,7 +139,15 @@ func run(ctx context.Context, args []string) error {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	observability.Setup(cfg.LogSeverity)
+	// Before the first Emit, and its failure is returned rather than logged:
+	// a log sink that could not be opened is the one error that cannot report
+	// itself through the log.
+	_, logClose, err := observability.Setup(cfg.LogSeverity, cfg.LogFile)
+	if err != nil {
+		return fmt.Errorf("setting up logging: %w", err)
+	}
+
+	defer func() { _ = logClose.Close() }()
 
 	// Importing the catalog package registers the core events from init(), which
 	// panics on a contract violation — so by this line the catalog is known good.
