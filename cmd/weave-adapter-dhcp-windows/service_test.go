@@ -122,12 +122,24 @@ func (f *fakeManager) Close() error {
 type fakeSecurer struct {
 	targets []winsvc.Securable
 	err     error
+	skip    bool
 }
 
-func (f *fakeSecurer) secure(targets []winsvc.Securable) error {
+func (f *fakeSecurer) secure(targets []winsvc.Securable) ([]winsvc.SecureResult, error) {
 	f.targets = append(f.targets, targets...)
 
-	return f.err
+	if f.err != nil {
+		return nil, f.err
+	}
+
+	results := make([]winsvc.SecureResult, 0, len(targets))
+	for _, t := range targets {
+		// Applied unless the fixture says otherwise, so a test asserting the
+		// skipped-target message has to ask for it.
+		results = append(results, winsvc.SecureResult{Target: t, Applied: !f.skip})
+	}
+
+	return results, nil
 }
 
 // depsFor returns serviceDeps handing out m, and records whether the SCM was
@@ -717,4 +729,51 @@ func TestRunServiceSecure_ShouldRequireAConfigPath(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--config is required")
 	assert.Empty(t, sec.targets)
+}
+
+func TestRunServiceSecure_ShouldRefuseARelativeLogPath(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// A relative logFile makes the log directory ".", and securing that would
+	// apply a protected, inheriting SYSTEM-and-Administrators list to
+	// whatever directory the operator ran the command from.
+	var out bytes.Buffer
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	body := "logFile = 'wadapt.log'\n" +
+		"authTokensFile = '" + winTokenStore + "'\n" +
+		"[identity]\nnamespaceKey = 'install-namespace-key-0123456789'\nserverName = 'd.test'\n"
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	sec := &fakeSecurer{}
+
+	// ACT
+	err := runService([]string{"secure", "--config", path}, &out, depsWith(&fakeManager{}, nil, sec))
+
+	// ASSERT
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "logFile")
+	assert.Empty(t, sec.targets, "nothing may be secured once a path is rejected")
+}
+
+func TestRunServiceInstall_ShouldSayWhenATargetWasSkipped(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	var out bytes.Buffer
+
+	sec := &fakeSecurer{skip: true}
+
+	// ACT
+	err := runService([]string{"install", "--" + consentFlag, "--config", writeServiceConfig(t, "")},
+		&out, depsWith(&fakeManager{}, nil, sec))
+
+	// ASSERT
+	// Printing "secured" for a file that was never touched is worse than
+	// printing nothing: it is what makes an operator believe the store is
+	// locked after a later `token gen`.
+	require.NoError(t, err)
+	assert.Contains(t, out.String(), "NOT YET")
+	assert.Contains(t, out.String(), "token gen")
 }

@@ -225,3 +225,25 @@ func TestCheckGrants_ShouldNameEveryOffenderAndTheFix(t *testing.T) {
 	assert.Contains(t, msg, `C:\cfg\tokens.toml`)
 	assert.Contains(t, msg, "service secure")
 }
+
+func TestSecureResult_ShouldDistinguishAppliedFromSkipped(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// The token store is the one legitimately-absent target: an operator can
+	// install before minting a token.
+	targets := SecurablesFor(`C:\cfg\config.toml`, `C:\cfg\tokens.toml`, "")
+
+	// ACT
+	applied := SecureResult{Target: targets[0], Applied: true}
+	skipped := SecureResult{Target: targets[1], Applied: false}
+
+	// ASSERT
+	// The distinction exists so the installer cannot print "secured" for a
+	// file it never touched. An operator who then runs `token gen` would
+	// believe the store is protected when it inherited the directory default
+	// — which is precisely the escalation the lockdown exists to close.
+	assert.True(t, applied.Applied)
+	assert.False(t, skipped.Applied)
+	assert.True(t, skipped.Target.Optional, "only an optional target may be skipped")
+}

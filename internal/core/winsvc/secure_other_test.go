@@ -37,7 +37,9 @@ func TestSecureStubs_ShouldRefuseOffWindows(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE / ACT / ASSERT
-	require.ErrorIs(t, Secure(SecurablesFor(`C:\cfg\c.toml`, "", "")), ErrUnsupported)
+	results, err := Secure(SecurablesFor(`C:\cfg\c.toml`, "", ""))
+	require.ErrorIs(t, err, ErrUnsupported)
+	assert.Nil(t, results)
 
 	grants, err := ReadGrants(`C:\cfg\c.toml`)
 	require.ErrorIs(t, err, ErrUnsupported)

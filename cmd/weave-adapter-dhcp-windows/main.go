@@ -309,7 +309,7 @@ func runWith(ctx context.Context, args []string, l launch) (io.Closer, error) {
 		// need write access to its own security descriptor to do it — which is
 		// the thing being protected. `service secure` fixes it, from a prompt
 		// that already has the rights.
-		if err := checkFileSecurity(cfg); err != nil {
+		if err := checkFileSecurity(values, cfg); err != nil {
 			return nil, err
 		}
 	}
@@ -459,32 +459,34 @@ func buildAuth(ctx context.Context, cfg *config.Config) ([]middleware.Middleware
 	return []middleware.Middleware{auth.Bearer(verifier, httpserver.Unauthenticated)}, nil
 }
 
-// checkFileSecurity refuses to start when a file the service depends on
-// grants write to anyone outside SYSTEM and Administrators.
+// checkFileSecurity refuses to start when anything the service depends on
+// grants write to a principal outside the policy.
+//
+// The list comes from winsvc.SecurablesFor — the same function the installer
+// secures from — so the set checked here cannot drift from the set that was
+// locked down. Building it twice from different fields is how the config
+// file, which carries identity.namespaceKey, came to be secured by install
+// and checked by nothing.
 //
 // The token store is the sharpest case: the adapter reads it once at startup
 // and trusts every hash in it, so anyone who can append one has a bearer
-// token the API accepts. The config file is next — it carries
-// identity.namespaceKey, and a write re-keys every wadaptID on the host.
-func checkFileSecurity(cfg *config.Config) error {
+// token the API accepts. The config file is next — a write there re-keys
+// every wadaptID on the host.
+func checkFileSecurity(values *config.Values, cfg *config.Config) error {
 	var errs []error
 
-	for _, path := range []string{cfg.AuthTokensFile, cfg.LogFile} {
-		if path == "" {
-			continue
-		}
-
-		grants, err := winsvc.ReadGrants(path)
+	for _, target := range winsvc.SecurablesFor(values.ConfigPath(), cfg.AuthTokensFile, cfg.LogFile) {
+		grants, err := winsvc.ReadGrants(target.Path)
 		if err != nil {
 			// Unreadable is not the same as insecure, and refusing to start
 			// over a descriptor this process could not read would take the
 			// adapter down for a permissions quirk rather than a risk.
-			slog.Debug("could not read the access list", "path", path, "error", err)
+			slog.Debug("could not read the access list", "path", target.Path, "error", err)
 
 			continue
 		}
 
-		errs = append(errs, winsvc.CheckGrants(path, grants))
+		errs = append(errs, winsvc.CheckGrants(target.Path, grants))
 	}
 
 	return errors.Join(errs...)

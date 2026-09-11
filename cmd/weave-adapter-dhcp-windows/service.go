@@ -67,7 +67,7 @@ Re-run with --` + consentFlag + ` to proceed.
 type managerFactory func() (winsvc.Manager, error)
 
 // secureFunc applies the file lockdown.
-type secureFunc func([]winsvc.Securable) error
+type secureFunc func([]winsvc.Securable) ([]winsvc.SecureResult, error)
 
 // serviceDeps are the platform operations this subcommand needs.
 //
@@ -230,7 +230,6 @@ func runServiceInstall(args []string, p *printer, deps serviceDeps) error {
 	p.printf("  account:    LocalSystem\n")
 	p.printf("  start type: automatic\n")
 	p.printf("  recovery:   restart after %s\n", recoverySchedule())
-	p.printf("  secured:    config, token store and log directory, to SYSTEM and Administrators\n")
 	p.printf("\nStart it with: weave-adapter-dhcp-windows service start\n")
 
 	return p.err
@@ -409,6 +408,14 @@ func runServiceSecure(args []string, p *printer, deps serviceDeps) error {
 		return fmt.Errorf("service secure: reading %q: %w", absConfig, err)
 	}
 
+	// The same validation install runs, and not optional here. A relative
+	// logFile makes the log directory ".", and securing that would apply a
+	// protected, inheriting SYSTEM-and-Administrators list to whatever
+	// directory the operator happened to run from.
+	if err := config.CheckServicePaths(values); err != nil {
+		return fmt.Errorf("service secure: this configuration names paths a service cannot use:\n%w", err)
+	}
+
 	if err := secureConfiguredPaths(p, deps, absConfig, values); err != nil {
 		return fmt.Errorf("service secure: %w", err)
 	}
@@ -425,12 +432,23 @@ func secureConfiguredPaths(p *printer, deps serviceDeps, absConfig string, value
 		values.String(config.KeyLogFile),
 	)
 
-	if err := deps.secure(targets); err != nil {
+	results, err := deps.secure(targets)
+	if err != nil {
 		return err
 	}
 
-	for _, t := range targets {
-		p.printf("  secured %s (%s)\n", t.Path, t.Why)
+	for _, r := range results {
+		if r.Applied {
+			p.printf("  secured %s (%s)\n", r.Target.Path, r.Target.Why)
+
+			continue
+		}
+
+		// Said plainly, because the alternative is an operator who mints a
+		// token after install and believes the store is locked when it
+		// inherited the directory's defaults.
+		p.printf("  NOT YET %s (%s) — it does not exist. Run `service secure` again after `token gen`.\n",
+			r.Target.Path, r.Target.Why)
 	}
 
 	return nil

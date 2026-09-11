@@ -134,6 +134,18 @@ func SecurablesFor(configPath, tokenStore, logFile string) []Securable {
 	return out
 }
 
+// SecureResult reports what happened to one target.
+//
+// Applied distinguishes "locked down" from "skipped because it is not there
+// yet", which the token store legitimately is before the first `token gen`.
+// Reporting a skipped target as secured is worse than saying nothing: an
+// operator who mints a token afterwards would believe a file is protected
+// when it inherited the directory's defaults.
+type SecureResult struct {
+	Target  Securable
+	Applied bool
+}
+
 // ErrNotSecured reports that a target's permissions are wider than the policy
 // allows.
 var ErrNotSecured = errors.New("winsvc: the path grants access beyond SYSTEM and Administrators")

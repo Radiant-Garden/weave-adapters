@@ -120,3 +120,32 @@ func TestLockdownDACL_ShouldSetInheritFlagsOnlyForADirectory(t *testing.T) {
 	require.NotNil(t, dirACL)
 	assert.Equal(t, fileACL.AceCount, dirACL.AceCount)
 }
+
+func TestEveryoneWrites_ShouldReportTheWidestPossibleState(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE / ACT
+	got := everyoneWrites()
+
+	// ASSERT
+	// A NULL DACL is not "no access", it is "no restrictions". Reporting it
+	// as anything else would let the widest possible state pass the check.
+	require.Len(t, got, 1)
+	assert.Equal(t, "S-1-1-0", got[0].SID)
+	assert.True(t, got[0].CanWrite)
+	require.Error(t, CheckGrants(`C:\x`, got), "a NULL DACL must never pass")
+}
+
+func TestFileAllAccess_ShouldBeTheSpecificMaskNotTheGenericOne(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE / ACT / ASSERT
+	// FILE_ALL_ACCESS is 0x1F01FF. Get-Acl renders it as FullControl, where a
+	// generic mask renders as the raw number 268435456 — which makes the
+	// gate's independent read-back assertable by name rather than by integer.
+	assert.Equal(t, 0x1F01FF, int(fileAllAccess))
+
+	// And it must still register as a write to our own reader, or the
+	// read-back inside Secure would pass a file it had just granted away.
+	assert.True(t, confersWrite(fileAllAccess))
+}

@@ -11,6 +11,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// dirMode is the mode a created log directory takes before the ACL replaces
+// it. Windows ignores the bits entirely; the protected DACL applied a moment
+// later is the real protection. It is here rather than beside the policy
+// because nothing off Windows creates anything.
+const dirMode = 0o700
+
 // Secure applies the lockdown to every target and verifies it took.
 //
 // It needs Administrator: replacing an owner requires the admin token, which
@@ -19,36 +25,57 @@ import (
 // Targets marked Optional are skipped when absent. The log file is configured
 // at install time and created at first run, so its directory is secured and
 // the file inherits.
-func Secure(targets []Securable) error {
-	var errs []error
+func Secure(targets []Securable) ([]SecureResult, error) {
+	var (
+		errs    []error
+		results = make([]SecureResult, 0, len(targets))
+	)
 
 	for _, t := range targets {
-		if err := secureOne(t); err != nil {
+		applied, err := secureOne(t)
+		if err != nil {
 			errs = append(errs, err)
+
+			continue
+		}
+
+		results = append(results, SecureResult{Target: t, Applied: applied})
+	}
+
+	return results, errors.Join(errs...)
+}
+
+// secureOne applies the policy to a single target, then reads it back. It
+// reports whether anything was applied — an absent optional target is skipped,
+// and the caller must be able to say so rather than claim it was secured.
+func secureOne(t Securable) (bool, error) {
+	if t.Kind == SecurableDirectory {
+		// Created rather than demanded. Install is elevated and holds the
+		// resolved path, and failing here would leave a REGISTERED service
+		// with an ENOENT wrapped in "securing failed" — which is the worst
+		// moment to discover that a directory in the config does not exist
+		// yet.
+		if err := os.MkdirAll(t.Path, dirMode); err != nil {
+			return false, fmt.Errorf("creating %s (%s): %w", t.Path, t.Why, err)
 		}
 	}
 
-	return errors.Join(errs...)
-}
-
-// secureOne applies the policy to a single target, then reads it back.
-func secureOne(t Securable) error {
 	if _, err := os.Stat(t.Path); err != nil {
 		if t.Optional && errors.Is(err, os.ErrNotExist) {
-			return nil
+			return false, nil
 		}
 
-		return fmt.Errorf("securing %s (%s): %w", t.Path, t.Why, err)
+		return false, fmt.Errorf("securing %s (%s): %w", t.Path, t.Why, err)
 	}
 
 	dacl, err := lockdownDACL(t.Inheritance())
 	if err != nil {
-		return fmt.Errorf("building the access list for %s: %w", t.Path, err)
+		return false, fmt.Errorf("building the access list for %s: %w", t.Path, err)
 	}
 
 	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
 	if err != nil {
-		return fmt.Errorf("resolving the administrators group: %w", err)
+		return false, fmt.Errorf("resolving the administrators group: %w", err)
 	}
 
 	// PROTECTED_DACL_SECURITY_INFORMATION is what makes this a lockdown rather
@@ -68,7 +95,7 @@ func secureOne(t Securable) error {
 		nil,
 	)
 	if err != nil {
-		return fmt.Errorf("securing %s (%s) — this needs an elevated prompt: %w", t.Path, t.Why, err)
+		return false, fmt.Errorf("securing %s (%s) — this needs an elevated prompt: %w", t.Path, t.Why, err)
 	}
 
 	// Read back, always. An apply that reported success and left the object
@@ -78,15 +105,24 @@ func secureOne(t Securable) error {
 	// than a checker that has to agree with an applier.
 	grants, err := ReadGrants(t.Path)
 	if err != nil {
-		return fmt.Errorf("verifying %s: %w", t.Path, err)
+		return false, fmt.Errorf("verifying %s: %w", t.Path, err)
 	}
 
 	if err := CheckGrants(t.Path, grants); err != nil {
-		return fmt.Errorf("the lockdown did not take on %s (%s): %w", t.Path, t.Why, err)
+		return false, fmt.Errorf("the lockdown did not take on %s (%s): %w", t.Path, t.Why, err)
 	}
 
-	return nil
+	return true, nil
 }
+
+// fileAllAccess is FILE_ALL_ACCESS, which x/sys does not define.
+//
+// Used rather than GENERIC_ALL, which also works: Get-Acl renders a generic
+// mask as the raw number 268435456 while this renders as FullControl in every
+// tool an operator or a gate will use. How generic bits map onto an inherited
+// entry is also the system's business rather than ours, and a specific mask
+// leaves nothing to interpret.
+const fileAllAccess = windows.STANDARD_RIGHTS_REQUIRED | windows.SYNCHRONIZE | 0x1FF
 
 // lockdownDACL builds the access list: full control for SYSTEM and
 // Administrators, and no other entry at all.
@@ -107,7 +143,7 @@ func lockdownDACL(inherit Inheritance) (*windows.ACL, error) {
 		}
 
 		entries = append(entries, windows.EXPLICIT_ACCESS{
-			AccessPermissions: windows.GENERIC_ALL,
+			AccessPermissions: fileAllAccess,
 			AccessMode:        windows.GRANT_ACCESS,
 			Inheritance:       flags,
 			Trustee: windows.TRUSTEE{
@@ -140,13 +176,22 @@ func ReadGrants(path string) ([]Grant, error) {
 
 	dacl, _, err := sd.DACL()
 	if err != nil {
-		// A NULL DACL means everyone has full control. That is the widest
-		// possible state, so it is reported as such rather than as an error.
+		// The DACL-present bit is clear. Reported as wide open rather than as
+		// an error: an object with no access list is one nothing restricts.
 		if errors.Is(err, windows.ERROR_OBJECT_NOT_FOUND) {
-			return []Grant{{SID: "S-1-1-0", CanWrite: true}}, nil
+			return everyoneWrites(), nil
 		}
 
 		return nil, fmt.Errorf("reading the access list of %q: %w", path, err)
+	}
+
+	// PRESENT AND NIL is the canonical NULL DACL — the state that grants
+	// everyone full access — and DACL() returns it with a nil error, so this
+	// is not the branch above. Dereferencing here would panic, and it would
+	// panic inside the service's startup check, before any log is open: the
+	// SCM would report a process that died with no explanation anywhere.
+	if dacl == nil {
+		return everyoneWrites(), nil
 	}
 
 	out := make([]Grant, 0, dacl.AceCount)
@@ -173,6 +218,12 @@ func ReadGrants(path string) ([]Grant, error) {
 	}
 
 	return out, nil
+}
+
+// everyoneWrites is what a NULL DACL means: no access list at all, so every
+// principal has full control. S-1-1-0 is Everyone.
+func everyoneWrites() []Grant {
+	return []Grant{{SID: "S-1-1-0", CanWrite: true}}
 }
 
 // writeMask is every right that lets a holder change the object or its

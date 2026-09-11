@@ -20,9 +20,19 @@ import (
 // own configuration struct from the same instance, so one precedence pass
 // serves both.
 type Values struct {
-	spec   map[string]Key
-	values map[string]any
+	spec       map[string]Key
+	values     map[string]any
+	configPath string
 }
+
+// ConfigPath returns the config file this resolution read, or empty if none
+// was given.
+//
+// Exposed because the config file is itself a secured target — it carries
+// identity.namespaceKey — and the startup check has to build the same list
+// the installer secured. Deriving that list twice from different inputs is
+// how the two came to disagree in the first place.
+func (v *Values) ConfigPath() string { return v.configPath }
 
 // String returns a TypeString key's value.
 func (v *Values) String(name string) string { return get[string](v, name, TypeString) }
@@ -125,7 +135,14 @@ func load(spec Spec, args []string, environ func() []string) (*Values, error) {
 		}
 	}
 
-	return resolve(spec, index, k)
+	values, err := resolve(spec, index, k)
+	if err != nil {
+		return nil, err
+	}
+
+	values.configPath = configPath
+
+	return values, nil
 }
 
 // resolve coerces every registered key to its declared type, collecting every
