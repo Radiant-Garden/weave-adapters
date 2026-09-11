@@ -472,10 +472,11 @@
 | Field | Type | Required | Description |
 |---|---|---|---|
 | version | string | true | Adapter build version. |
+| runMode | string | true | How the process was started: service (Windows SCM) or console. |
 
-**Example:** `{"eventId":"SYS-001","data":{"version":"1.2.3"}}`
+**Example:** `{"eventId":"SYS-001","data":{"version":"1.2.3","runMode":"service"}}`
 
-**Troubleshooting:** Informational. Marks the beginning of a process lifecycle.
+**Troubleshooting:** Informational. Marks the beginning of a process lifecycle. runMode says whether the Service Control Manager started this process or an operator did; a service that an operator expected to be running should report service, not console.
 
 ## SYS-002 — listening
 

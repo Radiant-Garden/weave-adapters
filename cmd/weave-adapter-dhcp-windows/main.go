@@ -16,6 +16,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -35,10 +36,26 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/core/httpserver"
 	"github.com/radiantgarden/weave-adapters/internal/core/middleware"
 	"github.com/radiantgarden/weave-adapters/internal/core/observability"
+	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
 )
 
 // version is the adapter version, overridable via -ldflags at build time.
 var version = "0.0.0-dev"
+
+// serviceName is the name the adapter registers under with the Windows Service
+// Control Manager. It is also the Event Log source name, so the entries an
+// operator filters for carry it.
+//
+// Fixed rather than configurable: an operator who can rename the service can
+// register two of them against one host, and the second one's wadaptIDs would
+// collide with the first's while looking like a different service.
+const serviceName = "wadapt-dhcp-windows"
+
+// Run modes, as reported by SYS-001's runMode field.
+const (
+	runModeConsole = "console"
+	runModeService = "service"
+)
 
 // drainBudget is how long in-flight requests get after shutdown begins.
 //
@@ -82,9 +99,87 @@ func isTokenCommand(args []string) bool {
 	return len(args) > 0 && args[0] == "token"
 }
 
-// runServer runs the adapter until a signal arrives, reporting a startup
-// failure as SYS-005.
+// launch is what differs between the two ways the adapter starts. It is a
+// struct rather than three parameters because every one of them is optional
+// from run's point of view and all three move together.
+type launch struct {
+	// mode is reported as SYS-001's runMode.
+	mode string
+	// ready is invoked once the listener is bound. The SCM arm reports Running
+	// from it; the console arm has nobody to tell.
+	ready func()
+	// sinks are extra log handlers — the Event Log arm, under the SCM.
+	sinks []slog.Handler
+}
+
+// runServer dispatches to the arm that matches how this process was started.
+//
+// Detected rather than flagged: an operator cannot then start the service
+// wrongly, and the console path stays byte-identical for development and for
+// the smoke and e2e gates.
 func runServer(args []string) error {
+	isService, err := winsvc.IsService()
+	if err != nil {
+		// Not guessed at. Running the console arm under the SCM produces a
+		// process that never reports Running and is killed for it; running the
+		// SCM arm from a console fails to reach a dispatcher. Neither is better
+		// than saying so.
+		return reportOutcome(fmt.Errorf("determining whether this is a service: %w", err))
+	}
+
+	if isService {
+		return runUnderSCM(args)
+	}
+
+	return runConsole(args)
+}
+
+// runUnderSCM serves under the Service Control Manager.
+func runUnderSCM(args []string) error {
+	// Installed before anything else, and this ordering is the point: the SCM
+	// discards stdout, and a config error happens before any log file could
+	// have been opened. Without the Event Log arm in place first, the one
+	// failure an operator most needs to see — the service that will not start —
+	// is reported into nothing.
+	eventLog, closeEventLog, err := winsvc.NewEventLogHandler(serviceName)
+	if err != nil {
+		// Genuinely nowhere to report this. The SCM sees a non-zero exit.
+		return err
+	}
+
+	defer func() { _ = closeEventLog.Close() }()
+
+	slog.SetDefault(slog.New(eventLog))
+
+	// Written by the closure and read after winsvc.Run returns, which is after
+	// serve returned — so there is no concurrent access, and no need for the
+	// mutex that shape usually wants.
+	var logClose io.Closer
+
+	err = winsvc.Run(serviceName, drainBudget, func(ctx context.Context, ready func()) error {
+		var runErr error
+
+		logClose, runErr = runWith(ctx, args, launch{
+			mode:  runModeService,
+			ready: ready,
+			sinks: []slog.Handler{eventLog},
+		})
+
+		return runErr
+	})
+
+	outcome := reportOutcome(err)
+
+	if logClose != nil {
+		_ = logClose.Close()
+	}
+
+	return outcome
+}
+
+// runConsole runs the adapter until a signal arrives, reporting a startup
+// failure as SYS-005.
+func runConsole(args []string) error {
 	// On Windows Server 2022 a console exe receives os.Interrupt (Ctrl+C,
 	// CTRL_CLOSE); SIGTERM is a no-op there but keeps Unix dev parity.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -149,6 +244,11 @@ func reportOutcome(err error) error {
 // after the outcome has been reported, not before. It is nil when no file was
 // opened, which includes every failure earlier than the logging setup.
 func run(ctx context.Context, args []string) (io.Closer, error) {
+	return runWith(ctx, args, launch{mode: runModeConsole, ready: func() {}})
+}
+
+// runWith is run with the launch-specific pieces supplied.
+func runWith(ctx context.Context, args []string, l launch) (io.Closer, error) {
 	// Taken before any work so uptime measures the process, not the server.
 	started := time.Now()
 
@@ -171,14 +271,14 @@ func run(ctx context.Context, args []string) (io.Closer, error) {
 	// Before the first Emit, and its failure is returned rather than logged:
 	// a log sink that could not be opened is the one error that cannot report
 	// itself through the log.
-	_, logClose, err := observability.Setup(cfg.LogSeverity, cfg.LogFile)
+	_, logClose, err := observability.Setup(cfg.LogSeverity, cfg.LogFile, l.sinks...)
 	if err != nil {
 		return nil, fmt.Errorf("setting up logging: %w", err)
 	}
 
 	// Importing the catalog package registers the core events from init(), which
 	// panics on a contract violation — so by this line the catalog is known good.
-	events.Emit(ctx, catalog.SYS001, "version", version)
+	events.Emit(ctx, catalog.SYS001, "version", version, "runMode", l.mode)
 
 	// Emitted here rather than inside the adapter because startup events are
 	// owned by the binary — the same split as SYS-001, which the core catalog
@@ -234,6 +334,7 @@ func run(ctx context.Context, args []string) (io.Closer, error) {
 		httpserver.WithOpenAPISpec(apispec.Spec()),
 		httpserver.WithWriteTimeout(writeTimeout),
 		httpserver.WithShutdownGrace(drainBudget),
+		httpserver.WithReadyFunc(l.ready),
 		httpserver.WithRoutes(
 			httpserver.Route{
 				Pattern: "GET " + dhcpwindows.ScopesPath,

@@ -60,6 +60,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -601,4 +602,112 @@ func TestRunServer_ShouldWriteStartupFailureToTheLogFile(t *testing.T) {
 	assert.Contains(t, string(written), "SYS-001", "the start should be recorded")
 	assert.Contains(t, string(written), "SYS-005",
 		"the startup failure must reach the log file, which is the whole reason logFile exists")
+}
+
+//nolint:paralleltest // installs the event recorder, which is process-global
+func TestRun_ShouldReportTheConsoleRunMode(t *testing.T) {
+	// ARRANGE
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	args := withIdentity(t, "--port", strconv.Itoa(freePort(t)), "--disable-auth")
+
+	errCh := make(chan error, 1)
+
+	go func() { errCh <- runDiscardingCloser(ctx, args) }()
+
+	// ACT
+	waitForListening(t, rec)
+	cancel()
+	require.NoError(t, <-errCh)
+
+	// ASSERT
+	// The field exists so an operator can tell a service that came up under
+	// the SCM from one somebody started by hand and forgot about. Required, so
+	// the console arm has to set it too or every console start emits an
+	// incomplete event.
+	rec.AssertData(t, catalog.SYS001, "runMode", runModeConsole)
+	rec.AssertMatchesCatalog(t)
+}
+
+//nolint:paralleltest // installs the event recorder, which is process-global
+func TestRunWith_ShouldInvokeReadyOnceTheListenerIsBound(t *testing.T) {
+	// ARRANGE
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	ready := make(chan struct{})
+
+	args := withIdentity(t, "--port", strconv.Itoa(freePort(t)), "--disable-auth")
+
+	errCh := make(chan error, 1)
+
+	go func() {
+		closer, err := runWith(ctx, args, launch{
+			mode:  runModeService,
+			ready: func() { close(ready) },
+		})
+		if closer != nil {
+			_ = closer.Close()
+		}
+
+		errCh <- err
+	}()
+
+	// ACT
+	select {
+	case <-ready:
+	case <-time.After(15 * time.Second):
+		t.Fatal("ready was never invoked")
+	}
+
+	// ASSERT
+	// This is what the SCM arm reports Running from, so it has to mean bound —
+	// otherwise `sc start` succeeds for a service that dies a moment later.
+	rec.AssertEmitted(t, catalog.SYS002)
+	rec.AssertData(t, catalog.SYS001, "runMode", runModeService)
+
+	cancel()
+	require.NoError(t, <-errCh)
+}
+
+//nolint:paralleltest // installs the event recorder, which is process-global
+func TestRunWith_ShouldNotInvokeReadyWhenStartupFails(t *testing.T) {
+	// ARRANGE
+	rec := eventstest.NewRecorder()
+	t.Cleanup(rec.Install())
+
+	var invoked atomic.Bool
+
+	// A port already held, so the bind fails after the config resolved.
+	//
+	// Held on ":port", not "127.0.0.1:port": the server binds every interface,
+	// and a loopback-only holder does not conflict with that — the bind
+	// succeeds and the test hangs on a server that serves forever.
+	var lc net.ListenConfig
+
+	port := freePort(t)
+
+	held, err := lc.Listen(t.Context(), "tcp", ":"+strconv.Itoa(port))
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = held.Close() })
+
+	// ACT
+	closer, runErr := runWith(t.Context(), withIdentity(t, "--port", strconv.Itoa(port), "--disable-auth"), launch{
+		mode:  runModeService,
+		ready: func() { invoked.Store(true) },
+	})
+	if closer != nil {
+		_ = closer.Close()
+	}
+
+	// ASSERT
+	// The SCM arm reports Running from this callback, so firing it on a failed
+	// bind would tell the operator `sc start` succeeded for a service that
+	// never listened.
+	require.Error(t, runErr)
+	assert.False(t, invoked.Load(), "ready fired despite the bind failing")
 }

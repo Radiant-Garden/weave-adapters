@@ -39,9 +39,15 @@ func init() {
 		Topic:           "Lifecycle",
 		Fields: []events.FieldDef{
 			{Name: "version", Type: "string", Required: true, Description: "Adapter build version."},
+			{
+				Name: "runMode", Type: "string", Required: true,
+				Description: "How the process was started: service (Windows SCM) or console.",
+			},
 		},
-		Example:         `{"eventId":"SYS-001","data":{"version":"1.2.3"}}`,
-		Troubleshooting: "Informational. Marks the beginning of a process lifecycle.",
+		Example: `{"eventId":"SYS-001","data":{"version":"1.2.3","runMode":"service"}}`,
+		Troubleshooting: "Informational. Marks the beginning of a process lifecycle. runMode says whether " +
+			"the Service Control Manager started this process or an operator did; a service that an operator " +
+			"expected to be running should report service, not console.",
 	})
 
 	events.Register(&events.Event{
