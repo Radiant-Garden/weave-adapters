@@ -5,6 +5,10 @@ Pending:
 
 Tested:
 
+	DrainDeadline -> - TestDrainDeadline_ShouldExceedTheBudgetAndMatchTheControllersOwnBound:
+	                   the installer writes this as PreshutdownTimeout, which is
+	                   a hard wall, so it must match the controller's own bound.
+
 	New -> - TestNew_ShouldPanicWhenARequiredFieldIsMissing: the three wiring
 	         mistakes that must not reach a running service.
 	       - TestNew_ShouldDefaultTheOptionalTimings: an unset hint or tick is
@@ -715,4 +719,32 @@ func TestControllerRun_ShouldNotHangWhenTheRequestChannelClosesAndServeWedges(t 
 	require.ErrorIs(t, f.err, ErrServeOverran)
 	assert.Zero(t, f.outcome.Code)
 	assert.Equal(t, StateStopped, f.rec.last(t).State)
+}
+
+func TestDrainDeadline_ShouldExceedTheBudgetAndMatchTheControllersOwnBound(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	budget := 15 * time.Second
+
+	// ACT
+	deadline := DrainDeadline(budget)
+
+	// ASSERT
+	// Three consumers need this number and only one of them starts from the
+	// budget alone: the server drains within the budget, the controller
+	// reports this as its WaitHint and fires its backstop here, and the
+	// installer writes it as the service's PreshutdownTimeout -- which is a
+	// hard wall. Writing the bare budget there would have the SCM stop waiting
+	// at the exact moment a drain that used its whole budget reports Stopped.
+	assert.Greater(t, deadline, budget)
+
+	// The same arithmetic New applies when a caller sets no margin, which is
+	// what makes "derived from one value" true rather than aspirational.
+	c := New(Config{
+		Serve:       serveUntilCancelled,
+		Report:      func(Report) {},
+		DrainBudget: budget,
+	})
+	assert.Equal(t, deadline, c.cfg.DrainBudget+c.cfg.DrainMargin)
 }

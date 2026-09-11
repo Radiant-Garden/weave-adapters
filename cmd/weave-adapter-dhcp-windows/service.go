@@ -4,8 +4,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
@@ -63,7 +65,7 @@ type managerFactory func() (winsvc.Manager, error)
 
 // runService dispatches a service subcommand. newManager is injected; out
 // receives all human-facing output.
-func runService(args []string, out interface{ Write([]byte) (int, error) }, newManager managerFactory) error {
+func runService(args []string, out io.Writer, newManager managerFactory) error {
 	p := &printer{w: out}
 
 	if len(args) == 0 {
@@ -165,7 +167,7 @@ func runServiceInstall(args []string, p *printer, newManager managerFactory) err
 	p.printf("  config:     %s\n", absConfig)
 	p.printf("  account:    LocalSystem\n")
 	p.printf("  start type: automatic\n")
-	p.printf("  recovery:   restart after 5s, 10s, then 60s\n")
+	p.printf("  recovery:   restart after %s\n", recoverySchedule())
 	p.printf("\nStart it with: weave-adapter-dhcp-windows service start\n")
 
 	return p.err
@@ -228,6 +230,18 @@ func runServiceLifecycle(args []string, p *printer, newManager managerFactory, v
 	p.printf("%s: %s\n", serviceName, pastTense(verb))
 
 	return p.err
+}
+
+// recoverySchedule renders the restart delays for the install summary, from
+// the slice that owns them rather than from a literal that would quietly stop
+// matching the moment the defaults changed.
+func recoverySchedule() string {
+	parts := make([]string, 0, len(winsvc.DefaultRecovery))
+	for _, d := range winsvc.DefaultRecovery {
+		parts = append(parts, d.String())
+	}
+
+	return strings.Join(parts, ", then ")
 }
 
 // pastTense renders the verb for the confirmation line.

@@ -133,6 +133,21 @@ const (
 	defaultDrainMargin     = 5 * time.Second
 )
 
+// DrainDeadline reports the longest a stop can legitimately take for a given
+// drain budget: the budget itself, plus the margin the controller allows for
+// reporting Stopped once serve has returned.
+//
+// Exported because three places need the same number and only one of them
+// computes it from the budget alone. The HTTP server drains within the
+// budget; the controller reports a WaitHint of this and fires its backstop
+// here; and the installer writes this as the service's PreshutdownTimeout,
+// which is a wall rather than something a checkpoint extends. Writing the bare
+// budget there would have the SCM stop waiting at the exact moment a drain
+// that used its whole budget was about to report Stopped.
+func DrainDeadline(budget time.Duration) time.Duration {
+	return budget + defaultDrainMargin
+}
+
 // Config is what Controller needs. Serve, Report and DrainBudget are required;
 // the rest default.
 type Config struct {

@@ -11,6 +11,9 @@ Tested:
 	startTypeName -> - TestStartTypeName_ShouldDistinguishDelayedAutoStart: the
 	                   one distinction an operator checking a boot problem needs.
 	serviceKeyPath -> - TestServiceKeyPath_ShouldAddressTheServicesHive
+	startupFailure -> - TestStartupFailure_ShouldNameTheExitCodeAndWhereToLook:
+	                    a start that cannot succeed must report the failure, not
+	                    a four-minute timeout.
 
 Tested elsewhere:
 
@@ -48,6 +51,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
@@ -96,4 +100,48 @@ func TestServiceKeyPath_ShouldAddressTheServicesHive(t *testing.T) {
 	// ASSERT
 	assert.True(t, strings.HasSuffix(got, `\wadapt-dhcp-windows`))
 	assert.Contains(t, got, `CurrentControlSet\Services`)
+}
+
+func TestStartupFailure_ShouldNameTheExitCodeAndWhereToLook(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		status   svc.Status
+		contains []string
+	}{
+		"should name a service-specific exit code": {
+			// The adapter ran and reported its own failure, so the reason is
+			// in the Event Log under SYS-005.
+			status:   svc.Status{ServiceSpecificExitCode: 1},
+			contains: []string{"service-specific exit code 1", "event ID 5"},
+		},
+		"should name a win32 exit code": {
+			// It never got far enough to report anything of its own.
+			status:   svc.Status{Win32ExitCode: 5},
+			contains: []string{"Win32 exit code 5", "Event Viewer"},
+		},
+		"should still point somewhere when no code was recorded": {
+			status:   svc.Status{},
+			contains: []string{"reporting no error", "Event Viewer"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// ARRANGE / ACT
+			err := startupFailure("wadapt-dhcp-windows", tc.status)
+
+			// ASSERT
+			// Without this, a service that cannot start reports a four-minute
+			// timeout instead of its failure -- because with the recovery flag
+			// set it restarts on a schedule and never reaches Running.
+			require.Error(t, err)
+
+			for _, want := range tc.contains {
+				assert.Contains(t, err.Error(), want)
+			}
+		})
+	}
 }

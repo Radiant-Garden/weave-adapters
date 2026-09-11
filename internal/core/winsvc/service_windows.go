@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -36,8 +37,15 @@ type scmManager struct{ m *mgr.Mgr }
 func NewManager() (Manager, error) {
 	m, err := mgr.Connect()
 	if err != nil {
-		return nil, fmt.Errorf("connecting to the service control manager "+
-			"(this needs an elevated prompt — run as Administrator): %w", err)
+		// Elevation is blamed only when that is what happened. Saying "run as
+		// Administrator" for an RPC failure sends an operator who is already
+		// elevated round in circles.
+		if errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+			return nil, fmt.Errorf("connecting to the service control manager: %w "+
+				"(this needs an elevated prompt — run as Administrator)", err)
+		}
+
+		return nil, fmt.Errorf("connecting to the service control manager: %w", err)
 	}
 
 	return &scmManager{m: m}, nil
@@ -56,7 +64,14 @@ func (s *scmManager) Close() error {
 func (s *scmManager) open(name string) (*mgr.Service, error) {
 	svcHandle, err := s.m.OpenService(name)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrNotInstalled, name)
+		// Only a genuine absence is ErrNotInstalled. Treating every failure as
+		// one tells an operator whose account lacks the rights, or whose RPC
+		// call failed, to go and check their spelling.
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			return nil, fmt.Errorf("%w: %s", ErrNotInstalled, name)
+		}
+
+		return nil, fmt.Errorf("opening the service %q: %w", name, err)
 	}
 
 	return svcHandle, nil
@@ -105,7 +120,10 @@ func (s *scmManager) Install(d Definition) error {
 		return err
 	}
 
-	if err := setPreshutdownTimeout(d.Name, d.DrainBudget); err != nil {
+	// The DEADLINE, not the budget. The pre-shutdown timeout is a hard wall,
+	// so it has to cover the drain plus the moment the controller needs to
+	// report Stopped afterwards.
+	if err := setPreshutdownTimeout(d.Name, DrainDeadline(d.DrainBudget)); err != nil {
 		_ = created.Delete()
 
 		return err
@@ -217,7 +235,13 @@ func (s *scmManager) Start(name string) error {
 		return fmt.Errorf("starting the service %q: %w", name, err)
 	}
 
-	return waitForState(service, name, svc.Running)
+	// Stopped is a terminal answer here, not a state to keep waiting through.
+	// StartService has already created the process by the time it returns, so
+	// a service reporting Stopped afterwards started and died -- and with the
+	// failure-actions flag set it will keep restarting on the 5s/10s/60s
+	// schedule, so Running never appears and the poll would run its full four
+	// minutes before reporting a timeout instead of the failure.
+	return waitForState(service, name, svc.Running, svc.Stopped)
 }
 
 // Stop stops the service and waits for Stopped.
@@ -244,9 +268,13 @@ func (s *scmManager) stopAndWait(service *mgr.Service, name string) error {
 	}
 
 	if _, err := service.Control(svc.Stop); err != nil {
-		// Already stopping, or stopped between the query and here. Not a
-		// failure: what the caller asked for is what is happening.
-		if !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) {
+		// Two refusals mean the stop is already happening, and neither is a
+		// failure: NOT_ACTIVE if it stopped between the query above and here,
+		// and CANNOT_ACCEPT_CTRL if it is already draining. Without the second,
+		// `service stop` or `uninstall` issued during a drain errors out
+		// instead of waiting for the drain it asked for.
+		if !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) &&
+			!errors.Is(err, windows.ERROR_SERVICE_CANNOT_ACCEPT_CTRL) {
 			return fmt.Errorf("stopping the service %q: %w", name, err)
 		}
 	}
@@ -254,13 +282,17 @@ func (s *scmManager) stopAndWait(service *mgr.Service, name string) error {
 	return waitForState(service, name, svc.Stopped)
 }
 
-// waitForState polls until the service reaches want, or the timeout expires.
+// waitForState polls until the service reaches want, reaches one of failOn, or
+// the timeout expires.
 //
 // Polled rather than event-driven because the SCM offers no completion
 // callback, and the drain is legitimately long: the wait has to outlast the
-// pre-shutdown budget or this side would report a failure for a stop that was
-// proceeding correctly.
-func waitForState(service *mgr.Service, name string, want svc.State) error {
+// pre-shutdown deadline or this side would report a failure for a stop that
+// was proceeding correctly.
+//
+// failOn is what keeps a start that cannot succeed from being reported as a
+// timeout four minutes later.
+func waitForState(service *mgr.Service, name string, want svc.State, failOn ...svc.State) error {
 	deadline := time.Now().Add(transitionTimeout)
 
 	for time.Now().Before(deadline) {
@@ -273,17 +305,52 @@ func waitForState(service *mgr.Service, name string, want svc.State) error {
 			return nil
 		}
 
+		if slices.Contains(failOn, status.State) {
+			return startupFailure(name, status)
+		}
+
 		time.Sleep(transitionPoll)
 	}
 
 	return fmt.Errorf("the service %q did not reach the expected state within %s", name, transitionTimeout)
 }
 
+// startupFailure renders a service that stopped instead of starting, carrying
+// the exit code the SCM recorded.
+//
+// The code is what distinguishes the two cases an operator has to tell apart:
+// a service-specific code means the adapter ran and reported its own failure,
+// so the reason is in the Event Log, while a Win32 code means it never got
+// that far.
+func startupFailure(name string, status svc.Status) error {
+	switch {
+	case status.ServiceSpecificExitCode != 0:
+		return fmt.Errorf(
+			"the service %q started and then stopped (service-specific exit code %d). "+
+				"The reason is in Event Viewer: Windows Logs > Application, source %s, event ID 5",
+			name, status.ServiceSpecificExitCode, name,
+		)
+	case status.Win32ExitCode != 0:
+		return fmt.Errorf(
+			"the service %q stopped with Win32 exit code %d. Check Event Viewer: "+
+				"Windows Logs > Application, source %s",
+			name, status.Win32ExitCode, name,
+		)
+	default:
+		return fmt.Errorf("the service %q stopped immediately after starting, reporting no error. "+
+			"Check Event Viewer: Windows Logs > Application, source %s", name, name)
+	}
+}
+
 // Status reports what the SCM knows. An absent service is not an error.
 func (s *scmManager) Status(name string) (ServiceStatus, error) {
-	service, err := s.m.OpenService(name)
+	service, err := s.open(name)
 	if err != nil {
-		return ServiceStatus{Name: name, Installed: false}, nil
+		if errors.Is(err, ErrNotInstalled) {
+			return ServiceStatus{Name: name, Installed: false}, nil
+		}
+
+		return ServiceStatus{Name: name}, err
 	}
 
 	defer func() { _ = service.Close() }()
