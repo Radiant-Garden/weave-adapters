@@ -64,6 +64,7 @@ func init() {
 	coreevents.Register(&coreevents.Event{
 		ID:              DHCP002,
 		Level:           slog.LevelWarn,
+		EventLogID:      502,
 		MessageTemplate: "scope attributes changed materially for an existing wadaptID",
 		Description: "Emitted when a wadaptID that was seen before now carries materially different attributes " +
 			"— name, ranges, subnet mask or lease duration. This is the detection half of the adapter's one " +

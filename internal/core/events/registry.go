@@ -60,6 +60,36 @@ func Register(event *Event) {
 		panic(fmt.Sprintf("event %s has ResponseDetail but no ResponseCode", event.ID))
 	}
 
+	if event.EventLogID != 0 {
+		// Measured on Windows Server 2022: an ID past EventCreate.exe's message
+		// table writes successfully and renders as an empty message. Nothing
+		// fails at runtime, so the check has to be here.
+		if event.EventLogID > MaxEventLogID {
+			panic(fmt.Sprintf("event %s has EventLogID %d, above the %d the Windows Event Log renders",
+				event.ID, event.EventLogID, MaxEventLogID))
+		}
+
+		// An Event Viewer filter matches on the number, so two events sharing
+		// one make both unreadable — the operator cannot tell which fired.
+		for id, other := range globalRegistry.events {
+			if other.EventLogID == event.EventLogID {
+				panic(fmt.Sprintf("events %s and %s both claim EventLogID %d",
+					id, event.ID, event.EventLogID))
+			}
+		}
+
+		// The Event Log is not a request log. An ExternalSource event fires once
+		// per request, so mirroring one hands any client a way to fill the
+		// Application log.
+		if event.ExternalSource {
+			panic(fmt.Sprintf(
+				"event %s is ExternalSource and claims EventLogID %d; a request-triggered event must not "+
+					"reach the Windows Event Log, where a client could flood it",
+				event.ID, event.EventLogID,
+			))
+		}
+	}
+
 	if event.ExternalSource {
 		has := make(map[string]bool, len(event.Fields))
 		for _, f := range event.Fields {

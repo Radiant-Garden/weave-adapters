@@ -209,6 +209,7 @@ func init() {
 	events.Register(&events.Event{
 		ID:              API011,
 		Level:           slog.LevelError,
+		EventLogID:      111,
 		MessageTemplate: "request panic recovered",
 		Description:     "A handler panicked; the recovery middleware logged it and returned 500.",
 		Category:        events.CategoryAPI.String(),
@@ -229,6 +230,7 @@ func init() {
 	events.Register(&events.Event{
 		ID:              API012,
 		Level:           slog.LevelWarn,
+		EventLogID:      112,
 		MessageTemplate: "response too large to tag",
 		Description: "A conditionally-read response exceeded the size the ETag wrapper will buffer, so it was " +
 			"streamed through without an ETag. Clients cannot cache it and every poll pays for the full body.",

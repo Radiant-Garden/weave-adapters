@@ -16,6 +16,7 @@ func init() {
 	events.Register(&events.Event{
 		ID:              HLT001,
 		Level:           slog.LevelWarn,
+		EventLogID:      201,
 		MessageTemplate: "health status changed",
 		Description: "Emitted when the overall health status transitions between healthy, unhealthy, and " +
 			"unavailable. Emitted only on a change, never on an unchanged poll.",

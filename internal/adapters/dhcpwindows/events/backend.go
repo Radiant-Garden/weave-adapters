@@ -59,6 +59,7 @@ func init() {
 	coreevents.Register(&coreevents.Event{
 		ID:              BACKEND101,
 		Level:           slog.LevelError,
+		EventLogID:      501,
 		MessageTemplate: "dhcp backend call failed",
 		Description: "Emitted when a call to the Windows DHCP backend fails: the shell could not be run, " +
 			"exited non-zero, exceeded its timeout, or returned output that could not be decoded. Emitted by " +

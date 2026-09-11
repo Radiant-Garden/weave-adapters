@@ -13,6 +13,16 @@ Tested:
 	    against the packages that exist on disk, so a new adapter that forgets its
 	    line fails here by name instead of failing somewhere unrelated.
 
+	the Windows Event Log allocation, which only this package can see whole
+	  - TestCatalogs_ShouldGiveEveryEventLogEligibleEventAnID: a new WARN+
+	    internal event without a number fails here by name, rather than
+	    silently never reaching Event Viewer.
+	  - TestCatalogs_ShouldNotGiveAnIneligibleEventAnID: the rule binds both
+	    ways, or it is not a rule.
+	  - TestCatalogs_ShouldKeepEveryEventLogIDUniqueAndInRange: Register panics
+	    on both already, but it only ever sees the catalogs its own binary
+	    linked; this is the registry-wide restatement.
+
 Tested elsewhere:
 
 	What the events themselves say: each catalog's own tests, plus the registry's
@@ -40,8 +50,10 @@ Additional Remarks:
 package catalogs
 
 import (
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -49,6 +61,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
+	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 )
 
 // adaptersDir is where an adapter's events package lives, relative to here.
@@ -133,5 +146,101 @@ func TestCatalogs_ShouldRegisterEveryAdapterEventsPackage(t *testing.T) {
 			assert.True(t, strings.HasPrefix(strings.TrimSpace(line), "_ \""),
 				"imports here exist only for their init(): %s", strings.TrimSpace(line))
 		}
+	}
+}
+
+// eventLogEligible reports whether an event belongs in the Windows Event Log.
+//
+// This is the rule, and it lives in a test on purpose: it is an assertion
+// about the catalog rather than behaviour the adapter depends on at runtime.
+// The sink reads each event's declared EventLogID; this checks that the
+// declarations match the rule, so a new qualifying event fails CI instead of
+// quietly never reaching Event Viewer.
+//
+// WARN and above, because that is where an operator's interest starts. Not
+// ExternalSource, because a request-triggered event fires once per request and
+// mirroring one hands any client a way to fill the Application log. Plus two
+// INFO anchors, SYS-001 and SYS-002, which are how an operator answers "did it
+// start, and did it bind" after `sc start` returned.
+func eventLogEligible(ev *events.Event) bool {
+	if ev.ExternalSource {
+		return false
+	}
+
+	if ev.Level >= slog.LevelWarn {
+		return true
+	}
+
+	return ev.ID == catalog.SYS001 || ev.ID == catalog.SYS002
+}
+
+func TestCatalogs_ShouldGiveEveryEventLogEligibleEventAnID(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	var missing []string
+
+	// ACT
+	for id, ev := range events.GetAll() {
+		if eventLogEligible(ev) && ev.EventLogID == 0 {
+			missing = append(missing, string(id))
+		}
+	}
+
+	// ASSERT
+	// The whole point of a rule rather than a hand-kept list: registering a new
+	// WARN+ internal event without allocating a number fails here, by name,
+	// instead of silently never reaching an operator.
+	sort.Strings(missing)
+	assert.Empty(t, missing,
+		"these events qualify for the Windows Event Log but declare no EventLogID; "+
+			"allocate one in the range for their category (see events.Event.EventLogID)")
+}
+
+func TestCatalogs_ShouldNotGiveAnIneligibleEventAnID(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	var unexpected []string
+
+	// ACT
+	for id, ev := range events.GetAll() {
+		if !eventLogEligible(ev) && ev.EventLogID != 0 {
+			unexpected = append(unexpected, string(id))
+		}
+	}
+
+	// ASSERT
+	// The rule has to bind in both directions, or "the rule" is just whatever
+	// anyone happened to declare.
+	sort.Strings(unexpected)
+	assert.Empty(t, unexpected,
+		"these events declare an EventLogID but do not qualify; either the rule changed or the "+
+			"declaration is wrong")
+}
+
+func TestCatalogs_ShouldKeepEveryEventLogIDUniqueAndInRange(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	seen := map[uint32]events.EventID{}
+
+	// ACT / ASSERT
+	// Register already panics on both, so this is the registry-wide restatement:
+	// Register only sees the catalogs its own binary linked, and this package is
+	// the one place that links them all.
+	for id, ev := range events.GetAll() {
+		if ev.EventLogID == 0 {
+			continue
+		}
+
+		assert.LessOrEqual(t, ev.EventLogID, events.MaxEventLogID,
+			"%s: an ID above the message table writes without error and renders blank", id)
+
+		if other, dup := seen[ev.EventLogID]; dup {
+			t.Errorf("events %s and %s both claim EventLogID %d", other, id, ev.EventLogID)
+		}
+
+		seen[ev.EventLogID] = id
 	}
 }

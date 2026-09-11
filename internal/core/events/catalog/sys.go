@@ -32,6 +32,7 @@ func init() {
 	events.Register(&events.Event{
 		ID:              SYS001,
 		Level:           slog.LevelInfo,
+		EventLogID:      1,
 		MessageTemplate: "adapter starting",
 		Description:     "The adapter process has started and is initializing.",
 		Category:        events.CategorySystem.String(),
@@ -46,6 +47,7 @@ func init() {
 	events.Register(&events.Event{
 		ID:              SYS002,
 		Level:           slog.LevelInfo,
+		EventLogID:      2,
 		MessageTemplate: "listening",
 		Description:     "The HTTP server is listening and ready to serve requests.",
 		Category:        events.CategorySystem.String(),
@@ -86,6 +88,7 @@ func init() {
 	events.Register(&events.Event{
 		ID:              SYS005,
 		Level:           slog.LevelError,
+		EventLogID:      5,
 		MessageTemplate: "startup failed",
 		Description:     "The process failed to start and is exiting non-zero.",
 		Category:        events.CategorySystem.String(),
@@ -102,6 +105,7 @@ func init() {
 	events.Register(&events.Event{
 		ID:              SYS006,
 		Level:           slog.LevelWarn,
+		EventLogID:      6,
 		MessageTemplate: "authentication disabled",
 		Description: "The adapter started with disableAuth set: every route except health is open to anyone " +
 			"who can reach the port.",
@@ -113,6 +117,7 @@ func init() {
 	events.Register(&events.Event{
 		ID:              SYS007,
 		Level:           slog.LevelError,
+		EventLogID:      7,
 		MessageTemplate: "shutdown incomplete",
 		Description:     "The drain grace period expired with requests still in flight; they were cut off.",
 		Category:        events.CategorySystem.String(),
