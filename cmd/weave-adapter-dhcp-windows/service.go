@@ -24,6 +24,8 @@ Commands:
   start      bring the installed service up
   stop       take it down, draining in-flight requests first
   status     show what the SCM knows about it
+  secure     lock the config, token store and log directory to SYSTEM and
+             Administrators only (install does this too)
 
 Run every command from an ELEVATED prompt: the SCM refuses all of them
 to a non-administrator.
@@ -36,6 +38,7 @@ const (
 	verbStart     = "start"
 	verbStop      = "stop"
 	verbStatus    = "status"
+	verbSecure    = "secure"
 )
 
 // consentFlag is the acknowledgement install requires. It follows the
@@ -60,14 +63,31 @@ boot makes it more likely somebody points real traffic at it.
 Re-run with --` + consentFlag + ` to proceed.
 `
 
-// managerFactory opens an SCM connection. Injected so the command's own logic
-// — the flag parsing, the consent gate, the refusals, the output — is tested
-// on any platform, rather than only on a host nobody can iterate on.
+// managerFactory opens an SCM connection.
 type managerFactory func() (winsvc.Manager, error)
+
+// secureFunc applies the file lockdown.
+type secureFunc func([]winsvc.Securable) error
+
+// serviceDeps are the platform operations this subcommand needs.
+//
+// Injected, both of them, so the command's own logic — the flag parsing, the
+// consent gate, the refusals, which paths get secured, the output — is tested
+// on any platform rather than only on a host nobody can iterate on. The
+// decisions are the command's; only the syscalls are the platform's.
+type serviceDeps struct {
+	newManager managerFactory
+	secure     secureFunc
+}
+
+// platformDeps are the real operations, used by main.
+func platformDeps() serviceDeps {
+	return serviceDeps{newManager: winsvc.NewManager, secure: winsvc.Secure}
+}
 
 // runService dispatches a service subcommand. newManager is injected; out
 // receives all human-facing output.
-func runService(args []string, out io.Writer, newManager managerFactory) error {
+func runService(args []string, out io.Writer, deps serviceDeps) error {
 	p := &printer{w: out}
 
 	if len(args) == 0 {
@@ -84,11 +104,13 @@ func runService(args []string, out io.Writer, newManager managerFactory) error {
 
 	switch args[0] {
 	case verbInstall:
-		return runServiceInstall(args[1:], p, newManager)
+		return runServiceInstall(args[1:], p, deps)
 	case verbUninstall, verbStart, verbStop:
-		return runServiceLifecycle(args[1:], p, newManager, args[0])
+		return runServiceLifecycle(args[1:], p, deps, args[0])
 	case verbStatus:
-		return runServiceStatus(args[1:], p, newManager)
+		return runServiceStatus(args[1:], p, deps)
+	case verbSecure:
+		return runServiceSecure(args[1:], p, deps)
 	default:
 		p.printf("%s", serviceUsage)
 
@@ -97,7 +119,7 @@ func runService(args []string, out io.Writer, newManager managerFactory) error {
 }
 
 // runServiceInstall registers the service.
-func runServiceInstall(args []string, p *printer, newManager managerFactory) error {
+func runServiceInstall(args []string, p *printer, deps serviceDeps) error {
 	flags := flag.NewFlagSet("service install", flag.ContinueOnError)
 	flags.SetOutput(p.w)
 
@@ -171,7 +193,7 @@ func runServiceInstall(args []string, p *printer, newManager managerFactory) err
 		return fmt.Errorf("service install: resolving %q: %w", *configPath, err)
 	}
 
-	m, err := newManager()
+	m, err := deps.newManager()
 	if err != nil {
 		return err
 	}
@@ -194,12 +216,21 @@ func runServiceInstall(args []string, p *printer, newManager managerFactory) err
 		return fmt.Errorf("service install: %w", err)
 	}
 
+	// After registration, because a failure here leaves a registered service
+	// whose paths are still wide -- and the error says exactly that, so an
+	// operator knows the service exists and what is still owed.
+	if err := secureConfiguredPaths(p, deps, absConfig, values); err != nil {
+		return fmt.Errorf("service install: %s is registered, but securing its files failed: %w",
+			serviceName, err)
+	}
+
 	p.printf("Installed %s.\n", serviceName)
 	p.printf("  binary:     %s\n", binPath)
 	p.printf("  config:     %s\n", absConfig)
 	p.printf("  account:    LocalSystem\n")
 	p.printf("  start type: automatic\n")
 	p.printf("  recovery:   restart after %s\n", recoverySchedule())
+	p.printf("  secured:    config, token store and log directory, to SYSTEM and Administrators\n")
 	p.printf("\nStart it with: weave-adapter-dhcp-windows service start\n")
 
 	return p.err
@@ -207,7 +238,7 @@ func runServiceInstall(args []string, p *printer, newManager managerFactory) err
 
 // runServiceLifecycle runs uninstall, start or stop, all of which take no
 // flags beyond the shared ones and differ only in the verb.
-func runServiceLifecycle(args []string, p *printer, newManager managerFactory, verb string) error {
+func runServiceLifecycle(args []string, p *printer, deps serviceDeps, verb string) error {
 	flags := flag.NewFlagSet("service "+verb, flag.ContinueOnError)
 	flags.SetOutput(p.w)
 
@@ -230,7 +261,7 @@ func runServiceLifecycle(args []string, p *printer, newManager managerFactory, v
 		return errors.New("service uninstall: refused without --yes")
 	}
 
-	m, err := newManager()
+	m, err := deps.newManager()
 	if err != nil {
 		return err
 	}
@@ -291,7 +322,7 @@ func pastTense(verb string) string {
 }
 
 // runServiceStatus prints what the SCM knows.
-func runServiceStatus(args []string, p *printer, newManager managerFactory) error {
+func runServiceStatus(args []string, p *printer, deps serviceDeps) error {
 	flags := flag.NewFlagSet("service status", flag.ContinueOnError)
 	flags.SetOutput(p.w)
 
@@ -299,7 +330,7 @@ func runServiceStatus(args []string, p *printer, newManager managerFactory) erro
 		return skipHelp(err)
 	}
 
-	m, err := newManager()
+	m, err := deps.newManager()
 	if err != nil {
 		return err
 	}
@@ -343,4 +374,64 @@ func preshutdownDescription(d time.Duration) string {
 	}
 
 	return d.String()
+}
+
+// runServiceSecure re-applies the lockdown without touching the registration.
+//
+// Exposed as its own verb so the console deployment keeps a one-command
+// lockdown — it is what scripts/secure-token-store.ps1 used to be — and so an
+// operator who moved the token store can re-secure it without reinstalling.
+func runServiceSecure(args []string, p *printer, deps serviceDeps) error {
+	flags := flag.NewFlagSet("service secure", flag.ContinueOnError)
+	flags.SetOutput(p.w)
+
+	configPath := flags.String("config", "", "path to the adapter's TOML config file (required)")
+
+	if err := flags.Parse(args); err != nil {
+		return skipHelp(err)
+	}
+
+	if *configPath == "" {
+		return errors.New("service secure: --config is required; it names the file to secure and " +
+			"tells this command where the token store and log are")
+	}
+
+	absConfig, err := filepath.Abs(*configPath)
+	if err != nil {
+		return fmt.Errorf("service secure: resolving %q: %w", *configPath, err)
+	}
+
+	values, err := config.LoadWithoutEnvironment(
+		append(config.CoreKeys(), dhcpwindows.Keys()...),
+		[]string{"--config", absConfig},
+	)
+	if err != nil {
+		return fmt.Errorf("service secure: reading %q: %w", absConfig, err)
+	}
+
+	if err := secureConfiguredPaths(p, deps, absConfig, values); err != nil {
+		return fmt.Errorf("service secure: %w", err)
+	}
+
+	return p.err
+}
+
+// secureConfiguredPaths locks down everything the resolved configuration
+// names, and reports each target so an operator can see what was covered.
+func secureConfiguredPaths(p *printer, deps serviceDeps, absConfig string, values *config.Values) error {
+	targets := winsvc.SecurablesFor(
+		absConfig,
+		values.String(config.KeyAuthTokensFile),
+		values.String(config.KeyLogFile),
+	)
+
+	if err := deps.secure(targets); err != nil {
+		return err
+	}
+
+	for _, t := range targets {
+		p.printf("  secured %s (%s)\n", t.Path, t.Why)
+	}
+
+	return nil
 }

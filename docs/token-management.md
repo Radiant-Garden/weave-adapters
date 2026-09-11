@@ -75,12 +75,31 @@ hash becomes a working credential. On Windows the default inherited ACL can
 permit that write. Lock the file down after `token gen` creates it:
 
 ```powershell
-.\scripts\secure-token-store.ps1 -Path tokens.toml
+weave-adapter-dhcp-windows.exe service secure --config C:\ProgramData\weave-adapters\config.toml
 ```
 
-It replaces the inherited ACL with an explicit one — full control for SYSTEM,
-Administrators, and the adapter's service account, and nobody else — which is
-the ACL companion to the `0600` mode the adapter sets on every other platform.
+It replaces the inherited ACL with an explicit one — full control for SYSTEM
+and the local Administrators group, and nobody else — which is the ACL
+companion to the `0600` mode the adapter sets on every other platform. Two
+principals rather than three: the service runs **as** LocalSystem, so the
+account grant and the SYSTEM grant are the same entry.
+
+The command takes `--config` rather than a path to the store, because it
+secures everything that configuration names: the config file (which carries
+`identity.namespaceKey`), the token store, and the **log directory** — the
+directory rather than the log, since the adapter creates the file at runtime
+and a new file inherits its parent's entries.
+
+`service install` does this already, so you only need the command for a
+console deployment, or after moving the store or the log. A service **refuses
+to start** when either grants write to anyone outside those two principals;
+it reports the problem rather than repairing it, because a service that
+rewrote its own ACLs at boot would quietly undo a deliberate change.
+
+The retired `scripts/secure-token-store.ps1` now just points here. Its
+reasoning was right; its defaults had drifted — it granted NETWORK SERVICE
+rather than LocalSystem, defaulted to a relative path a service now rejects,
+and secured files only.
 
 ### Why a plain hash and not bcrypt
 

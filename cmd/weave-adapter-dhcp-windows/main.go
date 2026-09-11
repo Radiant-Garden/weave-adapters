@@ -86,7 +86,7 @@ func main() {
 
 	switch {
 	case isServiceCommand(args):
-		err = runService(args[1:], os.Stdout, winsvc.NewManager)
+		err = runService(args[1:], os.Stdout, platformDeps())
 		if err != nil {
 			// A CLI mistake is not a startup failure, the same reasoning the
 			// token arm applies: an operator who forgot --config gets a plain
@@ -303,6 +303,15 @@ func runWith(ctx context.Context, args []string, l launch) (io.Closer, error) {
 		if err := config.CheckServicePaths(values); err != nil {
 			return nil, fmt.Errorf("this configuration cannot work as a service:\n%w", err)
 		}
+
+		// Refused, never repaired. A service that rewrote its own ACLs at boot
+		// would quietly undo a deliberate change an operator made, and would
+		// need write access to its own security descriptor to do it — which is
+		// the thing being protected. `service secure` fixes it, from a prompt
+		// that already has the rights.
+		if err := checkFileSecurity(cfg); err != nil {
+			return nil, err
+		}
 	}
 
 	// Before the first Emit, and its failure is returned rather than logged:
@@ -448,4 +457,35 @@ func buildAuth(ctx context.Context, cfg *config.Config) ([]middleware.Middleware
 	}
 
 	return []middleware.Middleware{auth.Bearer(verifier, httpserver.Unauthenticated)}, nil
+}
+
+// checkFileSecurity refuses to start when a file the service depends on
+// grants write to anyone outside SYSTEM and Administrators.
+//
+// The token store is the sharpest case: the adapter reads it once at startup
+// and trusts every hash in it, so anyone who can append one has a bearer
+// token the API accepts. The config file is next — it carries
+// identity.namespaceKey, and a write re-keys every wadaptID on the host.
+func checkFileSecurity(cfg *config.Config) error {
+	var errs []error
+
+	for _, path := range []string{cfg.AuthTokensFile, cfg.LogFile} {
+		if path == "" {
+			continue
+		}
+
+		grants, err := winsvc.ReadGrants(path)
+		if err != nil {
+			// Unreadable is not the same as insecure, and refusing to start
+			// over a descriptor this process could not read would take the
+			// adapter down for a permissions quirk rather than a risk.
+			slog.Debug("could not read the access list", "path", path, "error", err)
+
+			continue
+		}
+
+		errs = append(errs, winsvc.CheckGrants(path, grants))
+	}
+
+	return errors.Join(errs...)
 }

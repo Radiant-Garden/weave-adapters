@@ -1,117 +1,45 @@
-# Locks down the bearer token store (tokens.toml) so only the adapter's account
-# and administrators can read or write it.
+# RETIRED. The adapter secures its own files now.
 #
-# RUN THIS ONCE, IN AN ELEVATED POWERSHELL, ON THE ADAPTER HOST -- after
-# `token gen` has created the file, and again if you ever move the store.
+# Use this instead, from an ELEVATED PowerShell:
+#
+#     weave-adapter-dhcp-windows.exe service secure --config C:\path\to\config.toml
+#
+# `service install` already does it, so this is only for a console deployment,
+# or after you move the token store or the log.
 #
 # ---------------------------------------------------------------------------
-# WHY THIS EXISTS
+# WHY THIS SCRIPT WENT AWAY
 # ---------------------------------------------------------------------------
 #
-# The adapter writes tokens.toml with a 0o600 file mode. On Windows that mode is
-# a no-op: NTFS ignores POSIX permission bits, and the file's real protection is
-# its access-control list, which by default inherits from the parent directory
-# -- often Users:Read, sometimes worse.
+# Its reasoning was right and is preserved in internal/core/winsvc/secure.go:
+# NTFS ignores the 0o600 the adapter sets, the file's real protection is its
+# ACL, and a WRITE is the actual risk -- anyone who can append a hash to the
+# token store gets a bearer token the adapter accepts at its next start.
+# SIDs rather than names, because a name is locale-dependent.
 #
-# The file stores only token HASHES, so a READ leaks nothing usable: a hash
-# cannot be replayed as a bearer token. A WRITE is the actual risk. Anyone who
-# can write the file can append their OWN token hash, and the adapter -- which
-# reads the store once at startup and trusts every hash in it -- would then
-# accept their token as a valid credential. That is a local privilege escalation
-# into the adapter's API, and the default inherited ACL can permit it.
+# Its DEFAULTS had drifted from decisions taken after it was written:
 #
-# This script replaces the inherited ACL with an explicit one: full control for
-# SYSTEM, the local Administrators group, and the account the adapter runs as,
-# and nobody else. It is the ACL companion to the 0o600 the adapter sets on
-# every other platform.
+#   - it granted S-1-5-20 (NETWORK SERVICE). The service runs as LocalSystem,
+#     S-1-5-18 -- forced by measurement, since the PowerShell DHCP cmdlets
+#     gate on Administrators and NETWORK SERVICE was refused WIN32 5 on
+#     WS2022 in every group tried.
+#   - it defaulted to the relative path tokens.toml, which a service now
+#     refuses outright: under the SCM the working directory is
+#     C:\Windows\System32.
+#   - it secured files only. The log file is created by the adapter at
+#     runtime, so the LOG DIRECTORY needs inheritable entries or each new log
+#     lands on whatever the parent permits.
+#   - it knew nothing of the config file, which now carries
+#     identity.namespaceKey.
 #
-# KEEP THIS FILE ASCII-ONLY. Windows PowerShell 5.1 decodes a BOM-less .ps1
-# using the host's ANSI codepage; on a German-locale host that is CP1252, where
-# the third byte of a UTF-8 em dash lands on a character PowerShell honours as a
-# closing double quote, silently ending the string it sits in. Use "--", never
-# an em dash.
+# And a script has to be told the paths, while the binary has just resolved
+# and validated all three. That is the same argument that made the installer
+# a Go subcommand rather than a .ps1.
 
-[CmdletBinding()]
-param(
-    # The token store to secure. Defaults to the same relative path the adapter
-    # and the token CLI default to (config.DefaultAuthTokensFile).
-    [string]$Path = 'tokens.toml',
-
-    # The account the adapter service runs as, granted read/write alongside
-    # SYSTEM and Administrators. A SID is invariant across locales; a name is
-    # not. NETWORK SERVICE (S-1-5-20) is the default a stock service uses, but a
-    # dedicated account is preferred -- see grant-dhcp-access.ps1.
-    [string]$ServiceAccount = 'S-1-5-20'
-)
-
-$ErrorActionPreference = 'Stop'
-
-function Write-Step { param([string]$Text) Write-Host "==> $Text" -ForegroundColor Cyan }
-function Write-Ok   { param([string]$Text) Write-Host "    OK: $Text" -ForegroundColor Green }
-
-# --- elevation -------------------------------------------------------------
-
-$identity  = [Security.Principal.WindowsIdentity]::GetCurrent()
-$principal = New-Object Security.Principal.WindowsPrincipal($identity)
-
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "This script rewrites a file ACL, which needs Administrator." -ForegroundColor Red
-    Write-Host "Re-run it from an elevated PowerShell (Run as administrator)." -ForegroundColor Red
-    exit 1
-}
-
-# --- locate the file -------------------------------------------------------
-
-if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-    Write-Host "No token store at '$Path'." -ForegroundColor Red
-    Write-Host "Create one first: .\weave-adapter-dhcp-windows.exe token gen --label <name>" -ForegroundColor Red
-    Write-Host "then re-run this against the file it wrote." -ForegroundColor Red
-    exit 1
-}
-
-$full = (Resolve-Path -LiteralPath $Path).Path
-
-Write-Step "Securing $full"
-
-# --- build the explicit ACL ------------------------------------------------
-#
-# Well-known SIDs, because the group names are localized ("Administratoren",
-# "SYSTEM" varies) and a name-based rule would not resolve on a non-English host.
-
-$system         = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')       # LOCAL SYSTEM
-$administrators = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')   # BUILTIN\Administrators
-$service        = New-Object Security.Principal.SecurityIdentifier($ServiceAccount)
-
-$acl = New-Object Security.AccessControl.FileSecurity
-
-# Turn OFF inheritance and do NOT copy the inherited entries across: a protected
-# ACL with only the three rules below is the whole point. Passing $false as the
-# second argument is what drops the inherited Users:Read that the default grants.
-$acl.SetAccessRuleProtection($true, $false)
-
-foreach ($sid in @($system, $administrators, $service)) {
-    $rule = New-Object Security.AccessControl.FileSystemAccessRule(
-        $sid,
-        [Security.AccessControl.FileSystemRights]::FullControl,
-        [Security.AccessControl.AccessControlType]::Allow)
-    $acl.AddAccessRule($rule)
-}
-
-# The owner should be Administrators, not whoever happened to create the file:
-# an owner can always rewrite the ACL, so leaving it as a low-privileged creator
-# would undo everything above.
-$acl.SetOwner($administrators)
-
-Set-Acl -LiteralPath $full -AclObject $acl
-
-Write-Ok "ACL replaced: SYSTEM, Administrators, and $ServiceAccount have full control; nobody else."
-
-# --- show the result -------------------------------------------------------
-
-Write-Step "Effective permissions now"
-(Get-Acl -LiteralPath $full).Access |
-    Format-Table IdentityReference, FileSystemRights, AccessControlType -AutoSize
-
+Write-Host "This script is retired. Run instead, from an elevated prompt:" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "Done. Restart the adapter only if you also rotated tokens; the ACL change" -ForegroundColor Green
-Write-Host "alone needs no restart -- it takes effect on the next open." -ForegroundColor Green
+Write-Host "    weave-adapter-dhcp-windows.exe service secure --config <path-to-config.toml>" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "`service install` already secures these files; this is for a console" -ForegroundColor Yellow
+Write-Host "deployment, or after moving the token store or log." -ForegroundColor Yellow
+exit 1

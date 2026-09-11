@@ -118,16 +118,37 @@ func (f *fakeManager) Close() error {
 	return nil
 }
 
-// factoryFor returns a managerFactory handing out m, and records whether it
-// was ever called — a refusal that still opened an SCM connection has already
-// done something it should not have.
-func factoryFor(m *fakeManager, opened *bool) managerFactory {
-	return func() (winsvc.Manager, error) {
-		if opened != nil {
-			*opened = true
-		}
+// fakeSecurer records what the lockdown was asked to cover.
+type fakeSecurer struct {
+	targets []winsvc.Securable
+	err     error
+}
 
-		return m, nil
+func (f *fakeSecurer) secure(targets []winsvc.Securable) error {
+	f.targets = append(f.targets, targets...)
+
+	return f.err
+}
+
+// depsFor returns serviceDeps handing out m, and records whether the SCM was
+// ever contacted — a refusal that still opened a privileged handle has
+// already done the thing it was refusing.
+func depsFor(m *fakeManager, opened *bool) serviceDeps {
+	return depsWith(m, opened, &fakeSecurer{})
+}
+
+// depsWith is depsFor with a caller-supplied securer, for the tests that
+// assert on what was locked down.
+func depsWith(m *fakeManager, opened *bool, sec *fakeSecurer) serviceDeps {
+	return serviceDeps{
+		newManager: func() (winsvc.Manager, error) {
+			if opened != nil {
+				*opened = true
+			}
+
+			return m, nil
+		},
+		secure: sec.secure,
 	}
 }
 
@@ -171,7 +192,7 @@ func TestRunService_ShouldRequireACommand(t *testing.T) {
 	var out bytes.Buffer
 
 	// ACT
-	err := runService(nil, &out, factoryFor(&fakeManager{}, nil))
+	err := runService(nil, &out, depsFor(&fakeManager{}, nil))
 
 	// ASSERT
 	require.Error(t, err)
@@ -189,7 +210,7 @@ func TestRunService_ShouldPrintUsageForHelp(t *testing.T) {
 			var out bytes.Buffer
 
 			// ACT
-			err := runService([]string{verb}, &out, factoryFor(&fakeManager{}, nil))
+			err := runService([]string{verb}, &out, depsFor(&fakeManager{}, nil))
 
 			// ASSERT — asking for help is not a failure.
 			require.NoError(t, err)
@@ -205,7 +226,7 @@ func TestRunService_ShouldRejectAnUnknownCommand(t *testing.T) {
 	var out bytes.Buffer
 
 	// ACT
-	err := runService([]string{"reinstall"}, &out, factoryFor(&fakeManager{}, nil))
+	err := runService([]string{"reinstall"}, &out, depsFor(&fakeManager{}, nil))
 
 	// ASSERT
 	require.Error(t, err)
@@ -224,7 +245,7 @@ func TestRunServiceInstall_ShouldRefuseWithoutConsent(t *testing.T) {
 	m := &fakeManager{}
 
 	// ACT
-	err := runService([]string{"install", "--config", "C:\\x\\config.toml"}, &out, factoryFor(m, &opened))
+	err := runService([]string{"install", "--config", "C:\\x\\config.toml"}, &out, depsFor(m, &opened))
 
 	// ASSERT
 	// The refusal must come before the SCM connection: a command that opens a
@@ -247,7 +268,7 @@ func TestRunServiceInstall_ShouldRequireAConfigPath(t *testing.T) {
 	)
 
 	// ACT
-	err := runService([]string{"install", "--" + consentFlag}, &out, factoryFor(&fakeManager{}, &opened))
+	err := runService([]string{"install", "--" + consentFlag}, &out, depsFor(&fakeManager{}, &opened))
 
 	// ASSERT
 	// Without a config file the service has no way to receive
@@ -275,7 +296,7 @@ func TestRunServiceInstall_ShouldRegisterAnAbsoluteUnquotedDefinition(t *testing
 	require.NoError(t, err)
 
 	// ACT
-	err = runService([]string{"install", "--" + consentFlag, "--config", rel}, &out, factoryFor(m, nil))
+	err = runService([]string{"install", "--" + consentFlag, "--config", rel}, &out, depsFor(m, nil))
 
 	// ASSERT
 	require.NoError(t, err)
@@ -308,7 +329,7 @@ func TestRunServiceInstall_ShouldPassTheDrainBudgetThrough(t *testing.T) {
 
 	// ACT
 	err := runService([]string{"install", "--" + consentFlag, "--config", writeServiceConfig(t, "")},
-		&out, factoryFor(m, nil))
+		&out, depsFor(m, nil))
 
 	// ASSERT
 	// It becomes the service's PreshutdownTimeout. The binary owns one value
@@ -330,7 +351,7 @@ func TestRunServiceInstall_ShouldReportAnAlreadyInstalledService(t *testing.T) {
 
 	// ACT
 	err := runService([]string{"install", "--" + consentFlag, "--config", writeServiceConfig(t, "")},
-		&out, factoryFor(m, nil))
+		&out, depsFor(m, nil))
 
 	// ASSERT
 	require.ErrorIs(t, err, winsvc.ErrAlreadyInstalled)
@@ -349,7 +370,7 @@ func TestRunServiceUninstall_ShouldRefuseWithoutYes(t *testing.T) {
 	m := &fakeManager{}
 
 	// ACT
-	err := runService([]string{"uninstall"}, &out, factoryFor(m, &opened))
+	err := runService([]string{"uninstall"}, &out, depsFor(m, &opened))
 
 	// ASSERT
 	// The destructive half: it stops a running service, deletes the
@@ -382,7 +403,7 @@ func TestRunServiceLifecycle_ShouldCallTheMatchingOperation(t *testing.T) {
 			m := &fakeManager{}
 
 			// ACT
-			err := runService(tc.args, &out, factoryFor(m, nil))
+			err := runService(tc.args, &out, depsFor(m, nil))
 
 			// ASSERT
 			require.NoError(t, err)
@@ -402,7 +423,7 @@ func TestRunServiceLifecycle_ShouldNameAnUninstalledService(t *testing.T) {
 	m := &fakeManager{opErr: winsvc.ErrNotInstalled}
 
 	// ACT
-	err := runService([]string{"start"}, &out, factoryFor(m, nil))
+	err := runService([]string{"start"}, &out, depsFor(m, nil))
 
 	// ASSERT
 	// The commonest mistake, and it reads as a typo in the service name if the
@@ -421,7 +442,7 @@ func TestRunServiceStatus_ShouldReportAnAbsentService(t *testing.T) {
 	m := &fakeManager{status: winsvc.ServiceStatus{Name: serviceName, Installed: false}}
 
 	// ACT
-	err := runService([]string{"status"}, &out, factoryFor(m, nil))
+	err := runService([]string{"status"}, &out, depsFor(m, nil))
 
 	// ASSERT — not installed is an answer, not an error.
 	require.NoError(t, err)
@@ -443,7 +464,7 @@ func TestRunServiceStatus_ShouldWarnWhenRecoveryIsInert(t *testing.T) {
 	}}
 
 	// ACT
-	err := runService([]string{"status"}, &out, factoryFor(m, nil))
+	err := runService([]string{"status"}, &out, depsFor(m, nil))
 
 	// ASSERT
 	// The flag whose absence is otherwise invisible. Without it the SCM runs
@@ -471,7 +492,7 @@ func TestRunServiceStatus_ShouldReportAnInstalledService(t *testing.T) {
 	}}
 
 	// ACT
-	err := runService([]string{"status"}, &out, factoryFor(m, nil))
+	err := runService([]string{"status"}, &out, depsFor(m, nil))
 
 	// ASSERT
 	require.NoError(t, err)
@@ -553,7 +574,7 @@ func TestRunServiceInstall_ShouldRefuseAConfigurationThatCannotStart(t *testing.
 			m := &fakeManager{}
 
 			// ACT
-			err := runService([]string{"install", "--" + consentFlag, "--config", path}, &out, factoryFor(m, nil))
+			err := runService([]string{"install", "--" + consentFlag, "--config", path}, &out, depsFor(m, nil))
 
 			// ASSERT
 			require.Error(t, err)
@@ -573,7 +594,7 @@ func TestRunServiceInstall_ShouldAcceptABarePowerShellName(t *testing.T) {
 	cfg := writeServiceConfig(t, "[dhcp]\npowershellPath = 'powershell.exe'\n")
 
 	// ACT
-	err := runService([]string{"install", "--" + consentFlag, "--config", cfg}, &out, factoryFor(m, nil))
+	err := runService([]string{"install", "--" + consentFlag, "--config", cfg}, &out, depsFor(m, nil))
 
 	// ASSERT
 	// The shipped default. Go's LookPath does not search the working directory
@@ -594,7 +615,7 @@ func TestRunServiceInstall_ShouldRefuseAMissingConfigFile(t *testing.T) {
 	absent := filepath.Join(t.TempDir(), "not-there.toml")
 
 	// ACT
-	err := runService([]string{"install", "--" + consentFlag, "--config", absent}, &out, factoryFor(m, nil))
+	err := runService([]string{"install", "--" + consentFlag, "--config", absent}, &out, depsFor(m, nil))
 
 	// ASSERT
 	// Registering a service that points at a file which is not there
@@ -602,4 +623,98 @@ func TestRunServiceInstall_ShouldRefuseAMissingConfigFile(t *testing.T) {
 	// Event Viewer for something the installer could see.
 	require.Error(t, err)
 	assert.Empty(t, m.installed)
+}
+
+func TestRunServiceInstall_ShouldSecureEverythingTheConfigurationNames(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	var out bytes.Buffer
+
+	sec := &fakeSecurer{}
+	cfg := writeServiceConfig(t, "")
+
+	// ACT
+	err := runService([]string{"install", "--" + consentFlag, "--config", cfg},
+		&out, depsWith(&fakeManager{}, nil, sec))
+
+	// ASSERT
+	// All three, from the configuration the installer just resolved — which
+	// is the argument for doing this in the binary rather than a script: a
+	// script has to be told the paths and drifts from them silently.
+	require.NoError(t, err)
+	require.Len(t, sec.targets, 3)
+
+	paths := make([]string, 0, len(sec.targets))
+	for _, target := range sec.targets {
+		paths = append(paths, target.Path)
+	}
+
+	assert.Contains(t, paths, cfg, "the config file carries identity.namespaceKey")
+	assert.Contains(t, paths, winTokenStore)
+	// The log DIRECTORY, not the log: the adapter creates the file at runtime
+	// and it inherits the directory's entries.
+	assert.Contains(t, paths, filepath.Dir(winLogFile))
+	assert.NotContains(t, paths, winLogFile)
+}
+
+func TestRunServiceInstall_ShouldReportARegisteredServiceWhoseLockdownFailed(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	var out bytes.Buffer
+
+	sec := &fakeSecurer{err: winsvc.ErrNotSecured}
+
+	// ACT
+	err := runService([]string{"install", "--" + consentFlag, "--config", writeServiceConfig(t, "")},
+		&out, depsWith(&fakeManager{}, nil, sec))
+
+	// ASSERT
+	// The service exists by this point, and the error has to say so: an
+	// operator told only "install failed" would reinstall and hit
+	// ErrAlreadyInstalled, with the files still wide open.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is registered")
+	assert.Contains(t, err.Error(), "securing its files failed")
+}
+
+func TestRunServiceSecure_ShouldLockDownWithoutTouchingTheRegistration(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	var out bytes.Buffer
+
+	m := &fakeManager{}
+	sec := &fakeSecurer{}
+
+	// ACT
+	err := runService([]string{"secure", "--config", writeServiceConfig(t, "")},
+		&out, depsWith(m, nil, sec))
+
+	// ASSERT
+	// The console deployment's one-command lockdown, and the repair path
+	// after moving a store. It must not touch the SCM at all.
+	require.NoError(t, err)
+	assert.Len(t, sec.targets, 3)
+	assert.Empty(t, m.calls, "secure must not touch the service registration")
+}
+
+func TestRunServiceSecure_ShouldRequireAConfigPath(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	var out bytes.Buffer
+
+	sec := &fakeSecurer{}
+
+	// ACT
+	err := runService([]string{"secure"}, &out, depsWith(&fakeManager{}, nil, sec))
+
+	// ASSERT
+	// It is the config that names the other two paths, so there is nothing to
+	// secure without it.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--config is required")
+	assert.Empty(t, sec.targets)
 }
