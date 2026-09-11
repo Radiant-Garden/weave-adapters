@@ -164,8 +164,22 @@ type adapter struct {
 
 // startE2E builds the binary, mints a token through the real CLI, and starts the
 // process against whatever backend the host provides.
+//
+// Unless it is told to attach. `task service-gate` runs this same suite
+// against the installed Windows service, and none of what this function does
+// applies there: the service is already running, under a provisioned config,
+// on a port and with a token the gate chose. Attaching rather than forking a
+// second copy is the whole point — a gate that started its own process would
+// prove the binary serves and say nothing about the service.
 func startE2E(t *testing.T) *adapter {
 	t.Helper()
+
+	if base, token, ok := attachTarget(); ok {
+		t.Logf("attaching to %s rather than starting a process", base)
+		waitReady(t, base+"/api/v1/health")
+
+		return &adapter{base: base, token: token}
+	}
 
 	binary := buildAdapter(t)
 	store := filepath.Join(t.TempDir(), "tokens.toml")
@@ -505,10 +519,36 @@ func TestE2E_ShouldFilterWithoutDisturbingTheCollection(t *testing.T) {
 	assert.Equal(t, before.Items, after.Items, "filtering changed what an unfiltered read returns")
 }
 
-// DHCP server; running them concurrently would put N powershell.exe spawns on a shared
-// host and make a slow query look like a flaky test.
+// restartAdapter restarts whatever is serving: the installed service in
+// attach mode, or nothing at all when the harness owns the process and the
+// caller starts a second one itself.
 //
-//nolint:paralleltest // each case starts its own adapter process and queries the one real
+// `sc stop` / `sc start` is a truer restart than killing a child process, so
+// the identity test gets stronger under the gate rather than weaker.
+func restartAdapter(t *testing.T) bool {
+	t.Helper()
+
+	base, _, ok := attachTarget()
+	if !ok {
+		return false
+	}
+
+	for _, verb := range []string{"stop", "start"} {
+		//nolint:gosec,noctx // G204: a constant verb against a constant service name.
+		out, err := exec.Command("sc.exe", verb, serviceName).CombinedOutput()
+		require.NoError(t, err, "sc %s: %s", verb, out)
+	}
+
+	waitReady(t, base+"/api/v1/health")
+
+	return true
+}
+
+// Not parallel: it drives a real restart of the one adapter on this host —
+// under the gate that is an `sc stop` / `sc start` of the installed service,
+// which nothing else may be talking to at the time.
+//
+//nolint:paralleltest // restarts the one adapter on this host
 func TestE2E_ShouldDeriveStableIdentitiesAcrossARestart(t *testing.T) {
 	// ARRANGE — the same host, read twice, across two processes. Derivation is
 	// stable or it is not an identity: a wadaptID that changed on restart would
@@ -519,9 +559,16 @@ func TestE2E_ShouldDeriveStableIdentitiesAcrossARestart(t *testing.T) {
 	before := first.listScopes(t, "")
 	require.NotEmpty(t, before.Items)
 
-	// ACT — a second process, same provisioned identity inputs, fresh port and
-	// token store. Nothing persists between them but the configuration.
-	second := startE2E(t)
+	// ACT — the same adapter, restarted. Under the gate that is a real
+	// `sc stop` / `sc start` of the installed service, which is a truer
+	// restart than what follows: a second process, same provisioned identity
+	// inputs, fresh port and token store, nothing persisting between them but
+	// the configuration.
+	second := first
+	if !restartAdapter(t) {
+		second = startE2E(t)
+	}
+
 	second.requireHealthyBackend(t)
 
 	after := second.listScopes(t, "")

@@ -143,6 +143,62 @@ tasks:
       # not change", not "the adapter still reads this host".
       - go test -count=1 -tags e2e -run TestE2E -v ./cmd/...
 
+  service-gate:
+    desc: 'Drive the WHOLE service lifecycle on the host (WS2022, ELEVATED, mutates the host)'
+    cmds:
+      # Behind its own tag, and in no CI gate. It registers, starts, kills and
+      # removes a Windows service, rewrites ACLs, and runs the e2e write suite
+      # against the real DHCP server. Installing a service needs Administrator
+      # and the WS2022 runner executes as NT AUTHORITY\NetworkService --
+      # weakening that account to make this CI-testable would hand a CI job the
+      # right to install services.
+      #
+      # PROVISIONED_CONFIG is required. The gate's invariant is that the host is
+      # left running the REAL service, and it cannot honour that without being
+      # told which config that is:
+      #
+      #   task service-gate PROVISIONED_CONFIG=C:\ProgramData\weave-adapters\config.toml
+      #
+      # The reinstall is a Taskfile `defer:`, NOT a t.Cleanup. A `go test`
+      # timeout kills the test binary outright without running any cleanup, and
+      # that is precisely the serviceless-host failure the step exists to
+      # prevent. Here it runs on the passing path, the failing path, and the
+      # killed path alike.
+      - defer: '{{.RESTORE}}'
+      - go test -count=1 -timeout 45m -tags servicegate -run TestServiceGate_ -v ./cmd/...
+    requires:
+      vars: [PROVISIONED_CONFIG]
+    vars:
+      RESTORE: >-
+        cmd /c "bin\weave-adapter-dhcp-windows.exe service install --config {{.PROVISIONED_CONFIG}}
+        --i-understand-this-runs-as-localsystem & bin\weave-adapter-dhcp-windows.exe service start"
+    env:
+      WADAPT_PROVISIONED_CONFIG: '{{.PROVISIONED_CONFIG}}'
+
+  service-gate:reboot-before:
+    desc: 'Arm the pre-shutdown drain check, then reboot the host (ELEVATED)'
+    cmds:
+      # Part D, first half. The reboot itself is the only manual step: this
+      # puts a request in flight and records the moment, and the after-half
+      # asserts the drain finished BEFORE the reboot rather than at some later
+      # restart.
+      # The test itself prints what to do next, so there is no echo here to
+      # drift from it.
+      - go test -count=1 -tags servicegate -run TestServiceGateReboot_Before -v ./cmd/...
+    requires:
+      vars: [PROVISIONED_CONFIG]
+    env:
+      WADAPT_PROVISIONED_CONFIG: '{{.PROVISIONED_CONFIG}}'
+
+  service-gate:reboot-after:
+    desc: 'Assert the drain survived the reboot and the service came back (ELEVATED)'
+    cmds:
+      - go test -count=1 -tags servicegate -run TestServiceGateReboot_After -v ./cmd/...
+    requires:
+      vars: [PROVISIONED_CONFIG]
+    env:
+      WADAPT_PROVISIONED_CONFIG: '{{.PROVISIONED_CONFIG}}'
+
   run:
     desc: Run the binary from source
     cmds:
@@ -167,17 +223,19 @@ tasks:
       # which is how a dozen findings accumulated in code that drives the
       # shipped artifact.
       #
-      # Both tags together, not one at a time: with only e2e set, the helpers
-      # smoke_test.go uses look unused and the linter reports three false
-      # positives.
-      - golangci-lint run --build-tags smoke,e2e ./...
+      # All the tags together, not one at a time: with only e2e set, the
+      # helpers smoke_test.go uses look unused and the linter reports three
+      # false positives. servicegate is included for the reason the others
+      # are -- its files are windows-only as well, so the host pass sees
+      # nothing of them and only the cross-compiled pass below does.
+      - golangci-lint run --build-tags smoke,e2e,servicegate ./...
       # Again for windows/amd64. Lint results are NOT platform-independent: the
       # //go:build windows files are invisible to the run above, and the first
       # thing this caught was a gosec integer-overflow finding on the SCM wait
       # hint that no host-GOOS run could ever see. Cross-compilation, so it
       # needs no Windows host and belongs on the ubuntu gate rather than the
       # WS2022 one.
-      - GOOS=windows GOARCH=amd64 golangci-lint run ./...
+      - GOOS=windows GOARCH=amd64 golangci-lint run --build-tags smoke,e2e,servicegate ./...
 
   lint-fix:
     desc: Run golangci-lint with autofix

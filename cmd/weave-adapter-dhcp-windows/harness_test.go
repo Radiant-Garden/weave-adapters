@@ -1,4 +1,4 @@
-//go:build smoke || e2e
+//go:build smoke || e2e || servicegate
 
 /*
 Testing: shared harness for the gates that drive the built binary (no
@@ -25,10 +25,11 @@ Declined:
 
 Additional Remarks:
 
-	Tagged `smoke || e2e` so one copy serves both. The alternative was a second
-	copy behind the e2e tag, and a harness that drifts between two gates is worse
-	than no harness: they would stop proving the same artifact starts the same
-	way.
+	Tagged `smoke || e2e || servicegate` so one copy serves all three. The
+	alternative was a copy per tag, and a harness that drifts between gates is
+	worse than no harness: they would stop proving the same artifact starts the
+	same way. The service gate uses only buildAdapter, freePort and waitReady --
+	it never starts a process of its own, which is the point of it.
 */
 package main
 
@@ -41,12 +42,45 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 )
+
+// Attach-mode environment. When both are set, startE2E talks to a server
+// somebody else is running instead of starting one of its own.
+//
+// Declared here rather than beside startE2E because the service gate sets
+// them and the e2e suite reads them, and the two live behind different build
+// tags. This file is the one they share.
+// A PORT, not a URL. The gate runs on the same host as the service it is
+// attaching to, so loopback is the only destination that was ever meaningful
+// — and taking a port rather than a whole URL means no test here builds a
+// request against a string somebody else chose.
+const (
+	attachPortEnv = "WADAPT_E2E_ATTACH_PORT"
+	//nolint:gosec // G101: the name of a variable carrying a token, not a token.
+	attachTokenEnv = "WADAPT_E2E_ATTACH_TOKEN"
+)
+
+// attachTarget returns the base URL and token to attach to, and whether the
+// environment asked for it.
+func attachTarget() (base, token string, ok bool) {
+	port, err := strconv.Atoi(os.Getenv(attachPortEnv))
+	if err != nil || port <= 0 {
+		return "", "", false
+	}
+
+	token = os.Getenv(attachTokenEnv)
+	if token == "" {
+		return "", "", false
+	}
+
+	return fmt.Sprintf("http://127.0.0.1:%d", port), token, true
+}
 
 // bearerLine matches the line the token CLI prints for pasting into weave. It
 // is the unambiguous one to parse: the bare-token line above it is

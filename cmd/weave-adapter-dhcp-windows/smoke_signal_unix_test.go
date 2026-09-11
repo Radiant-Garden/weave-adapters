@@ -1,4 +1,4 @@
-//go:build (smoke || e2e) && !windows
+//go:build (smoke || e2e || servicegate) && !windows
 
 /*
 Testing: interrupt delivery off Windows

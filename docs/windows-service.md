@@ -240,6 +240,43 @@ out, `SYS-007` is in the log and the requests were cut off.
 
 ---
 
+## Verifying a host
+
+There is one gate that observes all of this against a real Service Control
+Manager, and it is the only thing that can:
+
+```console
+$ task service-gate PROVISIONED_CONFIG=C:\ProgramData\weave-adapters\config.toml
+```
+
+Elevated, on the host, and it **mutates it**: it registers, starts, kills and
+removes a service, rewrites ACLs on its own scratch directory, and runs the
+e2e write suite against the real DHCP server. It is in no CI pipeline, because
+installing a service needs Administrator and a CI job that could grant itself
+that would be a privilege-escalation path rather than a convenience.
+
+It leaves the host running the **provisioned** service on every path — passing,
+failing, or killed by a timeout — which is why `PROVISIONED_CONFIG` is
+required rather than optional.
+
+Roughly half of it tests failure paths: a bad config failing *fast* rather
+than timing out, the SCM retrying a clean non-zero exit but not a clean stop,
+a stop issued mid-drain waiting rather than erroring, and a token store
+widened with `icacls` refusing the start. Those are the behaviours that look
+correct from a code review and are wrong on a host.
+
+When a step fails it dumps the three things every defect found on a host so
+far turned out to be diagnosable from — the last thirty Event Log entries,
+the tail of the log, and `service status` — and keeps its scratch directory.
+
+The pre-shutdown drain needs a real reboot, so it is two halves:
+
+```console
+$ task service-gate:reboot-before PROVISIONED_CONFIG=...
+$ # reboot the host
+$ task service-gate:reboot-after  PROVISIONED_CONFIG=...
+```
+
 ## Uninstalling
 
 ```console
