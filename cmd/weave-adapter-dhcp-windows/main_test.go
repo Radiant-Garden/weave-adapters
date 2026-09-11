@@ -19,6 +19,15 @@ Tested:
   the shipped config example
     - TestConfigExample_ShouldLoadAndValidate: the config file an operator copies from actually loads and validates.
 
+	runServer / reportOutcome / runWith
+	  - TestRunServer_ShouldWriteStartupFailureToTheLogFile: SYS-005 reaches the
+	    file, which it did not until the closer was moved after the report.
+	  - TestReportOutcome_ShouldEmitSYS005OnlyForAStartupFailure: including the
+	    drain-overrun exclusion, which nothing covered.
+	  - TestRun_ShouldReportTheConsoleRunMode
+	  - TestRunWith_ShouldInvokeReadyOnceTheListenerIsBound
+	  - TestRunWith_ShouldNotInvokeReadyWhenStartupFails
+
 Tested elsewhere:
   Each wired component (config.Load, observability.Setup, httpserver.New/Run,
   health.NewHandler, auth.Bearer) is unit-tested in its own package; the tests
@@ -53,6 +62,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -74,6 +85,7 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/core/events/catalog"
 	eventstest "github.com/radiantgarden/weave-adapters/internal/core/events/testing"
 	"github.com/radiantgarden/weave-adapters/internal/core/health"
+	"github.com/radiantgarden/weave-adapters/internal/core/httpserver"
 )
 
 // testNamespaceKey is the provisioned namespace key every server run here
@@ -188,6 +200,10 @@ func waitForListening(t *testing.T, rec *eventstest.Recorder) {
 
 	t.Fatal("server did not report listening within 5s")
 }
+
+// errStartup stands in for any failure that really did stop the process
+// starting, as opposed to one that arrived after hours of serving.
+var errStartup = errors.New("loading tokens: no such file")
 
 func TestIsTokenCommand_ShouldRecogniseOnlyTheTokenVerb(t *testing.T) {
 	t.Parallel()
@@ -710,4 +726,59 @@ func TestRunWith_ShouldNotInvokeReadyWhenStartupFails(t *testing.T) {
 	// never listened.
 	require.Error(t, runErr)
 	assert.False(t, invoked.Load(), "ready fired despite the bind failing")
+}
+
+//nolint:paralleltest // installs the event recorder, which is process-global
+func TestReportOutcome_ShouldEmitSYS005OnlyForAStartupFailure(t *testing.T) {
+	drainOverran := fmt.Errorf("%w: context deadline exceeded", httpserver.ErrShutdownIncomplete)
+
+	tests := map[string]struct {
+		err       error
+		wantEmit  bool
+		wantError error
+	}{
+		"should stay quiet on a clean run": {
+			err: nil, wantEmit: false, wantError: nil,
+		},
+		"should treat help as success": {
+			err: flag.ErrHelp, wantEmit: false, wantError: nil,
+		},
+		"should report a real startup failure": {
+			err: errStartup, wantEmit: true, wantError: errStartup,
+		},
+		"should not report a drain overrun as a startup failure": {
+			// The rule with the least obvious reason, and the one nothing
+			// covered: a drain that overran may follow days of healthy
+			// serving, and httpserver already owns SYS-007 for it. Emitting
+			// SYS-005 here would put "startup failed" in the log for a process
+			// that started fine hours earlier -- and would page whoever
+			// filters on it.
+			err: drainOverran, wantEmit: false, wantError: drainOverran,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			// ARRANGE
+			rec := eventstest.NewRecorder()
+			t.Cleanup(rec.Install())
+
+			// ACT
+			got := reportOutcome(tc.err)
+
+			// ASSERT
+			if tc.wantError == nil {
+				require.NoError(t, got)
+			} else {
+				require.ErrorIs(t, got, tc.wantError)
+			}
+
+			if tc.wantEmit {
+				rec.AssertEmitted(t, catalog.SYS005)
+				rec.AssertData(t, catalog.SYS005, "error", tc.err.Error())
+			} else {
+				rec.AssertNotEmitted(t, catalog.SYS005)
+			}
+		})
+	}
 }

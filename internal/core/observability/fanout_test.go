@@ -41,6 +41,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,22 +170,61 @@ func TestFanoutHandle_ShouldGiveEachChildItsOwnRecord(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE
+	// TEN ATTRIBUTES, AND BOTH CHILDREN APPEND. Neither detail is incidental,
+	// and getting them wrong is how the first version of this test passed
+	// against a fanout that did not clone at all:
+	//
+	//   - slog.Record keeps its first five attributes inline and is passed by
+	//     value, so with five or fewer, ordinary copy semantics already isolate
+	//     the children and a missing Clone is invisible.
+	//   - one child appending is not enough either. A copy that never grows
+	//     never reads past its own length, so it cannot observe the other's
+	//     write. The shared overflow slice only bites when both append.
+	//
+	// slog detects this rather than corrupting silently: it appends a "!BUG"
+	// attribute naming the mistake. That is the observable defect -- a !BUG
+	// entry in an operator's log line -- so that is what this asserts.
 	a, b := &capture{level: slog.LevelInfo}, &capture{level: slog.LevelInfo}
 	h := newFanout(a, b)
 
 	rec := record(slog.LevelInfo, "shared")
-	rec.AddAttrs(slog.String("original", "value"))
+	for i := range 10 {
+		rec.AddAttrs(slog.Int("original", i))
+	}
 
 	// ACT
 	require.NoError(t, h.Handle(t.Context(), rec))
 
-	// A handler is allowed to mutate what it was handed. If both children hold
-	// the same record, one appending attrs corrupts the other's.
+	require.Len(t, a.records, 1)
+	require.Len(t, b.records, 1)
+
+	// A handler is allowed to retain and mutate what it was handed, which is
+	// exactly what WithAttrs-style enrichment does.
 	a.records[0].AddAttrs(slog.String("added-by-a", "1"))
+	b.records[0].AddAttrs(slog.String("added-by-b", "2"))
 
 	// ASSERT
-	assert.Equal(t, 2, a.records[0].NumAttrs())
-	assert.Equal(t, 1, b.records[0].NumAttrs(), "child b saw child a's mutation")
+	assert.False(t, hasBugAttr(a.records[0]), "child a's record carries slog's !BUG marker")
+	assert.False(t, hasBugAttr(b.records[0]), "child b's record carries slog's !BUG marker")
+}
+
+// hasBugAttr reports whether slog flagged the record as a copy that two
+// handlers both mutated. slog appends an attribute whose key is "!BUG" rather
+// than panicking, so without it the only symptom is a corrupted log line.
+func hasBugAttr(r slog.Record) bool {
+	found := false
+
+	r.Attrs(func(a slog.Attr) bool {
+		if strings.Contains(a.Key, "BUG") {
+			found = true
+
+			return false
+		}
+
+		return true
+	})
+
+	return found
 }
 
 func TestFanoutWithAttrs_ShouldApplyToEveryChild(t *testing.T) {
