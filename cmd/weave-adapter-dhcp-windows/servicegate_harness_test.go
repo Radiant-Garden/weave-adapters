@@ -54,6 +54,16 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/core/config"
 )
 
+// gateBinaryEnv names the binary the gate drives, and therefore the path the
+// SCM records for every service it registers.
+//
+// Required, and it must be durable. `service install` registers
+// os.Executable(), so installing from a build under t.TempDir() would point
+// the host's REAL service at a path that disappears when this test ends: it
+// keeps running until the next restart and then fails with a file-not-found
+// nobody can trace back to here. The Taskfile builds bin\ and passes it.
+const gateBinaryEnv = "WADAPT_GATE_BINARY"
+
 // provisionedConfigEnv names the production config the gate reinstalls
 // against at the end. Required: the gate's whole invariant is that the host
 // is left with the real service running, and it cannot honour that if nobody
@@ -73,6 +83,10 @@ type gate struct {
 	token      string
 	port       int
 	baseURL    string
+
+	// drainWindowStart bounds the log search in step 15, so it observes the
+	// drain that step 14 provoked rather than an earlier clean shutdown.
+	drainWindowStart time.Time
 }
 
 // newGate builds the binary and lays out a configuration the gate owns.
@@ -90,7 +104,7 @@ func newGate(t *testing.T) *gate {
 	require.NoError(t, err)
 
 	g := &gate{
-		binary:     buildAdapter(t),
+		binary:     durableBinary(t),
 		dir:        dir,
 		configPath: filepath.Join(dir, "config.toml"),
 		tokenStore: filepath.Join(dir, "tokens.toml"),
@@ -105,6 +119,26 @@ func newGate(t *testing.T) *gate {
 	t.Cleanup(func() { g.dumpEvidenceOnFailure(t) })
 
 	return g
+}
+
+// durableBinary returns the binary the gate drives, failing if it is absent.
+//
+// Never buildAdapter: that builds into t.TempDir(), and what the SCM records
+// has to outlive the test that registered it.
+func durableBinary(t *testing.T) string {
+	t.Helper()
+
+	path := os.Getenv(gateBinaryEnv)
+	require.NotEmpty(t, path, "%s must name a durable binary: `service install` registers the running "+
+		"executable's path, so a temporary build would leave the host's service pointing at nothing",
+		gateBinaryEnv)
+
+	abs, err := filepath.Abs(path)
+	require.NoError(t, err)
+	require.FileExists(t, abs, "%s names %s, which does not exist; run `task build-windows` first",
+		gateBinaryEnv, abs)
+
+	return abs
 }
 
 // writeConfig writes the gate's config file, with extra appended verbatim.
@@ -267,6 +301,33 @@ func (g *gate) logContains(t *testing.T, needle string) bool {
 	return strings.Contains(string(body), needle)
 }
 
+// logBetween returns the gate's log lines whose timestamps fall inside the
+// window.
+//
+// A whole-file scan is the wrong tool once the gate has stopped and started
+// the service several times: SYS-004 appears after every clean stop, so an
+// unbounded search finds one and says nothing about the stop under test.
+func (g *gate) logBetween(t *testing.T, from, to time.Time) string {
+	t.Helper()
+
+	body, err := os.ReadFile(g.logFile)
+	require.NoError(t, err, "reading %s", g.logFile)
+
+	var out strings.Builder
+
+	for line := range strings.SplitSeq(string(body), "\n") {
+		stamp, ok := logLineTime(line)
+		if !ok || stamp.Before(from) || stamp.After(to) {
+			continue
+		}
+
+		out.WriteString(line)
+		out.WriteString("\n")
+	}
+
+	return out.String()
+}
+
 // state returns the SCM's current state word for the service, or "ABSENT".
 func state(t *testing.T) string {
 	t.Helper()
@@ -393,8 +454,13 @@ func countEventID(t *testing.T, id int) int {
 //
 // An existing config knob (dhcp.powershellPath), not a fake compiled into
 // production code: the adapter shells out, so a slow shell is a slow backend.
+// EIGHT SECONDS, not twenty. It has to be long enough that a request is
+// genuinely in flight when the stop lands, and SHORTER than the drain budget
+// so the drain completes -- step 15 asserts SYS-004 and the absence of
+// SYS-007, and a backend slower than the budget would produce exactly the
+// truncation that step exists to rule out.
 const slowStub = `param([Parameter(ValueFromRemainingArguments=$true)]$Rest)
-Start-Sleep -Seconds 20
+Start-Sleep -Seconds 8
 Write-Output '[]'
 `
 
@@ -412,7 +478,10 @@ func (g *gate) startWithSlowBackend(t *testing.T) {
 
 	// A command timeout longer than the sleep, or the backend call is
 	// cancelled before the drain has anything to wait for.
-	g.writeConfig(t, fmt.Sprintf("\n[dhcp]\npowershellPath = '%s'\ncommandTimeout = '60s'\nprobeTimeout = '55s'\n", wrapper))
+	// A command timeout comfortably past the sleep, and a probe timeout below
+	// it, since the adapter requires probe < command.
+	g.writeConfig(t, fmt.Sprintf(
+		"\n[dhcp]\npowershellPath = '%s'\ncommandTimeout = '30s'\nprobeTimeout = '25s'\n", wrapper))
 
 	g.mustAdapter(t, "service", "secure", "--config", g.configPath)
 	g.mustAdapter(t, "service", "start")
@@ -421,9 +490,12 @@ func (g *gate) startWithSlowBackend(t *testing.T) {
 
 // beginSlowRequest fires a request that will still be running when the caller
 // asks the service to stop, and returns a channel closed once it finishes.
-func beginSlowRequest(t *testing.T, g *gate) <-chan struct{} {
-	t.Helper()
-
+//
+// Detached from the test's own logging on purpose. The goroutine outlives the
+// subtest that started it, and calling t.Logf after a test has returned
+// panics -- which would surface as a mysterious failure in whichever step ran
+// next rather than here.
+func beginSlowRequest(g *gate) <-chan struct{} {
 	done := make(chan struct{})
 
 	go func() {
@@ -431,10 +503,14 @@ func beginSlowRequest(t *testing.T, g *gate) <-chan struct{} {
 
 		// The outcome does not matter: what matters is that the handler is
 		// inside a backend call when the stop lands.
-		_, _ = psErr(t, fmt.Sprintf(
-			`try { Invoke-WebRequest -Uri '%s/api/v1/scopes' -Headers @{Authorization='Bearer %s'} `+
-				`-TimeoutSec 120 -UseBasicParsing | Out-Null } catch { $_.Exception.Message }`,
-			g.baseURL, g.token))
+		//nolint:gosec,noctx // G204: a gate-authored script against its own loopback service.
+		cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+			fmt.Sprintf(
+				`try { Invoke-WebRequest -Uri '%s/api/v1/scopes' -Headers @{Authorization='Bearer %s'} `+
+					`-TimeoutSec 120 -UseBasicParsing | Out-Null } catch { }`,
+				g.baseURL, g.token))
+
+		_ = cmd.Run()
 	}()
 
 	return done

@@ -533,11 +533,18 @@ func restartAdapter(t *testing.T) bool {
 		return false
 	}
 
-	for _, verb := range []string{"stop", "start"} {
-		//nolint:gosec,noctx // G204: a constant verb against a constant service name.
-		out, err := exec.Command("sc.exe", verb, serviceName).CombinedOutput()
-		require.NoError(t, err, "sc %s: %s", verb, out)
-	}
+	// sc.exe stop returns at STOP_PENDING, so an immediate start answers
+	// ERROR_SERVICE_ALREADY_RUNNING. Poll for the transition between them
+	// rather than assuming the stop finished.
+	//nolint:noctx // a fixed sc.exe invocation; there is no caller context here.
+	out, err := exec.Command("sc.exe", "stop", serviceName).CombinedOutput()
+	require.NoError(t, err, "sc stop: %s", out)
+
+	waitServiceStopped(t)
+
+	//nolint:noctx // a fixed sc.exe invocation; there is no caller context here.
+	out, err = exec.Command("sc.exe", "start", serviceName).CombinedOutput()
+	require.NoError(t, err, "sc start: %s", out)
 
 	waitReady(t, base+"/api/v1/health")
 
@@ -548,6 +555,24 @@ func restartAdapter(t *testing.T) bool {
 // under the gate that is an `sc stop` / `sc start` of the installed service,
 // which nothing else may be talking to at the time.
 //
+// waitServiceStopped blocks until the SCM reports the service stopped.
+func waitServiceStopped(t *testing.T) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		//nolint:noctx // a fixed sc.exe invocation; there is no caller context here.
+		out, err := exec.Command("sc.exe", "query", serviceName).CombinedOutput()
+		if err == nil && strings.Contains(string(out), "STOPPED") {
+			return
+		}
+
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	t.Fatal("the service did not stop within 2 minutes")
+}
+
 //nolint:paralleltest // restarts the one adapter on this host
 func TestE2E_ShouldDeriveStableIdentitiesAcrossARestart(t *testing.T) {
 	// ARRANGE — the same host, read twice, across two processes. Derivation is

@@ -141,7 +141,7 @@ func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
 		// The flag whose absence makes every recovery assertion below pass
 		// vacuously.
 		assert.Contains(t, out, "restarts on failure",
-			"the failure-actions flag is not set; steps 11 and 12 would prove nothing")
+			"the failure-actions flag is not set; steps 12 and 13 would prove nothing")
 		assert.NotContains(t, out, "WILL NOT restart")
 
 		// The deadline, not the bare drain budget: the pre-shutdown timeout
@@ -186,13 +186,31 @@ func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
 
 	// --- Part B: the failure paths ---------------------------------------
 
-	t.Run("10: a bad config fails fast and says why", func(t *testing.T) {
+	t.Run("10: a clean stop is NOT retried", func(t *testing.T) {
+		// HERE, not after the failure steps. Recovery delays widen with the
+		// failure count and the counter only resets after a day, so once
+		// steps 11 to 13 have failed the service several times the applicable
+		// delay is 60s — and a short wait could no longer tell "never
+		// restarted" from "restarted later". Run while the counter is zero
+		// and the first delay is 5s, and the wait is decisive.
+		g.mustAdapter(t, "service", "stop")
+		waitState(t, "STOPPED", time.Minute)
+
+		time.Sleep(15 * time.Second)
+		assert.Equal(t, "STOPPED", state(t),
+			"the SCM restarted a service the operator deliberately stopped")
+
+		g.mustAdapter(t, "service", "start")
+		waitState(t, "RUNNING", time.Minute)
+	})
+
+	t.Run("11: a bad config fails fast and says why", func(t *testing.T) {
 		g.mustAdapter(t, "service", "stop")
 		waitState(t, "STOPPED", time.Minute)
 
 		// An unreadable token store: a failure that happens AFTER the log
-		// file is opened, so both sinks should carry it.
-		g.writeConfig(t, "")
+		// file is opened, so both sinks should carry it. The config is left
+		// exactly as it was — only the store is corrupted.
 		require.NoError(t, os.WriteFile(g.tokenStore, []byte("not a token store\n"), 0o600))
 
 		started := time.Now()
@@ -214,7 +232,7 @@ func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
 			"the log file must carry the startup failure too; it was written into a closed handle once")
 	})
 
-	t.Run("11: the SCM retries a clean failure", func(t *testing.T) {
+	t.Run("12: the SCM retries a clean failure", func(t *testing.T) {
 		// The service is failing on the bad config from step 10 and the
 		// failure-actions flag is set, so the SCM should be restarting it.
 		// Without the flag it would sit stopped and this is the only thing
@@ -235,35 +253,28 @@ func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
 		waitReady(t, g.baseURL+"/api/v1/health")
 	})
 
-	t.Run("12: an unclean death is retried too", func(t *testing.T) {
+	t.Run("13: an unclean death is retried too", func(t *testing.T) {
 		pid := servicePID(t)
 		require.NotZero(t, pid)
 
 		_, _ = psErr(t, fmt.Sprintf("taskkill /F /PID %d", pid))
 
-		// A different SCM path from step 11: that one is a clean Stopped with
+		// A different SCM path from step 12: that one is a clean Stopped with
 		// a non-zero code, this is a process that never reported at all.
 		waitState(t, "RUNNING", 2*time.Minute)
 		assert.NotEqual(t, pid, servicePID(t), "the SCM did not restart the killed process")
 	})
 
-	t.Run("13: a clean stop is NOT retried", func(t *testing.T) {
-		g.mustAdapter(t, "service", "stop")
-		waitState(t, "STOPPED", time.Minute)
-
-		// Past the first recovery delay. Step 11 proves the SCM would restart
-		// it on a non-zero exit, so this is what separates "recovers from
-		// failure" from "cannot be stopped".
-		time.Sleep(15 * time.Second)
-		assert.Equal(t, "STOPPED", state(t),
-			"the SCM restarted a service the operator deliberately stopped")
-	})
-
 	t.Run("14: a stop mid-drain waits instead of failing", func(t *testing.T) {
 		g.startWithSlowBackend(t)
 
+		// Recorded so step 15 can bound its search. Earlier steps already
+		// wrote a clean SYS-004, and a whole-file scan would find that one
+		// and pass without observing this drain at all.
+		g.drainWindowStart = time.Now()
+
 		// A request that will be in flight when the stop arrives.
-		inFlight := beginSlowRequest(t, g)
+		inFlight := beginSlowRequest(g)
 
 		time.Sleep(2 * time.Second)
 
@@ -278,10 +289,16 @@ func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
 	})
 
 	t.Run("15: the drain completed rather than being truncated", func(t *testing.T) {
-		assert.True(t, g.logContains(t, "SYS-004"), "no clean shutdown recorded")
-		assert.False(t, g.logContains(t, "SYS-007"),
-			"SYS-007: the SCM's wall was tighter than the drain, so PreshutdownTimeout "+
-				"is not covering DrainDeadline")
+		// Bounded to the stop in step 14. The backend stub sleeps for less
+		// than the drain budget, so a correct drain finishes and reports
+		// SYS-004; SYS-007 here would mean the wall was tighter than the
+		// drain, which is what PreshutdownTimeout covering DrainDeadline
+		// exists to prevent.
+		window := g.logBetween(t, g.drainWindowStart, time.Now())
+
+		assert.Contains(t, window, "SYS-004", "the drain in step 14 did not complete cleanly")
+		assert.NotContains(t, window, "SYS-007",
+			"SYS-007: the drain was cut off, so the SCM's wall is tighter than the drain budget")
 	})
 
 	// --- the lockdown, read back independently ---------------------------
@@ -363,9 +380,15 @@ func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
 			`Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Services\%s'`, serviceName))
 		assert.Equal(t, "False", out, "the service's registry key survived the uninstall")
 
-		_, err := psErr(t, fmt.Sprintf(
-			`Get-WinEvent -ProviderName %s -MaxEvents 1 -ErrorAction Stop`, serviceName))
-		assert.Error(t, err, "the Event Log source registration survived the uninstall")
+		// The registry key, not Get-WinEvent. Entries already written keep
+		// their provider name after the source is deregistered, and whether
+		// -ProviderName resolves against provider metadata or the log's
+		// contents is exactly the kind of Windows detail this milestone has
+		// been wrong about twice. The key either exists or it does not.
+		sourceKey := ps(t, fmt.Sprintf(
+			`Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\%s'`,
+			serviceName))
+		assert.Equal(t, "False", sourceKey, "the Event Log source registration survived the uninstall")
 	})
 
 	t.Run("21: reinstall against the PROVISIONED config", func(t *testing.T) {

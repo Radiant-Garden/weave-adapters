@@ -15,10 +15,25 @@ Tested:
 
 Tested elsewhere:
 
-	The same drain under a `Stop` control: servicegate_test.go steps 14 and
-	15. That is not a substitute. A `Stop` is bounded by the SCM's ordinary
-	patience, while a reboot is bounded by PreshutdownTimeout -- a hard wall,
-	and the only thing that exercises it is an actual shutdown.
+	A drain with a REQUEST GENUINELY IN FLIGHT: servicegate_test.go steps 14
+	and 15, using the slow backend stub. That is where the drain is observed
+	doing work.
+
+Declined -- and this is the honest limit of this file:
+
+	Arming the slow stub before the reboot. What these two halves prove is
+	that the PRE-SHUTDOWN PATH yields a clean SYS-004 and the service comes
+	back: the service is asked to stop by the SCM's shutdown machinery rather
+	than by a Stop control, and it reports a clean shutdown rather than being
+	killed. What they do NOT prove is that a LONG drain survives the
+	pre-shutdown wall -- the provisioned service answers a scopes request in
+	seconds, so little is in flight by the time the host goes down.
+
+	Arming it properly would mean reconfiguring the PRODUCTION service to use
+	a sleeping backend, rebooting the host in that state, and relying on the
+	after-half to put it back. A production DHCP adapter left pointing at a
+	stub because the second half never ran is a worse outcome than the gap,
+	so the gap is stated instead of closed.
 
 Declined:
 
@@ -89,14 +104,15 @@ func TestServiceGateReboot_Before(t *testing.T) {
 	logFile := configuredLogFile(t, provisioned)
 	baseURL := configuredBaseURL(t, provisioned)
 
-	// A request that will still be in flight when the shutdown lands. The
-	// point of the whole exercise is a drain with something to drain.
-	t.Logf("putting a request in flight against %s", baseURL)
-	go func() {
-		_, _ = psErr(t, fmt.Sprintf(
-			`try { Invoke-WebRequest -Uri '%s/api/v1/scopes' -TimeoutSec 120 -UseBasicParsing | Out-Null } `+
-				`catch { $_.Exception.Message }`, baseURL))
-	}()
+	// Detached with Start-Process, not a goroutine holding t. This test
+	// returns in seconds and the reboot is minutes away; a goroutine calling
+	// t.Logf after its test has finished panics, and it would surface
+	// somewhere else entirely.
+	t.Logf("touching %s so the service has served at least once before the reboot", baseURL)
+	ps(t, fmt.Sprintf(
+		`Start-Process powershell -WindowStyle Hidden -ArgumentList @('-NoProfile','-Command',`+
+			`"try { Invoke-WebRequest -Uri ''%s/api/v1/scopes'' -TimeoutSec 60 -UseBasicParsing ^| Out-Null } catch { }")`,
+		baseURL))
 
 	time.Sleep(3 * time.Second)
 

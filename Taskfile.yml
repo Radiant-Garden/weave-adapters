@@ -145,6 +145,7 @@ tasks:
 
   service-gate:
     desc: 'Drive the WHOLE service lifecycle on the host (WS2022, ELEVATED, mutates the host)'
+    deps: [build-windows]
     cmds:
       # Behind its own tag, and in no CI gate. It registers, starts, kills and
       # removes a Windows service, rewrites ACLs, and runs the e2e write suite
@@ -159,21 +160,33 @@ tasks:
       #
       #   task service-gate PROVISIONED_CONFIG=C:\ProgramData\weave-adapters\config.toml
       #
-      # The reinstall is a Taskfile `defer:`, NOT a t.Cleanup. A `go test`
-      # timeout kills the test binary outright without running any cleanup, and
-      # that is precisely the serviceless-host failure the step exists to
-      # prevent. Here it runs on the passing path, the failing path, and the
-      # killed path alike.
+      # THE BINARY MUST BE DURABLE, which is why this depends on build-windows
+      # and passes bin\. `service install` registers os.Executable(), so a
+      # build under a test's temp directory would leave the host's real service
+      # pointing at a path that disappears when the test ends -- it keeps
+      # running until the next restart and then fails with a file-not-found
+      # nobody can trace back to here.
+      #
+      # The restore is a Taskfile `defer:`, NOT a t.Cleanup. A `go test` timeout
+      # kills the test binary outright without running any cleanup, and that is
+      # precisely the serviceless-host failure the step exists to prevent. It
+      # uninstalls first, because after a mid-gate failure what is registered is
+      # the GATE's service, and installing over it would fail on "already
+      # installed" while start started the wrong one.
       - defer: '{{.RESTORE}}'
       - go test -count=1 -timeout 45m -tags servicegate -run TestServiceGate_ -v ./cmd/...
     requires:
       vars: [PROVISIONED_CONFIG]
     vars:
+      GATE_BINARY: '{{.ROOT_DIR}}/bin/weave-adapter-dhcp-windows.exe'
       RESTORE: >-
-        cmd /c "bin\weave-adapter-dhcp-windows.exe service install --config {{.PROVISIONED_CONFIG}}
-        --i-understand-this-runs-as-localsystem & bin\weave-adapter-dhcp-windows.exe service start"
+        {{.GATE_BINARY}} service uninstall --yes ;
+        {{.GATE_BINARY}} service install --config {{.PROVISIONED_CONFIG}}
+        --i-understand-this-runs-as-localsystem ;
+        {{.GATE_BINARY}} service start
     env:
       WADAPT_PROVISIONED_CONFIG: '{{.PROVISIONED_CONFIG}}'
+      WADAPT_GATE_BINARY: '{{.GATE_BINARY}}'
 
   service-gate:reboot-before:
     desc: 'Arm the pre-shutdown drain check, then reboot the host (ELEVATED)'
@@ -189,6 +202,7 @@ tasks:
       vars: [PROVISIONED_CONFIG]
     env:
       WADAPT_PROVISIONED_CONFIG: '{{.PROVISIONED_CONFIG}}'
+      WADAPT_GATE_BINARY: '{{.ROOT_DIR}}/bin/weave-adapter-dhcp-windows.exe'
 
   service-gate:reboot-after:
     desc: 'Assert the drain survived the reboot and the service came back (ELEVATED)'
@@ -198,6 +212,7 @@ tasks:
       vars: [PROVISIONED_CONFIG]
     env:
       WADAPT_PROVISIONED_CONFIG: '{{.PROVISIONED_CONFIG}}'
+      WADAPT_GATE_BINARY: '{{.ROOT_DIR}}/bin/weave-adapter-dhcp-windows.exe'
 
   run:
     desc: Run the binary from source
