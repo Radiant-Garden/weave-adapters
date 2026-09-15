@@ -25,9 +25,25 @@ const (
 const (
 	defaultPowerShellPath = "powershell.exe"
 	defaultCommandTimeout = 10 * time.Second
-	defaultProbeTimeout   = 3 * time.Second
-	defaultPageSize       = 50
-	maxPageSizeDefault    = 500
+
+	// defaultProbeTimeout is measured, not guessed. It was 3s, and that was
+	// too tight for a reason no console measurement could show.
+	//
+	// On WS2022 (2026-09-15, host WIN-01) the probe query costs ~1130ms warm
+	// and ~1800ms on the first call after a service start, as LocalSystem --
+	// against ~670ms for the identical query from an elevated console. The
+	// SERVICE context is ~2.7x slower, so every measurement taken from a shell
+	// understates it, which is how 3s came to look generous. A cold probe was
+	// already spending 60% of its budget, and two BACKEND-101 timeouts on that
+	// host were a spike on top of that.
+	//
+	// 6s is ~5x the warm median and ~3.3x the observed cold call, and stays
+	// under defaultCommandTimeout so the probe < command rule below holds with
+	// room. Raising it is not free: health.refresh holds its mutex across the
+	// check, so a poll can block for this plus RunnerKillGrace.
+	defaultProbeTimeout = 6 * time.Second
+	defaultPageSize     = 50
+	maxPageSizeDefault  = 500
 
 	// minNamespaceKeyLength is a floor, not a strength check. The key's job is
 	// per-installation uniqueness rather than secrecy, but a one-character key

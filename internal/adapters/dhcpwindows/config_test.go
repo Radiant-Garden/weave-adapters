@@ -207,7 +207,7 @@ func TestNewConfig_ShouldApplyDefaults(t *testing.T) {
 	assert.Empty(t, cfg.Server, "empty means the local host")
 	assert.Equal(t, "powershell.exe", cfg.PowerShellPath)
 	assert.Equal(t, 10*time.Second, cfg.CommandTimeout)
-	assert.Equal(t, 3*time.Second, cfg.ProbeTimeout)
+	assert.Equal(t, 6*time.Second, cfg.ProbeTimeout)
 	assert.Equal(t, 50, cfg.DefaultPageSize)
 	assert.Equal(t, 500, cfg.MaxPageSize)
 }

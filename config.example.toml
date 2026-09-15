@@ -104,7 +104,12 @@ commandTimeout = "10s"
 # Health checks are cached briefly but run under a lock, so a slow backend on
 # the general timeout would serialize every health poll behind it. The tighter
 # bound here is what prevents that.
-probeTimeout = "3s"
+#
+# The default is measured. On WS2022 the probe costs ~1.1s warm and ~1.8s on
+# the first call after a service start — as LocalSystem, which runs ~2.7x
+# slower than the same query from an elevated console. Time it on your own
+# host with `task measure-backend` before lowering this.
+probeTimeout = "6s"
 
 
 # ─── Scopes endpoint ─────────────────────────────────────────────────────────

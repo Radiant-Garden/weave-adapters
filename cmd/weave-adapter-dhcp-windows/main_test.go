@@ -424,7 +424,7 @@ func TestConfigExample_ShouldLoadAndValidate(t *testing.T) {
 	assert.Equal(t, 8444, core.Port)
 	assert.Equal(t, "powershell.exe", adapter.PowerShellPath)
 	assert.Equal(t, 10*time.Second, adapter.CommandTimeout)
-	assert.Equal(t, 3*time.Second, adapter.ProbeTimeout)
+	assert.Equal(t, 6*time.Second, adapter.ProbeTimeout)
 
 	// The example must demonstrate the required identity keys rather than omit
 	// them: without both, copying it produces a binary that refuses to start.
