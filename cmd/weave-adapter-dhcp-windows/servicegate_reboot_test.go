@@ -139,9 +139,23 @@ func TestServiceGateReboot_After(t *testing.T) {
 
 	require.NoError(t, json.Unmarshal(body, &armed))
 
-	t.Cleanup(func() { _ = os.Remove(rebootMarker) })
+	// Removed ONLY on success. A failed run that deleted the marker would
+	// destroy the one piece of state that cannot be recreated without another
+	// reboot of a production DHCP server -- so the first failure would cost a
+	// second outage just to see it again.
+	t.Cleanup(func() {
+		if !t.Failed() {
+			_ = os.Remove(rebootMarker)
+		} else {
+			t.Logf("marker kept at %s so this can be re-run without another reboot", rebootMarker)
+		}
+	})
+
+	t.Logf("armed at %s; reading the boot time", armed.ArmedAt.Format(time.RFC3339))
 
 	bootedAt := lastBootTime(t)
+
+	t.Logf("host booted at %s", bootedAt.Format(time.RFC3339))
 	require.True(t, bootedAt.After(armed.ArmedAt),
 		"the host has not rebooted since the marker was written (armed %s, booted %s)",
 		armed.ArmedAt.Format(time.RFC3339), bootedAt.Format(time.RFC3339))
@@ -153,6 +167,8 @@ func TestServiceGateReboot_After(t *testing.T) {
 	// Bounded to the window between arming and the reboot, or a SYS-004 from
 	// the service starting and stopping again afterwards would satisfy it
 	// while proving nothing.
+	t.Logf("reading the service log at %s", armed.LogFile)
+
 	logBody, err := os.ReadFile(armed.LogFile)
 	require.NoError(t, err, "the service's log did not survive the reboot")
 
@@ -166,6 +182,7 @@ func TestServiceGateReboot_After(t *testing.T) {
 			"service was cut off rather than shut down")
 
 	// And it came back, with nobody logged in.
+	t.Log("waiting for the service to report running")
 	waitState(t, "RUNNING", 3*time.Minute)
 	waitReady(t, armed.BaseURL+"/api/v1/health")
 }
