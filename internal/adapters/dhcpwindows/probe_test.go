@@ -32,6 +32,9 @@ Tested:
 	    timeout rather than inheriting the caller's.
 	  - TestProbeCheck_ShouldLabelTheLocalHostExplicitly: an empty dhcp.server
 	    reads as "(local host)" rather than as a blank field.
+	  - TestProbeCheck_ShouldReportHowLongTheBackendTook: durationMs is carried
+	    on BOTH the healthy and the failing path, which is the only signal this
+	    adapter emits about backend latency short of a timeout.
 	  - TestProbeCheck_ShouldEmitBackendEventOnFailure: the failure is cataloged
 	    once, by the client that classified it.
 
@@ -71,6 +74,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
+	"strconv"
 	"testing"
 	"time"
 
@@ -143,6 +147,38 @@ func TestProbeCheck_ShouldReportHealthyWithOperatorFields(t *testing.T) {
 	// request instead of a screen-share.
 	assert.Equal(t, "5.1.20348.558", result.Fields["psVersion"])
 	assert.Equal(t, "Desktop", result.Fields["psEdition"])
+	// Present and numeric, never a specific value: the whole point of the field
+	// is that it reports real elapsed time, so pinning a number would either be
+	// vacuous against a fake runner or flaky on a loaded machine.
+	assert.Regexp(t, `^[0-9]+$`, result.Fields["durationMs"])
+}
+
+func TestProbeCheck_ShouldReportHowLongTheBackendTook(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a backend that takes a measurable, known-minimum amount of
+	// time. The assertion is a FLOOR rather than a value: a shared CI machine
+	// can stretch any duration upward, and a test that pinned one would be the
+	// flaky kind this repo keeps out.
+	const backendTook = 25 * time.Millisecond
+
+	probe := probeWith(&fakeRunner{
+		stdout: []byte(healthyProbeOutput),
+		onRun:  func(context.Context) { time.Sleep(backendTook) },
+	})
+
+	// ACT
+	result := probe.Check(context.Background())
+
+	// ASSERT — the field reports REAL elapsed time. Asserting only that it
+	// parses would pass against a hard-coded zero, which is the one bug worth
+	// catching here: a latency field that always reads 0 is worse than absent,
+	// because a reader trusts it.
+	require.Equal(t, health.StatusHealthy, result.Status)
+
+	elapsed, err := strconv.Atoi(result.Fields["durationMs"])
+	require.NoError(t, err, "durationMs must be an integer count of milliseconds")
+	assert.GreaterOrEqual(t, elapsed, int(backendTook.Milliseconds()))
 }
 
 func TestProbeCheck_ShouldReportZeroScopesForAFreshlyProvisionedServer(t *testing.T) {
@@ -252,6 +288,9 @@ func TestProbeCheck_ShouldReportUnavailableWhenTheBackendFails(t *testing.T) {
 			// when someone needs to know which host was addressed.
 			assert.Equal(t, "dhcp01.example.test", result.Fields["server"])
 			assert.Equal(t, "identity01.example.test", result.Fields["identity"])
+			// And how long it took to fail, which is what separates a refusal
+			// -- back in milliseconds -- from a bound that was actually hit.
+			assert.Regexp(t, `^[0-9]+$`, result.Fields["durationMs"])
 		})
 	}
 }

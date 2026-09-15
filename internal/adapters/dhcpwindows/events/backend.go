@@ -90,10 +90,14 @@ func init() {
 		Troubleshooting: "Scopes cannot be read, so /api/v1/scopes fails and the dhcp-server health component " +
 			"reports unavailable. Reproduce with: powershell.exe -NoProfile -NonInteractive -Command " +
 			"\"Get-DhcpServerv4Scope\". Likely causes: the RSAT-DHCP feature is not installed, so the DhcpServer " +
-			"module is missing (Install-WindowsFeature RSAT-DHCP); the service account lacks DHCP read rights " +
-			"(add it to the DHCP Users group); or dhcp.server names a host that is unreachable or not running " +
-			"the DHCP Server role. A timeout instead suggests a slow or wedged host — raise dhcp.commandTimeout " +
-			"only after confirming the query is slow rather than hung. Escalate to the Windows server owner.",
+			"module is missing (Install-WindowsFeature RSAT-DHCP); the service account is not a local " +
+			"administrator on the DHCP host, which the cmdlets require — WIN32 5 in the stderr is that case, and " +
+			"the DHCP Users group does NOT grant it (see docs/dhcp-backend.md, where this was measured); or " +
+			"dhcp.server names a host that is unreachable or not running the DHCP Server role. A timeout instead " +
+			"suggests a slow or loaded host — raise the timeout that actually bound this call, which is " +
+			"dhcp.probeTimeout when operation=probe and dhcp.commandTimeout otherwise, and only after confirming " +
+			"the query is slow rather than hung. The durationMs field on /api/v1/health reports what a probe is " +
+			"really taking. Escalate to the Windows server owner.",
 	})
 
 	// BACKEND105 is registered on its own rather than in responseEvents, because

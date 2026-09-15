@@ -98,7 +98,27 @@ func (p *Probe) Check(ctx context.Context) health.Result {
 	ctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
+	// Timed on BOTH paths, because a probe's latency is otherwise invisible.
+	// Nothing is emitted for a *successful* backend call, so the only signal
+	// this adapter produces about backend speed is BACKEND-101 at the moment
+	// the bound is crossed -- which says the query exceeded the timeout and
+	// never how close it had been getting. Two probe timeouts on WS2022 were
+	// diagnosable only by measuring the query by hand afterwards, on a host
+	// whose load at the time could no longer be reproduced.
+	//
+	// On the failure path it separates the two failures that otherwise read
+	// alike: a refusal comes back in a few hundred milliseconds, a bound-hit
+	// at p.timeout almost exactly.
+	//
+	// Safe on an unauthenticated endpoint. It is a duration -- no host name,
+	// no path, no shell output -- and strictly less revealing than the
+	// psVersion and scopeCount this response already carries.
+	start := time.Now()
+
 	result, err := p.client.probe(ctx)
+
+	elapsed := strconv.FormatInt(time.Since(start).Milliseconds(), 10)
+
 	if err != nil {
 		// A curated, classification-only detail — never err.Error(). The health
 		// endpoint is unauthenticated (weave polls it to decide reachability), and
@@ -111,7 +131,7 @@ func (p *Probe) Check(ctx context.Context) health.Result {
 		return health.Result{
 			Status: health.StatusUnavailable,
 			Detail: probeFailureDetail(err),
-			Fields: p.operatorFields(),
+			Fields: withFields(p.operatorFields(), "durationMs", elapsed),
 		}
 	}
 
@@ -122,6 +142,7 @@ func (p *Probe) Check(ctx context.Context) health.Result {
 			"scopeCount", strconv.Itoa(len(result.Scopes)),
 			"psVersion", result.PSVersion,
 			"psEdition", result.PSEdition,
+			"durationMs", elapsed,
 		),
 	}
 }
