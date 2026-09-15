@@ -139,7 +139,7 @@ $ weave-adapter-dhcp-windows service uninstall --yes
 |---|---|
 | `install` | Registers the service, sets its recovery behaviour, and locks down its files |
 | `uninstall` | Stops it, deletes the registration, removes its Event Log source. Needs `--yes` |
-| `start` / `stop` | Starts or stops it, waiting for the transition to finish |
+| `start` / `stop` | Brings it up or takes it down, waiting for the transition. Both describe a **desired state**: starting a running service and stopping a stopped one both succeed |
 | `status` | What the SCM knows: state, start type, registered path, drain budget, recovery |
 | `secure` | Re-applies the file lockdown without touching the registration |
 

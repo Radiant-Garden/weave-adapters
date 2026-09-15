@@ -231,8 +231,26 @@ func (s *scmManager) Start(name string) error {
 
 	defer func() { _ = service.Close() }()
 
+	// Already running is success, not an error. Stop has always tolerated
+	// already-stopped, and the asymmetry was a real trap: `service start`
+	// against a service the SCM had just restarted answered
+	// ERROR_SERVICE_ALREADY_RUNNING, so a script whose desired end state was
+	// "running" failed for having got what it asked for.
+	status, err := service.Query()
+	if err != nil {
+		return fmt.Errorf("querying the service %q: %w", name, err)
+	}
+
+	if status.State == svc.Running {
+		return nil
+	}
+
 	if err := service.Start(); err != nil {
-		return fmt.Errorf("starting the service %q: %w", name, err)
+		// Same reasoning the other way: it may have started between the query
+		// above and here, which is the outcome the caller wanted.
+		if !errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
+			return fmt.Errorf("starting the service %q: %w", name, err)
+		}
 	}
 
 	// Stopped is a terminal answer here, not a state to keep waiting through.

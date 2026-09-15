@@ -840,3 +840,33 @@ func TestRunServiceInstall_ShouldCheckTheDirectoryTheServiceWillRunFrom(t *testi
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Dir(self), checked)
 }
+
+func TestRunServiceLifecycle_ShouldTreatStartAndStopAsDesiredStates(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// Both verbs describe an end state, not a transition. The real gate run
+	// tripped on the asymmetry: step 13 left the service running because the
+	// SCM had restarted it, and the next `service start` failed with
+	// ERROR_SERVICE_ALREADY_RUNNING -- reporting an error for having got
+	// exactly what was asked for.
+	//
+	// The manager enforces the idempotence against a live SCM; what this pins
+	// is that the command does not add a precondition of its own on top.
+	for _, verb := range []string{"start", "stop"} {
+		t.Run(verb, func(t *testing.T) {
+			t.Parallel()
+
+			var out bytes.Buffer
+
+			m := &fakeManager{}
+
+			// ACT
+			require.NoError(t, runService([]string{verb}, &out, depsFor(m, nil)))
+
+			// ASSERT
+			assert.Equal(t, []string{verb}, m.calls)
+			assert.Contains(t, out.String(), serviceName)
+		})
+	}
+}

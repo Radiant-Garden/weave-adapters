@@ -346,6 +346,13 @@ func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
 	t.Run("18: a widened token store refuses the start", func(t *testing.T) {
 		// The only case that walks GetAce, the inline SID read and
 		// CheckGrants end to end.
+		//
+		// Stopped first: the refusal happens at STARTUP, so a service that is
+		// already running would never evaluate the widened store and there
+		// would be nothing to observe.
+		g.mustAdapter(t, "service", "stop")
+		waitState(t, "STOPPED", time.Minute)
+
 		ps(t, fmt.Sprintf(`icacls '%s' /grant '%s:(W)'`, g.tokenStore, usersSID))
 
 		_, err := g.adapterCmd(t, "service", "start")

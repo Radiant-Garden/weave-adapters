@@ -494,6 +494,13 @@ func (g *gate) startWithSlowBackend(t *testing.T) {
 	g.writeConfig(t, fmt.Sprintf(
 		"\n[dhcp]\npowershellPath = '%s'\ncommandTimeout = '30s'\nprobeTimeout = '25s'\n", wrapper))
 
+	// STOPPED FIRST, and not because the service might be running: because the
+	// configuration just changed underneath it. A service already up is still
+	// serving with the old backend, and `service start` is idempotent now --
+	// it would report success and the slow stub would never be used.
+	g.mustAdapter(t, "service", "stop")
+	waitState(t, "STOPPED", time.Minute)
+
 	g.mustAdapter(t, "service", "secure", "--config", g.configPath)
 	g.mustAdapter(t, "service", "start")
 	waitState(t, "RUNNING", time.Minute)
