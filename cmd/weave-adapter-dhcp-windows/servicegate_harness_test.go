@@ -241,10 +241,12 @@ func requireElevated(t *testing.T) {
 
 // aclEntry is one access rule as Get-Acl reports it.
 type aclEntry struct {
-	IdentityReference string
-	FileSystemRights  string
-	IsInherited       bool
-	InheritanceFlags  string
+	// SID, not a name: see acl() for why a localized name cannot survive the
+	// trip out of PowerShell.
+	SID              string
+	FileSystemRights string
+	IsInherited      bool
+	InheritanceFlags string
 }
 
 // acl reads a path's access rules through Get-Acl.
@@ -254,15 +256,24 @@ type aclEntry struct {
 func acl(t *testing.T, path string) (entries []aclEntry, protected bool, owner string) {
 	t.Helper()
 
+	// The SID is resolved INSIDE PowerShell, and the name is never returned.
+	//
+	// Round-tripping the name does not survive the trip. Get-Acl renders it in
+	// the host's language -- "NT-AUTORITÄT\SYSTEM" on this German server --
+	// the console emits it in the OEM codepage, Go reads those bytes as UTF-8,
+	// and the "Ä" is destroyed. Feeding the result back to .Translate() then
+	// fails with IdentityNotMapped. The policy has always been written in SIDs
+	// precisely because names are locale-dependent; this keeps the gate to the
+	// same rule instead of translating at the one boundary that mangles them.
 	raw := ps(t, fmt.Sprintf(`$a = Get-Acl -LiteralPath '%s'
 [pscustomobject]@{
   Owner     = $a.Owner
   Protected = $a.AreAccessRulesProtected
   Rules     = @($a.Access | ForEach-Object { [pscustomobject]@{
-      IdentityReference = $_.IdentityReference.Value
-      FileSystemRights  = $_.FileSystemRights.ToString()
-      IsInherited       = $_.IsInherited
-      InheritanceFlags  = $_.InheritanceFlags.ToString()
+      SID              = $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+      FileSystemRights = $_.FileSystemRights.ToString()
+      IsInherited      = $_.IsInherited
+      InheritanceFlags = $_.InheritanceFlags.ToString()
   }})
 } | ConvertTo-Json -Depth 4 -Compress`, path))
 
@@ -525,8 +536,13 @@ func beginSlowRequest(g *gate) <-chan struct{} {
 func runE2EAgainst(t *testing.T, g *gate) {
 	t.Helper()
 
+	// ".", not "./cmd/...". go test runs each package in its own directory, so
+	// the working directory here is already cmd/weave-adapter-dhcp-windows --
+	// and that is where the e2e tests live, in this very package. The repo-root
+	// pattern resolves to nothing from here.
+	//
 	//nolint:noctx // G204 does not apply: every argument is a constant.
-	cmd := exec.Command("go", "test", "-count=1", "-tags", "e2e", "-run", "TestE2E", "-v", "./cmd/...")
+	cmd := exec.Command("go", "test", "-count=1", "-tags", "e2e", "-run", "TestE2E", "-v", ".")
 
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("%s=%d", attachPortEnv, g.port),

@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,6 +70,9 @@ type managerFactory func() (winsvc.Manager, error)
 // secureFunc applies the file lockdown.
 type secureFunc func([]winsvc.Securable) ([]winsvc.SecureResult, error)
 
+// checkDirFunc reports whether a directory grants write beyond the policy.
+type checkDirFunc func(dir string) error
+
 // serviceDeps are the platform operations this subcommand needs.
 //
 // Injected, both of them, so the command's own logic — the flag parsing, the
@@ -78,11 +82,33 @@ type secureFunc func([]winsvc.Securable) ([]winsvc.SecureResult, error)
 type serviceDeps struct {
 	newManager managerFactory
 	secure     secureFunc
+	checkDir   checkDirFunc
 }
 
 // platformDeps are the real operations, used by main.
 func platformDeps() serviceDeps {
-	return serviceDeps{newManager: winsvc.NewManager, secure: winsvc.Secure}
+	return serviceDeps{
+		newManager: winsvc.NewManager,
+		secure:     winsvc.Secure,
+		checkDir:   checkDirectoryGrants,
+	}
+}
+
+// checkDirectoryGrants reports whether dir grants write to anyone outside the
+// lockdown policy.
+func checkDirectoryGrants(dir string) error {
+	grants, err := winsvc.ReadGrants(dir)
+	if err != nil {
+		// Unreadable is not the same as insecure, and refusing to install over
+		// a descriptor this process could not read would block an operator for
+		// a permissions quirk rather than a risk. Reported at debug rather
+		// than swallowed silently, so it is findable if it ever matters.
+		slog.Debug("could not read the access list of the binary's directory", "dir", dir, "error", err)
+
+		return nil
+	}
+
+	return winsvc.CheckGrants(dir, grants)
 }
 
 // runService dispatches a service subcommand. newManager is injected; out
@@ -191,6 +217,21 @@ func runServiceInstall(args []string, p *printer, deps serviceDeps) error {
 	absConfig, err := filepath.Abs(*configPath)
 	if err != nil {
 		return fmt.Errorf("service install: resolving %q: %w", *configPath, err)
+	}
+
+	// The directory the SERVICE will execute from, checked before anything is
+	// registered. A LocalSystem process launched from a folder a non-admin can
+	// write is a full escalation: replace the exe and Windows runs it as
+	// SYSTEM at the next start. The plan called for this in Phase 3 and it was
+	// written down without being implemented -- found on the first real
+	// install, when the service ended up running out of a directory created at
+	// the root of C:.
+	//
+	// Checked, never repaired. The binary may live in Program Files, whose ACL
+	// is Windows' to own; rewriting it would be worse than reporting it.
+	if err := deps.checkDir(filepath.Dir(binPath)); err != nil {
+		return fmt.Errorf("service install: the service would run as LocalSystem from a directory "+
+			"others can write to:\n%w", err)
 	}
 
 	m, err := deps.newManager()

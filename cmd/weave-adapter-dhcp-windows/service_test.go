@@ -56,6 +56,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -152,6 +153,12 @@ func depsFor(m *fakeManager, opened *bool) serviceDeps {
 // depsWith is depsFor with a caller-supplied securer, for the tests that
 // assert on what was locked down.
 func depsWith(m *fakeManager, opened *bool, sec *fakeSecurer) serviceDeps {
+	return depsChecking(m, opened, sec, func(string) error { return nil })
+}
+
+// depsChecking is depsWith with a caller-supplied binary-directory check, for
+// the tests that assert install refuses a writable one.
+func depsChecking(m *fakeManager, opened *bool, sec *fakeSecurer, check checkDirFunc) serviceDeps {
 	return serviceDeps{
 		newManager: func() (winsvc.Manager, error) {
 			if opened != nil {
@@ -160,7 +167,8 @@ func depsWith(m *fakeManager, opened *bool, sec *fakeSecurer) serviceDeps {
 
 			return m, nil
 		},
-		secure: sec.secure,
+		secure:   sec.secure,
+		checkDir: check,
 	}
 }
 
@@ -777,4 +785,58 @@ func TestRunServiceInstall_ShouldSayWhenATargetWasSkipped(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "NOT YET")
 	assert.Contains(t, out.String(), "token gen")
+}
+
+func TestRunServiceInstall_ShouldRefuseAWritableBinaryDirectory(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	var out bytes.Buffer
+
+	m := &fakeManager{}
+	sec := &fakeSecurer{}
+
+	deps := depsChecking(m, nil, sec, func(string) error {
+		return fmt.Errorf("%w: C:\\gate\\bin grants write to [S-1-5-32-545]", winsvc.ErrNotSecured)
+	})
+
+	// ACT
+	err := runService([]string{"install", "--" + consentFlag, "--config", writeServiceConfig(t, "")},
+		&out, deps)
+
+	// ASSERT
+	// A LocalSystem service launched from a folder a non-admin can write is a
+	// full escalation: replace the exe and Windows runs it as SYSTEM at the
+	// next start. Refused before anything is registered.
+	require.ErrorIs(t, err, winsvc.ErrNotSecured)
+	assert.Contains(t, err.Error(), "LocalSystem")
+	assert.Empty(t, m.installed, "a service was registered despite a writable binary directory")
+	assert.Empty(t, sec.targets, "nothing should be secured once the install is refused")
+}
+
+func TestRunServiceInstall_ShouldCheckTheDirectoryTheServiceWillRunFrom(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	var (
+		out     bytes.Buffer
+		checked string
+	)
+
+	deps := depsChecking(&fakeManager{}, nil, &fakeSecurer{}, func(dir string) error {
+		checked = dir
+
+		return nil
+	})
+
+	// ACT
+	require.NoError(t, runService(
+		[]string{"install", "--" + consentFlag, "--config", writeServiceConfig(t, "")}, &out, deps))
+
+	// ASSERT
+	// The directory holding the executable, not the working directory and not
+	// the config's: what matters is where the SCM will launch the binary from.
+	self, err := os.Executable()
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Dir(self), checked)
 }

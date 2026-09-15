@@ -179,11 +179,21 @@ tasks:
       vars: [PROVISIONED_CONFIG]
     vars:
       GATE_BINARY: '{{.ROOT_DIR}}/bin/weave-adapter-dhcp-windows.exe'
+      # RELATIVE, with forward slashes. Task runs commands through a POSIX
+      # shell, where a Windows absolute path is a minefield: the backslashes in
+      # C:\gate\weave-adapters are read as escape sequences, the path is
+      # destroyed, and the restore fails with "not found" -- silently leaving
+      # the host in whatever state the gate stopped in. That is the exact
+      # failure this defer exists to prevent, and it took a real run to find.
+      #
+      # Commands run from ROOT_DIR, so the relative path needs no expansion,
+      # and Windows accepts forward slashes.
+      RESTORE_BIN: bin/weave-adapter-dhcp-windows.exe
       RESTORE: >-
-        {{.GATE_BINARY}} service uninstall --yes ;
-        {{.GATE_BINARY}} service install --config {{.PROVISIONED_CONFIG}}
+        {{.RESTORE_BIN}} service uninstall --yes ;
+        {{.RESTORE_BIN}} service install --config '{{.PROVISIONED_CONFIG}}'
         --i-understand-this-runs-as-localsystem ;
-        {{.GATE_BINARY}} service start
+        {{.RESTORE_BIN}} service start
     env:
       WADAPT_PROVISIONED_CONFIG: '{{.PROVISIONED_CONFIG}}'
       WADAPT_GATE_BINARY: '{{.GATE_BINARY}}'

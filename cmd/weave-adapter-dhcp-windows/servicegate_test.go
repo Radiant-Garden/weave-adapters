@@ -141,7 +141,7 @@ func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
 		// The flag whose absence makes every recovery assertion below pass
 		// vacuously.
 		assert.Contains(t, out, "restarts on failure",
-			"the failure-actions flag is not set; steps 12 and 13 would prove nothing")
+			"the failure-actions flag is not set; step 13 would prove nothing")
 		assert.NotContains(t, out, "WILL NOT restart")
 
 		// The deadline, not the bare drain budget: the pre-shutdown timeout
@@ -232,23 +232,32 @@ func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
 			"the log file must carry the startup failure too; it was written into a closed handle once")
 	})
 
-	t.Run("12: the SCM retries a clean failure", func(t *testing.T) {
-		// The service is failing on the bad config from step 10 and the
-		// failure-actions flag is set, so the SCM should be restarting it.
-		// Without the flag it would sit stopped and this is the only thing
-		// that notices.
+	t.Run("12: a start that fails is reported, not retried", func(t *testing.T) {
+		// MEASURED, and it corrects what this milestone assumed. Phase -1 saw
+		// the recovery schedule fire at 5s/10s/60s -- but there the service
+		// reached Running and THEN exited non-zero. A service that fails
+		// before it ever reports Running is a failed START: Windows returns
+		// the error to whoever asked for it and does not put the service on
+		// the recovery schedule.
+		//
+		// That is the better behaviour. An operator who typed `service start`
+		// gets told why, instead of a service quietly looping in the
+		// background. But it is the opposite of what the docs claimed, so it
+		// is asserted here rather than left as folklore.
 		before := countEventID(t, 5)
 
 		time.Sleep(20 * time.Second)
 
-		assert.Greater(t, countEventID(t, 5), before,
-			"no further SYS-005 after 20s: the SCM is not retrying a clean non-zero exit, "+
-				"which means SetRecoveryActionsOnNonCrashFailures did not take")
+		assert.Equal(t, before, countEventID(t, 5),
+			"the SCM retried a service that never reached Running; if that is now true, "+
+				"the note in docs/windows-service.md about failed starts needs revisiting")
+		assert.Equal(t, "STOPPED", state(t))
 
-		// Heal it.
+		// Heal it for the steps that need a running service.
 		require.NoError(t, os.Remove(g.tokenStore))
 		g.token = mintToken(t, g.binary, g.tokenStore)
 		g.mustAdapter(t, "service", "secure", "--config", g.configPath)
+		g.mustAdapter(t, "service", "start")
 		waitState(t, "RUNNING", 2*time.Minute)
 		waitReady(t, g.baseURL+"/api/v1/health")
 	})
@@ -259,8 +268,9 @@ func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
 
 		_, _ = psErr(t, fmt.Sprintf("taskkill /F /PID %d", pid))
 
-		// A different SCM path from step 12: that one is a clean Stopped with
-		// a non-zero code, this is a process that never reported at all.
+		// THIS is what the recovery schedule actually covers: a service that
+		// was running and then died. Step 12 establishes the other half --
+		// a failure during startup is reported to the caller instead.
 		waitState(t, "RUNNING", 2*time.Minute)
 		assert.NotEqual(t, pid, servicePID(t), "the SCM did not restart the killed process")
 	})
@@ -420,27 +430,10 @@ func assertOnlyPolicyPrincipals(t *testing.T, path string, rules []aclEntry) {
 	require.NotEmpty(t, rules, "%s has no access rules at all", path)
 
 	for _, r := range rules {
-		sid := resolveToSID(t, r.IdentityReference)
-		assert.Contains(t, winsvc.LockdownGrantees(), sid,
-			"%s grants %s (%s) %s", path, r.IdentityReference, sid, r.FileSystemRights)
+		assert.Contains(t, winsvc.LockdownGrantees(), r.SID,
+			"%s grants %s rights %s", path, r.SID, r.FileSystemRights)
 		// FILE_ALL_ACCESS renders as FullControl; GENERIC_ALL would render as
 		// the raw number, which is why the mask is specific.
 		assert.Contains(t, r.FileSystemRights, "FullControl", "%s: unexpected rights", path)
 	}
-}
-
-// resolveToSID turns whatever Get-Acl printed into a SID string.
-func resolveToSID(t *testing.T, identity string) string {
-	t.Helper()
-
-	if strings.HasPrefix(identity, "S-1-") {
-		return identity
-	}
-
-	// A name, and the name is locale-dependent -- which is exactly why the
-	// policy is written in SIDs and why this has to translate rather than
-	// compare strings.
-	return ps(t, fmt.Sprintf(
-		`([Security.Principal.NTAccount]::new('%s')).Translate([Security.Principal.SecurityIdentifier]).Value`,
-		identity))
 }

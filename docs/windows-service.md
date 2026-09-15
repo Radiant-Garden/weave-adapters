@@ -116,7 +116,7 @@ respects `DHCP Users`, at the cost of parsing tabular text.
 |---|---|---|
 | Start type | Automatic, **not** delayed | Measured: the local DHCP Server service reaches Running about **4 seconds** after we do. Delaying would trade a 4-second window where health honestly answers 503 for ~2 minutes with no adapter at all |
 | Recovery | Restart after 5s, 10s, 60s; counter resets after 24h | Widening, so a transient cause clears early while a real one does not loop every 5 seconds forever. The reset stops the last interval becoming permanent |
-| Recovery on clean failure | **Enabled** | Without this flag Windows runs failure actions only for a process that dies *without* reporting stopped — which is not how a config failure exits, so the schedule would be registered and inert |
+| Recovery on clean failure | **Enabled** | Without this flag Windows runs failure actions only for a process that dies *without* reporting stopped. With it, a service that was **running** and then exits non-zero is restarted too. Note what it does **not** cover — see below |
 | `PreshutdownTimeout` | The HTTP drain budget **plus margin** — 20s for a 15s drain | A hard wall, not something progress extends. Set to the deadline rather than the budget so the SCM does not stop waiting at the moment a full-length drain reports stopped. `service status` shows it as **pre-shutdown**, which is deliberately not called the drain budget: the drain itself is the shorter number |
 | Dependencies | **none** | A hard dependency on `DHCPServer` would make the service un-startable on a host targeting a remote server through `dhcp.server` |
 | File ACLs | SYSTEM + Administrators, inheritance off | See below |
@@ -210,11 +210,24 @@ The usual causes, in the order worth checking: a path in the config that is
 not absolute, a token store that is missing or empty, and a file whose ACL
 grants write to someone outside SYSTEM and Administrators.
 
-### It starts, then keeps restarting
+### A failed start is reported, not retried
 
-That is the recovery schedule doing its job on a configuration that fails
-every time. Each attempt writes `SYS-005`. Fix the cause, and the next
-scheduled restart succeeds — you do not need to reinstall.
+If `service start` reports an error, the service stays stopped. The recovery
+schedule does **not** apply to a service that fails *during startup* — Windows
+treats that as a failed start and hands the error back to whoever asked for
+it, rather than putting the service on the restart schedule. Measured on
+Windows Server 2022: one `SYS-005`, no retry.
+
+That is the better behaviour. You get told why, at the prompt, instead of a
+service looping in the background. Fix the cause and start it again.
+
+### It starts, runs, then keeps restarting
+
+*That* is the recovery schedule doing its job: a service that reached
+**running** and then died is restarted after 5s, 10s, then 60s. An unclean
+death counts, and so does a clean exit with a non-zero code — the latter only
+because install sets the failure-actions flag. If the same fault recurs every
+time, each attempt writes its own event.
 
 ### `/api/v1/health` answers 503
 
