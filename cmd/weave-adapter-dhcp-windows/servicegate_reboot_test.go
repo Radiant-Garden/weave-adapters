@@ -8,8 +8,9 @@ Pending:
 
 Tested:
 
-	TestServiceGateReboot_Before -> arms the slow backend, puts a request in
-	  flight, and records the moment. Run this, then reboot.
+	TestServiceGateReboot_Before -> confirms the provisioned service is
+	  actually serving, touches it once so it has served before the host goes
+	  down, and records the moment. Run this, then reboot.
 	TestServiceGateReboot_After  -> asserts the drain COMPLETED before the
 	  reboot, and that the service came back and serves without a login.
 
@@ -63,7 +64,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -104,17 +104,26 @@ func TestServiceGateReboot_Before(t *testing.T) {
 	logFile := configuredLogFile(t, provisioned)
 	baseURL := configuredBaseURL(t, provisioned)
 
-	// Detached with Start-Process, not a goroutine holding t. This test
-	// returns in seconds and the reboot is minutes away; a goroutine calling
-	// t.Logf after its test has finished panics, and it would surface
-	// somewhere else entirely.
+	// IN-PROCESS, and never a detached Start-Process. The detached version of
+	// this ended every run -- passing or failing -- in `Test I/O incomplete
+	// 1m0s after exiting`: the grandchild outlived the test binary still
+	// holding the stream `go test` reads its output through, so `go test`
+	// waited out its WaitDelay and reported that instead of the result. A
+	// gate that cannot report its own verdict is worse than no gate, and this
+	// one costs a reboot to re-run.
+	//
+	// Nothing needed detaching. This is a WARM-UP -- the service should have
+	// served once before the host goes down -- not a request that has to be
+	// in flight at the reboot, which the Declined section above is explicit
+	// about not attempting. A synchronous GET is the whole requirement, and
+	// it doubles as the precondition: arming against a service that is
+	// registered but not answering would record a marker that proves nothing.
+	//
+	// It also drops a PowerShell string that was wrong in two places -- `''`
+	// around the URI and a cmd.exe `^|` inside a PowerShell argument -- which
+	// no longer has anywhere to hide now that the request is Go's.
 	t.Logf("touching %s so the service has served at least once before the reboot", baseURL)
-	ps(t, fmt.Sprintf(
-		`Start-Process powershell -WindowStyle Hidden -ArgumentList @('-NoProfile','-Command',`+
-			`"try { Invoke-WebRequest -Uri ''%s/api/v1/scopes'' -TimeoutSec 60 -UseBasicParsing ^| Out-Null } catch { }")`,
-		baseURL))
-
-	time.Sleep(3 * time.Second)
+	waitReady(t, baseURL+"/api/v1/health")
 
 	state := rebootState{ArmedAt: time.Now(), BaseURL: baseURL, LogFile: logFile}
 

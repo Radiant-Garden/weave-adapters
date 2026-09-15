@@ -190,6 +190,14 @@ func (g *gate) install(t *testing.T) {
 }
 
 // ps runs a PowerShell script and returns its output.
+//
+// The script must RUN TO COMPLETION and leave nothing behind. A detached
+// launch -- Start-Process, Start-Job, `&` -- produces a grandchild that
+// outlives the test binary holding the stream `go test` reads its output
+// through, and the run then ends in `Test I/O incomplete 1m0s after exiting`
+// with the actual verdict discarded. Whatever wanted detaching almost
+// certainly wanted Go's own net/http instead; see the warm-up in
+// servicegate_reboot_test.go.
 func ps(t *testing.T, script string) string {
 	t.Helper()
 
