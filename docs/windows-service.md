@@ -303,6 +303,23 @@ as they were.
 
 ---
 
+## Updating the binary
+
+The service holds its own executable open, so anything that overwrites it
+fails with a sharing violation until the service is stopped:
+
+```powershell
+weave-adapter-dhcp-windows.exe service stop
+# replace the binary
+weave-adapter-dhcp-windows.exe service start
+```
+
+This is most visible when the service is installed **from a build tree**,
+where a rebuild hits the same wall. In a real deployment the binary lives in
+`%ProgramFiles%\weave-adapters\` and is installed from there, which keeps the
+build directory free — and puts the executable somewhere a non-administrator
+cannot write, which `install` requires anyway.
+
 ## What this deployment does not do
 
 - **No TLS.** See the warning above. Lab-only until it lands.
