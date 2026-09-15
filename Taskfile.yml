@@ -119,6 +119,28 @@ tasks:
       #   task setup:dhcp-access CONSENT=1 ACCOUNT=svc-x    # grants one account
       - powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/grant-dhcp-access.ps1 {{if .ACCOUNT}}-Account {{.ACCOUNT}}{{end}} {{if .CONSENT}}-IUnderstandThisGrantsAdministrator{{end}}
 
+  measure-backend:
+    desc: 'Time the probe query against the real DHCP backend (run on the host, elevated)'
+    cmds:
+      # Read-only: it runs Get-DhcpServerv4Scope and nothing else. No config is
+      # changed, no service touched, no file written.
+      #
+      # THE NUMBER THAT MATTERS IS THE POST-BOOT ONE. Both BACKEND-101 probe
+      # timeouts on WS2022 landed about three minutes after a boot, in the
+      # delayed-start storm; measured warm the same query takes ~0.67s against a
+      # 3s bound, which does not explain them. So:
+      #
+      #   Restart-Computer ; <wait three minutes> ; task measure-backend
+      #
+      # A probe killed at its deadline reports the deadline, never how slow the
+      # call really was -- so this measures without a bound, which is the only
+      # way to turn "more than 3s" into a number.
+      #
+      #   task measure-backend                  # local host, 30 iterations
+      #   task measure-backend ITERATIONS=100   # a longer tail
+      #   task measure-backend SERVER=dhcp02    # a remote target
+      - powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/measure-backend-latency.ps1 {{if .ITERATIONS}}-Iterations {{.ITERATIONS}}{{end}} {{if .SERVER}}-Server {{.SERVER}}{{end}}
+
   e2e:
     desc: Drive the whole read path against a REAL DHCP backend (WS2022 only)
     cmds:
