@@ -51,6 +51,7 @@ package winsvc
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -246,4 +247,46 @@ func TestSecureResult_ShouldDistinguishAppliedFromSkipped(t *testing.T) {
 	assert.True(t, applied.Applied)
 	assert.False(t, skipped.Applied)
 	assert.True(t, skipped.Target.Optional, "only an optional target may be skipped")
+}
+
+func TestCheckGrants_ShouldAllowCreatorOwner(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE / ACT
+	err := CheckGrants(`C:\Program Files\weave-adapters`, []Grant{
+		{SID: SIDLocalSystem, CanWrite: true},
+		{SID: SIDAdministrators, CanWrite: true},
+		{SID: SIDCreatorOwner, CanWrite: true},
+	})
+
+	// ASSERT
+	// CREATOR OWNER is on nearly every standard Windows location, C:\Program
+	// Files included — which is exactly where a service binary belongs.
+	// Treating it as an offender would refuse the correct install location.
+	// It is a template rather than a principal: nobody who cannot already
+	// create a file there ever becomes a creator-owner.
+	assert.NoError(t, err)
+}
+
+func TestCheckGrants_ShouldNameEachOffenderOnce(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// Windows commonly carries two entries for one principal — an inherit-only
+	// one and an effective one. The first real run reported
+	// "[S-1-5-32-545 S-1-5-32-545 S-1-3-0]", which reads as three problems and
+	// is one.
+	grants := []Grant{
+		{SID: "S-1-5-32-545", CanWrite: true},
+		{SID: "S-1-5-32-545", CanWrite: true},
+		{SID: SIDCreatorOwner, CanWrite: true},
+	}
+
+	// ACT
+	err := CheckGrants(`C:\gate\bin`, grants)
+
+	// ASSERT
+	require.ErrorIs(t, err, ErrNotSecured)
+	assert.Equal(t, 1, strings.Count(err.Error(), "S-1-5-32-545"))
+	assert.NotContains(t, err.Error(), SIDCreatorOwner)
 }

@@ -158,6 +158,17 @@ type Grant struct {
 	CanWrite bool
 }
 
+// SIDCreatorOwner is the CREATOR OWNER placeholder.
+//
+// Allowed wherever it appears, and it appears on nearly every standard
+// Windows location — including C:\Program Files, which is exactly where a
+// service binary should live. It is not a principal: it is a template saying
+// "whoever creates an object here owns it", applied as the object is created.
+// Nobody who cannot already create a file there ever becomes a creator-owner,
+// so on its own it grants no access to anyone. Treating it as an offender
+// would refuse the correct install location.
+const SIDCreatorOwner = "S-1-3-0"
+
 // CheckGrants reports whether the entries read from a target stay within the
 // policy.
 //
@@ -167,7 +178,7 @@ type Grant struct {
 // satisfy is a rule that gets disabled. A write is the actual escalation, on
 // all three targets.
 func CheckGrants(path string, grants []Grant) error {
-	allowed := LockdownGrantees()
+	allowed := append(LockdownGrantees(), SIDCreatorOwner)
 
 	var offenders []string
 
@@ -176,9 +187,14 @@ func CheckGrants(path string, grants []Grant) error {
 			continue
 		}
 
-		if !containsSID(allowed, g.SID) {
-			offenders = append(offenders, g.SID)
+		if containsSID(allowed, g.SID) || containsSID(offenders, g.SID) {
+			// Deduplicated: Windows commonly carries two entries for one
+			// principal — an inherit-only one and an effective one — and
+			// naming it twice in the error reads like two problems.
+			continue
 		}
+
+		offenders = append(offenders, g.SID)
 	}
 
 	if len(offenders) == 0 {
