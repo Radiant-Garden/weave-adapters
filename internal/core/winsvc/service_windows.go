@@ -390,6 +390,16 @@ func (s *scmManager) Status(name string) (ServiceStatus, error) {
 	out.StartType = startTypeName(cfg.StartType, cfg.DelayedAutoStart)
 	out.BinPath = cfg.BinaryPathName
 
+	// Split with the inverse of what CreateService applied, so a caller can
+	// compare a registration against a Definition without re-implementing
+	// EscapeArg. A command line this cannot parse is reported as no command
+	// rather than as a wrong one: the drift check then says "cannot confirm"
+	// instead of "differs", and BinPath is still there verbatim for the
+	// operator who has to look at it.
+	if argv, err := windows.DecomposeCommandLine(cfg.BinaryPathName); err == nil {
+		out.Command = argv
+	}
+
 	// Reported even though nothing else reads it: its absence is the
 	// difference between a restart schedule that fires and one that does not,
 	// and there is no other way for an operator to see which they have.

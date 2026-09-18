@@ -119,6 +119,21 @@ type ServiceStatus struct {
 	// verbatim because a mangled one is exactly what an operator is looking
 	// for when a service will not start.
 	BinPath string
+	// Command is the same ImagePath split back into the executable and its
+	// arguments, unescaped.
+	//
+	// It exists because BinPath cannot be compared against a Definition. The
+	// registration escapes the path and every argument (syscall.EscapeArg, via
+	// CreateService), while a Definition holds the unescaped values — so
+	// checking whether a registered service matches a desired one against
+	// BinPath would need a portable re-implementation of that escaping, which
+	// is a rule that is wrong in exactly the cases that matter: a path with a
+	// space, a quote, a trailing backslash.
+	//
+	// Windows fills it with DecomposeCommandLine, which is the inverse Windows
+	// itself applies. Off Windows it is nil, and a caller comparing against
+	// nil sees a mismatch rather than a false match.
+	Command []string
 	// PreshutdownTimeout is what the SCM will allow the drain at reboot.
 	PreshutdownTimeout time.Duration
 	// RestartsOnCleanExit reports the failure-actions flag.
