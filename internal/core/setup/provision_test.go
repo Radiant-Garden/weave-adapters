@@ -19,7 +19,8 @@ Tested:
     - TestConfigStep_ShouldRefuseToOverwriteAConfigThatAppearedAfterTheCheck: O_EXCL, not stat-then-write.
   tokenStep
     - TestTokenStep_ShouldMintAndSaveAndSecureTheStore
-    - TestTokenStep_ShouldRequireARestartAfterMinting: buildAuth reads the store only at startup.
+    - TestTokenStep_ShouldRequestARestartFromItsCheckNotItsApply: every Check runs before any Apply, so Apply is one step too late.
+    - TestTokenStep_ShouldNotRequestARestartWhenNothingWillBeMinted: a restart is an outage, not a formality.
     - TestTokenStep_ShouldLeaveAStoreThatAlreadyHoldsAUsableToken
     - TestTokenStep_ShouldMintWhenEveryStoredTokenHasExpired: Usable, not len.
     - TestTokenStep_ShouldNameTheRevokeCommandWhenTheLabelExistsButHasExpired
@@ -437,7 +438,7 @@ func TestTokenStep_ShouldMintAndSaveAndSecureTheStore(t *testing.T) {
 	assert.Equal(t, winsvc.SecurableFile, sec.Targets[0].Kind)
 }
 
-func TestTokenStep_ShouldRequireARestartAfterMinting(t *testing.T) {
+func TestTokenStep_ShouldRequestARestartFromItsCheckNotItsApply(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE
@@ -448,16 +449,48 @@ func TestTokenStep_ShouldRequireARestartAfterMinting(t *testing.T) {
 	p := planFor(opts, deps)
 	p.Values = localValues(t, "authTokensFile = '"+filepath.Join(t.TempDir(), "tokens.toml")+"'\n")
 
-	// ACT
-	require.NoError(t, tokenStep{}.Apply(context.Background(), p))
+	// ACT — Check only. Nothing is minted.
+	verdict, err := tokenStep{}.Check(context.Background(), p)
 
 	// ASSERT
-	// buildAuth reads the store once, at startup. Rotation is restart-only by
-	// design, so a token minted against a running service does nothing until
-	// it restarts — and an operator not told that concludes the token is
-	// broken.
-	assert.NotEmpty(t, p.restartWanted)
+	// buildAuth reads the store once, at startup, so a token minted against a
+	// running service does nothing until it restarts. The start step's Check
+	// is what turns that into a "needs --restart" refusal — and every Check
+	// runs before any Apply, so recording it in Apply would be too late by
+	// exactly one step. That ordering bug mints the token, leaves the service
+	// running, and reports success.
+	require.NoError(t, err)
+	require.Equal(t, Pending, verdict.Condition)
 	assert.Contains(t, p.restartWanted, "startup")
+}
+
+func TestTokenStep_ShouldNotRequestARestartWhenNothingWillBeMinted(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a store that already holds a usable token.
+	store := filepath.Join(t.TempDir(), "tokens.toml")
+
+	existing := &auth.Store{}
+	_, err := existing.Mint("already-there", time.Now(), nil)
+	require.NoError(t, err)
+	require.NoError(t, existing.Save(store))
+
+	opts := runOptions(t)
+	opts.Spec = localSpec()
+
+	deps, _, _ := okDeps()
+	p := planFor(opts, deps)
+	p.Values = localValues(t, "authTokensFile = '"+store+"'\n")
+
+	// ACT
+	_, err = tokenStep{}.Check(context.Background(), p)
+
+	// ASSERT
+	// A restart is an outage. Asking for one because a step was checked, not
+	// because it will do anything, would bounce a healthy service on every
+	// re-run.
+	require.NoError(t, err)
+	assert.Empty(t, p.restartWanted)
 }
 
 func TestTokenStep_ShouldLeaveAStoreThatAlreadyHoldsAUsableToken(t *testing.T) {

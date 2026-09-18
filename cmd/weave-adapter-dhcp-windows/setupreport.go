@@ -30,7 +30,7 @@ func printSetupReport(p *printer, result setup.Result) {
 	}
 
 	for _, step := range result.Steps {
-		p.printf("  %-9s %-9s %s\n", step.Name, marker(step, result.DryRun), step.Verdict.Detail)
+		p.printf("  %-9s %-9s %s\n", step.Name, marker(step), step.Verdict.Detail)
 
 		if step.Err != nil {
 			// The first line only. main prints the whole error to stderr, and
@@ -49,14 +49,12 @@ func printSetupReport(p *printer, result setup.Result) {
 // Applied is distinguished from pending because in a real run they mean
 // opposite things: "pending" after the applying pass means the run stopped
 // before reaching it.
-func marker(step setup.StepResult, dryRun bool) string {
+func marker(step setup.StepResult) string {
 	switch {
 	case step.Err != nil:
 		return "failed"
 	case step.Applied:
 		return "done"
-	case dryRun:
-		return step.Verdict.Condition.String()
 	default:
 		return step.Verdict.Condition.String()
 	}

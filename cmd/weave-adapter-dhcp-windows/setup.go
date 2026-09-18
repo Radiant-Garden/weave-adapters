@@ -140,6 +140,13 @@ func runSetup(ctx context.Context, args []string, out io.Writer, deps setup.Deps
 
 	printSetupReport(p, result)
 
+	// Before every early return below, including the failing one. A token is
+	// minted once and persisted as a hash, so a run that minted one and then
+	// failed at a later step would destroy the credential and occupy the label
+	// on the way out — the exact failure `token gen` goes out of its way to
+	// report rather than cause.
+	tokenErr := reportToken(p, result, opts, tokenOut, deps.Secure)
+
 	if runErr != nil {
 		return setupResult{code: exitFailed}, runErr
 	}
@@ -150,20 +157,16 @@ func runSetup(ctx context.Context, args []string, out io.Writer, deps setup.Deps
 		return setupResult{code: exitBlocked}, nil
 	}
 
-	// The provisioned values, then the key's fingerprint, then the token —
-	// ordered by how long the operator has to act on each. The token is last
-	// because it is the one thing on screen that must be copied before the
-	// window scrolls.
+	if tokenErr != nil {
+		return setupResult{code: exitFailed}, tokenErr
+	}
+
 	if result.ConfigWritten && !result.DryRun {
 		p.printf("Provisioned into %s:\n", opts.ConfigFilePath())
 		printProvisioned(p, opts.Provisioned)
 		p.printf("\n")
 
 		printGeneratedKey(p, opts.Provisioned, opts.ConfigFilePath())
-	}
-
-	if err := reportToken(p, result, opts, tokenOut, deps.Secure); err != nil {
-		return setupResult{code: exitFailed}, err
 	}
 
 	printHealth(p, result)
@@ -260,7 +263,7 @@ func setupOptions(args []string, p *printer, deps setup.Deps) (setup.Options, st
 
 	provisioned := provisionedFrom()
 
-	provisioned = withLayoutPaths(provisioned, layout)
+	provisioned = withLayoutPaths(provisioned, layout, *configPath)
 
 	provisioned, err = withNamespaceKey(provisioned, *keyFile, *generateKey, *configPath, layout, deps)
 	if err != nil {
@@ -308,24 +311,38 @@ func layoutFor(dataDir, binDir string) setup.Layout {
 }
 
 // withLayoutPaths fills in the two path keys the layout decides, unless the
-// operator set them explicitly.
+// operator set them explicitly or brought a configuration of their own.
 //
-// logFile is not optional here even though it is from a console: once the
-// process runs as a service the SCM discards stdout, so a service without one
-// runs correctly and logs nowhere — which somebody discovers during an
-// incident.
-func withLayoutPaths(provisioned []config.Provisioned, layout setup.Layout) []config.Provisioned {
-	defaults := map[string]string{
-		config.KeyAuthTokensFile: layout.TokenStorePath,
-		config.KeyLogFile:        layout.LogPath,
+// Skipped entirely for an existing --config, and that is not an optimisation.
+// An existing configuration is never rewritten, and a provisioned value that
+// disagrees with it is refused — so injecting a default the operator never
+// typed turns "their logFile is somewhere else" into a refusal of a flag they
+// did not pass.
+//
+// logFile is filled in at all, rather than left to the console default,
+// because once the process runs as a service the SCM discards stdout: a
+// service without one runs correctly and logs nowhere, which somebody
+// discovers during an incident.
+//
+// A slice rather than a map, so two runs given the same values produce the
+// same file: Render writes keys in the order it is handed them, and map
+// iteration order is not one.
+func withLayoutPaths(provisioned []config.Provisioned, layout setup.Layout, configPath string) []config.Provisioned {
+	if configPath != "" {
+		return provisioned
 	}
 
-	for key, value := range defaults {
-		if hasKey(provisioned, key) {
+	defaults := []config.Provisioned{
+		{Key: config.KeyAuthTokensFile, Value: layout.TokenStorePath},
+		{Key: config.KeyLogFile, Value: layout.LogPath},
+	}
+
+	for _, value := range defaults {
+		if hasKey(provisioned, value.Key) {
 			continue
 		}
 
-		provisioned = append(provisioned, config.Provisioned{Key: key, Value: value})
+		provisioned = append(provisioned, value)
 	}
 
 	return provisioned
@@ -425,13 +442,21 @@ func guardRekey(configPath string, layout setup.Layout, deps setup.Deps) error {
 // registered, whatever the data directory looks like.
 func guardRegistered(deps setup.Deps) error {
 	m, err := deps.NewManager()
-	if err != nil {
-		// Off Windows, and on a host where the SCM cannot be reached at all.
-		// Not a reason to refuse: the directory check above has already run,
-		// and a generate that cannot even look at the SCM is not the
-		// dangerous case — an unreachable SCM means nothing is registered
-		// that this run could be re-keying.
+
+	switch {
+	case errors.Is(err, winsvc.ErrUnsupported):
+		// Not Windows, so there is categorically no Windows service to be
+		// re-keying. The directory check above has already run.
 		return nil
+
+	case err != nil:
+		// Any other failure means this run could NOT look, and "could not
+		// look" is not "nothing is there" — an SCM that refused an
+		// unelevated process says nothing about what is registered. The
+		// guard's asymmetry decides it: a wrong generate is fleet-wide sync
+		// paralysis no rollback undoes, and a false refusal is one message.
+		return fmt.Errorf("setup: --%s was passed but the service control manager could not be "+
+			"consulted, so this run cannot rule out an existing registration: %w", flagGenerateKey, err)
 	}
 
 	defer func() { _ = m.Close() }()

@@ -24,6 +24,15 @@ var (
 	DefaultResetPeriod = 24 * time.Hour
 )
 
+// ErrUnsupported reports that this platform has no Service Control Manager.
+//
+// Declared here rather than beside the non-Windows implementations that return
+// it, so a caller can match it with errors.Is on ANY host. A sentinel that
+// exists only in one build is one that every portable caller has to test for
+// by GOOS instead — which is the same check, written somewhere it can drift
+// from the package that owns the answer. On Windows nothing returns it.
+var ErrUnsupported = errors.New("winsvc: running as a service is supported on Windows only")
+
 // ErrNotInstalled reports that the named service is not registered. It is
 // returned rather than an opaque SCM error so `uninstall` and `stop` can treat
 // an already-absent service as success and be safely re-run.

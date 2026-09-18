@@ -24,6 +24,11 @@ Tested:
     - TestGuardRekey_ShouldRefuseWhenTheDataDirectoryIsNotEmpty: a leftover store proves a key existed.
     - TestGuardRekey_ShouldRefuseWhenAServiceIsAlreadyRegistered
     - TestGuardRekey_ShouldRefuseAlongsideAnExistingConfig
+    - TestGuardRekey_ShouldRefuseWhenTheServiceManagerCouldNotBeConsulted: "could not look" is not "nothing is there".
+    - TestGuardRekey_ShouldNotTreatANonWindowsHostAsEvidence
+  withLayoutPaths
+    - TestWithLayoutPaths_ShouldLeaveAnOperatorsOwnConfigurationAlone: a default nobody typed would be refused as a disagreement.
+    - TestWithLayoutPaths_ShouldProduceTheSameOrderEveryTime
   readNamespaceKey
     - TestReadNamespaceKey_ShouldTrimExactlyOneTrailingLineEnding: `openssl rand -hex 32 > key` leaves one.
     - TestReadNamespaceKey_ShouldRefuseAnEmptyFile
@@ -64,6 +69,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -491,6 +497,107 @@ func TestGuardRekey_ShouldAllowGeneratingOnATrulyFreshHost(t *testing.T) {
 	// the directory ahead of time has not thereby provisioned a key.
 	require.NoError(t, guardRekey("", setup.Layout{Dir: filepath.Join(t.TempDir(), "absent")}, deps))
 	require.NoError(t, guardRekey("", setup.Layout{Dir: t.TempDir()}, deps))
+}
+
+func TestGuardRekey_ShouldRefuseWhenTheServiceManagerCouldNotBeConsulted(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — an SCM that refused, as it does for an unelevated process.
+	deps, _, _ := setupDeps()
+	deps.NewManager = func() (winsvc.Manager, error) {
+		return nil, errors.New("access is denied")
+	}
+
+	// ACT
+	err := guardRekey("", setup.Layout{Dir: filepath.Join(t.TempDir(), "absent")}, deps)
+
+	// ASSERT
+	// "Could not look" is not "nothing is there". An SCM that refused an
+	// unelevated process says nothing about what is registered, and the
+	// guard's asymmetry decides the rest: a wrong generate is fleet-wide sync
+	// paralysis no rollback undoes.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not be consulted")
+}
+
+func TestGuardRekey_ShouldNotTreatANonWindowsHostAsEvidence(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	deps, _, _ := setupDeps()
+	deps.NewManager = func() (winsvc.Manager, error) { return nil, winsvc.ErrUnsupported }
+
+	// ACT / ASSERT
+	// Categorically different from a refusal: there is no Windows service on a
+	// host that has no Service Control Manager, so the directory check is the
+	// whole of the evidence and it already passed.
+	require.NoError(t, guardRekey("", setup.Layout{Dir: filepath.Join(t.TempDir(), "absent")}, deps))
+}
+
+func TestWithLayoutPaths_ShouldLeaveAnOperatorsOwnConfigurationAlone(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	//nolint:gosec // G101: paths to a store, not credentials.
+	layout := setup.Layout{
+		TokenStorePath: `C:\ProgramData\weave-adapters\tokens.toml`,
+		LogPath:        `C:\ProgramData\weave-adapters\adapter.log`,
+	}
+
+	// ACT
+	withConfig := withLayoutPaths(nil, layout, `C:	heirs\config.toml`)
+	withoutConfig := withLayoutPaths(nil, layout, "")
+
+	// ASSERT
+	// An existing configuration is never rewritten and a provisioned value
+	// that disagrees with it is refused — so injecting a default the operator
+	// never typed would turn "their logFile is somewhere else" into a refusal
+	// of a flag they did not pass.
+	assert.Empty(t, withConfig)
+	require.Len(t, withoutConfig, 2)
+
+	// The VALUES, not only the keys. A fixture whose paths were mangled would
+	// satisfy a key-only assertion while provisioning nonsense.
+	assert.Contains(t, withoutConfig,
+		config.Provisioned{Key: config.KeyLogFile, Value: layout.LogPath})
+	assert.Contains(t, withoutConfig,
+		config.Provisioned{Key: config.KeyAuthTokensFile, Value: layout.TokenStorePath})
+	assert.True(t, config.IsAbsoluteServicePath(layout.LogPath), "the fixture is not a usable service path")
+}
+
+func TestWithLayoutPaths_ShouldProduceTheSameOrderEveryTime(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	//nolint:gosec // G101: paths to a store, not credentials.
+	layout := setup.Layout{
+		TokenStorePath: `C:\ProgramData\weave-adapters\tokens.toml`,
+		LogPath:        `C:\ProgramData\weave-adapters\adapter.log`,
+	}
+
+	// ACT — repeated, because the failure it guards is a map's iteration order
+	// and a single pass would pass by luck roughly half the time.
+	first := keysOf(withLayoutPaths(nil, layout, ""))
+
+	for range 20 {
+		assert.Equal(t, first, keysOf(withLayoutPaths(nil, layout, "")))
+	}
+
+	// ASSERT
+	// Render writes keys in the order it is handed them, so two runs given the
+	// same values have to produce the same file — otherwise a diff between two
+	// provisioned hosts shows a change nobody made.
+	assert.Equal(t, []string{config.KeyAuthTokensFile, config.KeyLogFile}, first)
+}
+
+// keysOf names the provisioned keys in order.
+func keysOf(provisioned []config.Provisioned) []string {
+	out := make([]string, 0, len(provisioned))
+	for _, v := range provisioned {
+		out = append(out, v.Key)
+	}
+
+	return out
 }
 
 func TestReadNamespaceKey_ShouldTrimExactlyOneTrailingLineEnding(t *testing.T) {

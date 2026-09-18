@@ -10,6 +10,7 @@ Tested:
     - TestPlanFill_ShouldCarryWhatTheRunProducedOntoTheResult: including the token, which exists nowhere else.
   Plan.wantsRestart
     - TestPlanWantsRestart_ShouldKeepTheFirstReason
+    - TestPlanWantsRestart_ShouldReachTheStartStepFromAnEarlierStepsCheck: over a real Run, because the bug it guards is an ordering one between Check and Apply.
   newPlan
     - TestNewPlan_ShouldStartFromTheOptionsItWasGiven
 
@@ -42,10 +43,13 @@ Additional Remarks:
 package setup
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
 )
 
 func TestPlanSteps_ShouldRunInTheOnlyOrderThatIsCorrect(t *testing.T) {
@@ -140,6 +144,56 @@ func TestPlanWantsRestart_ShouldKeepTheFirstReason(t *testing.T) {
 	// one line to show it in. Either reason justifies the same restart, so
 	// overwriting would only make the message depend on step order.
 	assert.Equal(t, "a token was minted", p.restartWanted)
+}
+
+func TestPlanWantsRestart_ShouldReachTheStartStepFromAnEarlierStepsCheck(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a running service, and a token store with nothing usable in
+	// it, which is the ordinary shape of "rotate the credential on a host that
+	// is already serving".
+	opts := runOptions(t)
+	opts.DryRun = true
+
+	deps, m, _ := okDeps()
+	m.Reported = winsvc.ServiceStatus{
+		Name:      opts.Definition.Name,
+		Installed: true,
+		State:     winsvc.StateRunning,
+		Command:   []string{"a registration this run did not make"},
+	}
+
+	// ACT
+	result, err := Run(context.Background(), opts, deps)
+	require.NoError(t, err)
+
+	// ASSERT
+	// This is the whole reason the handover lives on the shared Plan rather
+	// than inside a step: the token step's CHECK has to reach the start step's
+	// CHECK, because every Check runs before any Apply. Recorded in Apply
+	// instead, the start step sees nothing, reports the running service as
+	// satisfied, and the run mints a token the service will not read until
+	// somebody restarts it by hand — with the command reporting success.
+	assert.Equal(t, Blocked, verdictOf(t, result, "start").Condition,
+		"a pending mint against a running service must block on --restart")
+	assert.Contains(t, verdictOf(t, result, "start").Detail, "--restart")
+	assert.Equal(t, Pending, verdictOf(t, result, "token").Condition)
+}
+
+// verdictOf returns one named step's verdict, failing the test when the step
+// is absent so a rename shows up as a missing step rather than a zero value.
+func verdictOf(t *testing.T, result Result, name string) Verdict {
+	t.Helper()
+
+	for _, step := range result.Steps {
+		if step.Name == name {
+			return step.Verdict
+		}
+	}
+
+	t.Fatalf("no step named %q in the result", name)
+
+	return Verdict{}
 }
 
 func TestNewPlan_ShouldStartFromTheOptionsItWasGiven(t *testing.T) {

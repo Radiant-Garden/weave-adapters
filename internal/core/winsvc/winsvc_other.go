@@ -3,12 +3,8 @@
 package winsvc
 
 import (
-	"errors"
 	"time"
 )
-
-// ErrUnsupported reports that this platform has no Service Control Manager.
-var ErrUnsupported = errors.New("winsvc: running as a service is supported on Windows only")
 
 // IsService always reports false off Windows.
 //

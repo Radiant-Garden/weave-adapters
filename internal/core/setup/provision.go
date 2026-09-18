@@ -321,6 +321,13 @@ func (s tokenStep) Check(_ context.Context, p *Plan) (Verdict, error) {
 			entry.ExpiresAt.Time().Format("2006-01-02"), entry.Label)
 	}
 
+	// Recorded HERE, not in Apply. Every Check runs before any Apply, so the
+	// start step's Check — which is what turns this into a "needs --restart"
+	// refusal — has already run by the time Apply would set it. Setting it
+	// there instead mints the token, leaves the service running, and reports
+	// success for a credential the service will not read until it restarts.
+	p.wantsRestart("a token will be minted, and the store is read only at startup")
+
 	return pending("mint a token labelled %q into %s",
 		p.opts.TokenLabel, p.Values.String(config.KeyAuthTokensFile)), nil
 }
@@ -356,12 +363,6 @@ func (s tokenStep) Apply(_ context.Context, p *Plan) error {
 	}
 
 	p.Token = token
-
-	// buildAuth reads the store once, at startup. Rotation is restart-only by
-	// design, so a token minted against a running service does nothing until
-	// the service is restarted — and an operator not told that concludes the
-	// token is broken.
-	p.wantsRestart("a token was minted, and the store is read only at startup")
 
 	// The store did not exist when the directory was locked, so on a layout
 	// this run did not provision it has inherited whatever its directory
