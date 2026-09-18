@@ -272,14 +272,35 @@ func run(ctx context.Context, args []string) (io.Closer, error) {
 	return runWith(ctx, args, launch{mode: runModeConsole, ready: func() {}})
 }
 
+// adapterSpec is every registered key: core's plus this adapter's.
+//
+// Composed here, at the one place that knows which adapter this binary is.
+// Core owns the precedence machinery and never the key set, which is why the
+// spec travels as a value to everything that resolves configuration — the
+// server, `service install`, `service secure`.
+func adapterSpec() config.Spec {
+	return append(config.CoreKeys(), dhcpwindows.Keys()...)
+}
+
+// validateAdapterConfig is this adapter's own configuration check, in the
+// shape setup.InstallOptions.Validate takes.
+//
+// It exists because internal/core/setup runs the validation that decides
+// whether a configuration would start, and core must never import
+// internal/adapters — so the adapter-bound half arrives as a value from here,
+// the same way routes reach httpserver.
+func validateAdapterConfig(v *config.Values) error {
+	_, err := dhcpwindows.NewConfig(v)
+
+	return err
+}
+
 // runWith is run with the launch-specific pieces supplied.
 func runWith(ctx context.Context, args []string, l launch) (io.Closer, error) {
 	// Taken before any work so uptime measures the process, not the server.
 	started := time.Now()
 
-	// The spec is composed here, at the one place that knows which adapter this
-	// binary is. Core owns the precedence machinery, never the key set.
-	values, err := config.Load(append(config.CoreKeys(), dhcpwindows.Keys()...), args)
+	values, err := config.Load(adapterSpec(), args)
 	if err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
 	}

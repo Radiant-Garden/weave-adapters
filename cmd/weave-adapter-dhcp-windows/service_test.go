@@ -16,7 +16,17 @@ Tested:
 	                       service that never starts.
 	                     - TestRunServiceInstall_ShouldRegisterAnAbsoluteUnquotedDefinition
 	                     - TestRunServiceInstall_ShouldPassTheDrainBudgetThrough
-	                     - TestRunServiceInstall_ShouldReportAnAlreadyInstalledService
+	                     - TestRunServiceInstall_ShouldReportAnAlreadyInstalledService:
+	                       and that the wrap preserves the sentinel.
+	                     - TestRunServiceInstall_ShouldRefuseAConfigurationThatCannotStart:
+	                       the two cases only the REAL adapter produces, which is
+	                       what proves adapterSpec and validateAdapterConfig are
+	                       wired through.
+	                     - TestRunServiceInstall_ShouldAcceptABarePowerShellName
+	                     - TestRunServiceInstall_ShouldCheckTheDirectoryTheServiceWillRunFrom:
+	                       that the directory checked is this executable's.
+	                     - TestRunServiceInstall_ShouldSayWhenATargetWasSkipped:
+	                       the wording, which is this layer's.
 	runServiceLifecycle -> - TestRunServiceUninstall_ShouldRefuseWithoutYes
 	                       - TestRunServiceLifecycle_ShouldCallTheMatchingOperation
 	                       - TestRunServiceLifecycle_ShouldNameAnUninstalledService
@@ -25,6 +35,19 @@ Tested:
 	                    - TestRunServiceStatus_ShouldReportAnInstalledService
 
 Tested elsewhere:
+
+	The install DECISIONS -- resolving without the environment, the validation
+	that refuses a configuration which would not start, the binary-directory
+	refusal, the registration, the lockdown and its ordering -- moved to
+	internal/core/setup in M4b Phase 0 and are unit-tested there against a
+	SYNTHETIC adapter spec, which is what proves they are adapter-agnostic.
+
+	What is left here is this layer: the flags, the consent gate, the refusals
+	the command owns, the Definition template this binary supplies, the wording
+	of the output, and the WIRING -- that the real spec and the real validator
+	reach setup at all. The overlap is deliberate and thin: each test kept here
+	fails for a reason setup's cannot, usually because it asserts something
+	about this adapter rather than about install.
 
 	The SCM operations themselves, against a real Service Control Manager:
 	task service-gate, and the M4a Phase -1 measurements that fixed their
@@ -60,7 +83,6 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -69,36 +91,37 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/radiantgarden/weave-adapters/internal/core/setup"
 	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
 	"github.com/radiantgarden/weave-adapters/internal/core/winsvc/winsvctest"
 )
 
-// depsFor returns serviceDeps handing out m, and records whether the SCM was
+// depsFor returns setup.Deps handing out m, and records whether the SCM was
 // ever contacted — a refusal that still opened a privileged handle has
 // already done the thing it was refusing.
-func depsFor(m *winsvctest.Manager, opened *bool) serviceDeps {
+func depsFor(m *winsvctest.Manager, opened *bool) setup.Deps {
 	return depsWith(m, opened, &winsvctest.Securer{})
 }
 
 // depsWith is depsFor with a caller-supplied securer, for the tests that
 // assert on what was locked down.
-func depsWith(m *winsvctest.Manager, opened *bool, sec *winsvctest.Securer) serviceDeps {
+func depsWith(m *winsvctest.Manager, opened *bool, sec *winsvctest.Securer) setup.Deps {
 	return depsChecking(m, opened, sec, func(string) error { return nil })
 }
 
 // depsChecking is depsWith with a caller-supplied binary-directory check, for
 // the tests that assert install refuses a writable one.
-func depsChecking(m *winsvctest.Manager, opened *bool, sec *winsvctest.Securer, check checkDirFunc) serviceDeps {
-	return serviceDeps{
-		newManager: func() (winsvc.Manager, error) {
+func depsChecking(m *winsvctest.Manager, opened *bool, sec *winsvctest.Securer, check setup.CheckDirFunc) setup.Deps {
+	return setup.Deps{
+		NewManager: func() (winsvc.Manager, error) {
 			if opened != nil {
 				*opened = true
 			}
 
 			return m, nil
 		},
-		secure:   sec.Secure,
-		checkDir: check,
+		Secure:   sec.Secure,
+		CheckDir: check,
 	}
 }
 
@@ -484,19 +507,6 @@ func TestRunServiceInstall_ShouldRefuseAConfigurationThatCannotStart(t *testing.
 		body    string
 		wantErr string
 	}{
-		"should refuse a relative token store": {
-			body: "authTokensFile = 'tokens.toml'\n" +
-				"[identity]\nnamespaceKey = 'install-namespace-key-0123456789'\nserverName = 'd.test'\n",
-			// The trap the phase is named for, and the likeliest one: it is the
-			// shipped default, so an operator who never set the key gets it.
-			wantErr: "authTokensFile",
-		},
-		"should refuse a relative log file": {
-			body: "logFile = 'logs\\\\adapter.log'\n" +
-				"authTokensFile = '" + winTokenStore + "'\n" +
-				"[identity]\nnamespaceKey = 'install-namespace-key-0123456789'\nserverName = 'd.test'\n",
-			wantErr: "logFile",
-		},
 		"should refuse a relative powershell path": {
 			body: "authTokensFile = '" + winTokenStore + "'\n" +
 				"[dhcp]\npowershellPath = 'bin\\\\pwsh.exe'\n" +
@@ -554,80 +564,6 @@ func TestRunServiceInstall_ShouldAcceptABarePowerShellName(t *testing.T) {
 	// nobody could satisfy.
 	require.NoError(t, err)
 	assert.Len(t, m.Installed, 1)
-}
-
-func TestRunServiceInstall_ShouldRefuseAMissingConfigFile(t *testing.T) {
-	t.Parallel()
-
-	// ARRANGE
-	var out bytes.Buffer
-
-	m := &winsvctest.Manager{}
-	absent := filepath.Join(t.TempDir(), "not-there.toml")
-
-	// ACT
-	err := runService([]string{"install", "--" + consentFlag, "--config", absent}, &out, depsFor(m, nil))
-
-	// ASSERT
-	// Registering a service that points at a file which is not there
-	// guarantees a failed start, three SCM retries, and an operator reading
-	// Event Viewer for something the installer could see.
-	require.Error(t, err)
-	assert.Empty(t, m.Installed)
-}
-
-func TestRunServiceInstall_ShouldSecureEverythingTheConfigurationNames(t *testing.T) {
-	t.Parallel()
-
-	// ARRANGE
-	var out bytes.Buffer
-
-	sec := &winsvctest.Securer{}
-	cfg := writeServiceConfig(t, "")
-
-	// ACT
-	err := runService([]string{"install", "--" + consentFlag, "--config", cfg},
-		&out, depsWith(&winsvctest.Manager{}, nil, sec))
-
-	// ASSERT
-	// All three, from the configuration the installer just resolved — which
-	// is the argument for doing this in the binary rather than a script: a
-	// script has to be told the paths and drifts from them silently.
-	require.NoError(t, err)
-	require.Len(t, sec.Targets, 3)
-
-	paths := make([]string, 0, len(sec.Targets))
-	for _, target := range sec.Targets {
-		paths = append(paths, target.Path)
-	}
-
-	assert.Contains(t, paths, cfg, "the config file carries identity.namespaceKey")
-	assert.Contains(t, paths, winTokenStore)
-	// The log DIRECTORY, not the log: the adapter creates the file at runtime
-	// and it inherits the directory's entries.
-	assert.Contains(t, paths, filepath.Dir(winLogFile))
-	assert.NotContains(t, paths, winLogFile)
-}
-
-func TestRunServiceInstall_ShouldReportARegisteredServiceWhoseLockdownFailed(t *testing.T) {
-	t.Parallel()
-
-	// ARRANGE
-	var out bytes.Buffer
-
-	sec := &winsvctest.Securer{Err: winsvc.ErrNotSecured}
-
-	// ACT
-	err := runService([]string{"install", "--" + consentFlag, "--config", writeServiceConfig(t, "")},
-		&out, depsWith(&winsvctest.Manager{}, nil, sec))
-
-	// ASSERT
-	// The service exists by this point, and the error has to say so: an
-	// operator told only "install failed" would reinstall and hit
-	// ErrAlreadyInstalled, with the files still wide open.
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "is registered")
-	assert.Contains(t, err.Error(), "securing its files failed")
 }
 
 func TestRunServiceSecure_ShouldLockDownWithoutTouchingTheRegistration(t *testing.T) {
@@ -715,33 +651,6 @@ func TestRunServiceInstall_ShouldSayWhenATargetWasSkipped(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "NOT YET")
 	assert.Contains(t, out.String(), "token gen")
-}
-
-func TestRunServiceInstall_ShouldRefuseAWritableBinaryDirectory(t *testing.T) {
-	t.Parallel()
-
-	// ARRANGE
-	var out bytes.Buffer
-
-	m := &winsvctest.Manager{}
-	sec := &winsvctest.Securer{}
-
-	deps := depsChecking(m, nil, sec, func(string) error {
-		return fmt.Errorf("%w: C:\\gate\\bin grants write to [S-1-5-32-545]", winsvc.ErrNotSecured)
-	})
-
-	// ACT
-	err := runService([]string{"install", "--" + consentFlag, "--config", writeServiceConfig(t, "")},
-		&out, deps)
-
-	// ASSERT
-	// A LocalSystem service launched from a folder a non-admin can write is a
-	// full escalation: replace the exe and Windows runs it as SYSTEM at the
-	// next start. Refused before anything is registered.
-	require.ErrorIs(t, err, winsvc.ErrNotSecured)
-	assert.Contains(t, err.Error(), "LocalSystem")
-	assert.Empty(t, m.Installed, "a service was registered despite a writable binary directory")
-	assert.Empty(t, sec.Targets, "nothing should be secured once the install is refused")
 }
 
 func TestRunServiceInstall_ShouldCheckTheDirectoryTheServiceWillRunFrom(t *testing.T) {
