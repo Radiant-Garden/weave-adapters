@@ -21,13 +21,17 @@ Tested:
   runTokenRevoke
     - TestRunTokenRevoke_ShouldRemoveNamedToken: removes one, keeps the rest.
     - TestRunTokenRevoke_ShouldReturnErrorWhenLabelUnknown: a typo fails loudly.
-  loadOrEmpty
-    - TestLoadOrEmpty_ShouldTreatMissingFileAsEmpty: covered via list/gen on a fresh path.
-    - TestLoadOrEmpty_ShouldPropagateMalformedFile: a corrupt store is never overwritten.
 
 Tested elsewhere:
   Token generation, hashing and persistence are covered in internal/core/auth;
   these tests cover only the CLI behavior layered on top.
+
+  The mint sequence itself — auth.LoadOrEmpty, Store.Mint and auth.ExpiryInDays
+  — moved into internal/core/auth in M4b Phase 0 so setup could reuse it rather
+  than reimplement it, and its tests went with it (auth/mint_test.go,
+  auth/store_test.go). What is still asserted here is the CLI layered on top:
+  which flag spells the day count, what a too-large one says, and that the
+  token is printed exactly once.
 
 Declined:
   printGenerated / describeExpiry / formatDays / formatElapsedDays / pluralDays /
@@ -412,33 +416,6 @@ func TestRunTokenRevoke_ShouldReturnErrorWhenLabelUnknown(t *testing.T) {
 	store, err := auth.Load(path)
 	require.NoError(t, err)
 	assert.Len(t, store.Tokens, 1)
-}
-
-func TestLoadOrEmpty_ShouldTreatMissingFileAsEmpty(t *testing.T) {
-	t.Parallel()
-
-	// ARRANGE / ACT
-	store, err := loadOrEmpty(tokenFile(t))
-
-	// ASSERT
-	require.NoError(t, err)
-	assert.Empty(t, store.Tokens)
-}
-
-func TestLoadOrEmpty_ShouldPropagateMalformedFile(t *testing.T) {
-	t.Parallel()
-
-	// ARRANGE — a corrupt store must never be treated as empty, or the next
-	// gen would overwrite every configured token.
-	path := tokenFile(t)
-	require.NoError(t, os.WriteFile(path, []byte("not = = toml"), 0o600))
-
-	// ACT
-	_, err := loadOrEmpty(path)
-
-	// ASSERT
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "parsing token file")
 }
 
 // extractToken pulls the generated token out of gen's output.

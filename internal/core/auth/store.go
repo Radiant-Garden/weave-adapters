@@ -3,6 +3,7 @@ package auth
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -145,6 +146,25 @@ func Load(path string) (*Store, error) {
 	}
 
 	return &store, nil
+}
+
+// LoadOrEmpty reads the token file, treating a missing one as an empty store —
+// a fresh install has no tokens yet, which is not an error.
+//
+// Every other failure propagates. An unreadable or malformed file must never
+// read as an empty allow-list: the next Save would write the empty store over
+// it, revoking every configured token while reporting success.
+func LoadOrEmpty(path string) (*Store, error) {
+	store, err := Load(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return &Store{}, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return store, nil
 }
 
 // validate checks every entry against the invariants Add would have applied.

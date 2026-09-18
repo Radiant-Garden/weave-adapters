@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"math"
 	"text/tabwriter"
 	"time"
@@ -118,36 +117,30 @@ func runTokenGen(args []string, p *printer, now func() time.Time) error {
 		return fmt.Errorf("--expires-in-days must not be negative, got %d", *expiresInDays)
 	}
 
-	store, err := loadOrEmpty(*path)
+	store, err := auth.LoadOrEmpty(*path)
 	if err != nil {
 		return err
 	}
 
-	token, err := auth.Generate()
-	if err != nil {
-		return fmt.Errorf("generating token: %w", err)
-	}
+	createdAt := now().UTC()
 
-	entry := auth.Entry{Label: *label, Hash: auth.Hash(token), CreatedAt: now().UTC()}
+	var expiry *auth.Expiry
 
 	if *expiresInDays > 0 {
-		expiry := auth.NewExpiry(entry.CreatedAt.AddDate(0, 0, *expiresInDays))
-
-		// Asking the expiry to render is the bound on the flag: a value large
-		// enough to push the year past four digits — or far enough to wrap it
-		// negative — cannot be written and read back. Checking here rather than
-		// against a made-up ceiling means the limit can never drift from the one
-		// the store actually enforces, and the operator hears about the flag
-		// they typed instead of a marshalling failure three steps later.
-		if _, err := expiry.MarshalText(); err != nil {
+		// The flag's bound is whatever the store can write back, which
+		// ExpiryInDays derives from MarshalText rather than from a ceiling
+		// invented here. The operator hears about the number they typed
+		// instead of a marshalling failure three steps later.
+		expiry, err = auth.ExpiryInDays(createdAt, *expiresInDays)
+		if err != nil {
 			return fmt.Errorf("--expires-in-days %d is too large: %w", *expiresInDays, err)
 		}
-
-		entry.ExpiresAt = expiry
 	}
 
-	// Add before Save so a duplicate label fails without touching the file.
-	if err := store.Add(entry); err != nil {
+	// Mint adds to the store; Save is the caller's, and comes after — so a
+	// duplicate label fails without the file being touched.
+	token, err := store.Mint(*label, createdAt, expiry)
+	if err != nil {
 		return err
 	}
 
@@ -155,7 +148,7 @@ func runTokenGen(args []string, p *printer, now func() time.Time) error {
 		return err
 	}
 
-	printGenerated(p, *path, token, entry)
+	printGenerated(p, *path, *label, token, expiry)
 
 	if p.err != nil {
 		// The label is persisted but its token never reached the operator, and
@@ -165,7 +158,7 @@ func runTokenGen(args []string, p *printer, now func() time.Time) error {
 		return fmt.Errorf(
 			"token %q was saved to %s but could not be displayed, and cannot be recovered: "+
 				"run `token revoke --label %s`, then generate it again: %w",
-			entry.Label, *path, entry.Label, p.err,
+			*label, *path, *label, p.err,
 		)
 	}
 
@@ -175,8 +168,8 @@ func runTokenGen(args []string, p *printer, now func() time.Time) error {
 // printGenerated reports a freshly minted token. This is the only moment the
 // token exists in readable form — the store keeps a hash, so nothing can
 // recover it afterwards.
-func printGenerated(p *printer, path, token string, entry auth.Entry) {
-	p.printf("Token %q added to %s\n\n", entry.Label, path)
+func printGenerated(p *printer, path, label, token string, expiresAt *auth.Expiry) {
+	p.printf("Token %q added to %s\n\n", label, path)
 	p.printf("  %s\n\n", token)
 	p.printf("This is the only time the token is shown — it is stored as a hash.\n")
 
@@ -185,8 +178,8 @@ func printGenerated(p *printer, path, token string, entry auth.Entry) {
 	p.printf("Give it to weave as the full Authorization header value, including the scheme:\n")
 	p.printf("  Bearer %s\n", token)
 
-	if entry.ExpiresAt != nil {
-		p.printf("\nExpires %s.\n", entry.ExpiresAt.Time().Format(time.RFC3339))
+	if expiresAt != nil {
+		p.printf("\nExpires %s.\n", expiresAt.Time().Format(time.RFC3339))
 	}
 
 	p.printf("\n%s\n", restartNotice)
@@ -203,7 +196,7 @@ func runTokenList(args []string, p *printer, now func() time.Time) error {
 		return skipHelp(err)
 	}
 
-	store, err := loadOrEmpty(*path)
+	store, err := auth.LoadOrEmpty(*path)
 	if err != nil {
 		return err
 	}
@@ -296,7 +289,7 @@ func runTokenRevoke(args []string, p *printer) error {
 		return errors.New("--label is required")
 	}
 
-	store, err := loadOrEmpty(*path)
+	store, err := auth.LoadOrEmpty(*path)
 	if err != nil {
 		return err
 	}
@@ -312,21 +305,4 @@ func runTokenRevoke(args []string, p *printer) error {
 	p.printf("Token %q removed from %s\n\n%s\n", *label, *path, restartNotice)
 
 	return p.err
-}
-
-// loadOrEmpty reads the token store, treating a missing file as an empty one —
-// a fresh install has no tokens yet, which is not an error. Any other failure
-// (unreadable, malformed) propagates, so a corrupt file is never mistaken for
-// an empty allow-list and silently overwritten.
-func loadOrEmpty(path string) (*auth.Store, error) {
-	store, err := auth.Load(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return &auth.Store{}, nil
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	return store, nil
 }

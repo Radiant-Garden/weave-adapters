@@ -10,6 +10,9 @@ Tested:
     - TestLoad_ShouldReturnErrorWhenFileMalformed: garbage is an error, not an empty store.
     - TestLoad_ShouldReturnErrorWhenExpiryMalformed: an unparseable expiry fails the load rather than reading as never-expires.
     - TestLoad_ShouldEnforceTheInvariantsAddApplies: a hand-edited file gets label, duplicate and hash checks.
+  LoadOrEmpty
+    - TestLoadOrEmpty_ShouldTreatMissingFileAsEmpty: a fresh install has no tokens yet, which is not an error.
+    - TestLoadOrEmpty_ShouldPropagateMalformedFile: a corrupt store is never read as an empty allow-list.
   Expiry.MarshalText
     - TestMarshalText_ShouldRefuseAYearItCouldNotParseBack: a 5-digit year is refused, not written.
   Save
@@ -34,6 +37,9 @@ Tested elsewhere:
 Declined:
 
 Additional Remarks:
+  LoadOrEmpty moved here from the token CLI in M4b Phase 0, so setup could read
+  a store without reimplementing the missing-file case. Its tests came with it.
+
   Expiry tests use a fixed clock passed explicitly rather than time.Now, so the
   boundary case (expiry exactly now) is deterministic.
 
@@ -424,4 +430,33 @@ func TestExpired_ShouldClassifyAgainstClock(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestLoadOrEmpty_ShouldTreatMissingFileAsEmpty(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE / ACT — a path in a directory that exists but holds no store.
+	store, err := LoadOrEmpty(filepath.Join(t.TempDir(), "tokens.toml"))
+
+	// ASSERT
+	require.NoError(t, err)
+	require.NotNil(t, store)
+	assert.Empty(t, store.Tokens)
+}
+
+func TestLoadOrEmpty_ShouldPropagateMalformedFile(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a corrupt store must never read as empty, or the next Save
+	// would write the empty store over every configured token.
+	path := filepath.Join(t.TempDir(), "tokens.toml")
+	require.NoError(t, os.WriteFile(path, []byte("not = = toml"), 0o600))
+
+	// ACT
+	store, err := LoadOrEmpty(path)
+
+	// ASSERT
+	require.Error(t, err)
+	assert.Nil(t, store)
+	assert.Contains(t, err.Error(), "parsing token file")
 }
