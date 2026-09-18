@@ -87,8 +87,11 @@ func TestExpiryInDays_ShouldRefuseAnExpiryTheStoreCouldNotWriteBack(t *testing.T
 	// is one every later Load rejects.
 	require.Error(t, err)
 	assert.Nil(t, expiry)
-	assert.Contains(t, err.Error(), "cannot be stored")
 	assert.Contains(t, err.Error(), "four-digit range")
+
+	// Unwrapped, so the caller's own message about its own input is the only
+	// framing the operator reads.
+	assert.NotContains(t, err.Error(), "days from")
 }
 
 func TestExpiryInDays_ShouldRequireAPositiveNumberOfDays(t *testing.T) {

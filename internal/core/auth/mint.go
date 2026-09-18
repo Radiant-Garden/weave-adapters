@@ -28,9 +28,13 @@ func ExpiryInDays(from time.Time, days int) (*Expiry, error) {
 	// shell happened to run the command.
 	expiry := NewExpiry(from.UTC().AddDate(0, 0, days))
 
+	// Returned as-is rather than wrapped. MarshalText's message already names
+	// the offending year, which is the whole actionable part, and the caller
+	// is the one that knows what to call the input — "--expires-in-days" to an
+	// operator, something else to setup. A wrap here would put this package's
+	// vocabulary between the two.
 	if _, err := expiry.MarshalText(); err != nil {
-		return nil, fmt.Errorf("%d days from %s cannot be stored: %w",
-			days, from.UTC().Format(time.RFC3339), err)
+		return nil, err
 	}
 
 	return expiry, nil
