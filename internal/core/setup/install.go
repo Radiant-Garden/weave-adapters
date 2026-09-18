@@ -85,7 +85,7 @@ func Install(opts InstallOptions, deps Deps) (InstallResult, error) {
 	// Checking the whole resolved configuration rather than the arguments this
 	// call was handed is what catches a relative authTokensFile set inside the
 	// TOML, which is where it is most likely to be.
-	values, err := config.LoadWithoutEnvironment(opts.Spec, []string{"--config", opts.ConfigPath})
+	values, err := config.LoadWithoutEnvironment(opts.Spec, []string{configFlag, opts.ConfigPath})
 	if err != nil {
 		return InstallResult{}, fmt.Errorf("reading %q: %w", opts.ConfigPath, err)
 	}

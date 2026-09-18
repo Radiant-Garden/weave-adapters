@@ -294,13 +294,13 @@ func TestNew_ShouldRejectAdapterRoutesThatShadowStandardOnes(t *testing.T) {
 	}{
 		{
 			// The only case ServeMux catches by itself.
-			name: "should reject an exact duplicate of health", pattern: "GET " + healthPath,
+			name: "should reject an exact duplicate of health", pattern: "GET " + HealthPath,
 		},
 		{
 			// Registers fine beside "GET /api/v1/health" and then answers POST,
 			// DELETE and everything else on that path — replacing the
 			// problem+json 405 with whatever the adapter returns.
-			name: "should reject a path-only pattern on health", pattern: healthPath,
+			name: "should reject a path-only pattern on health", pattern: HealthPath,
 		},
 		{
 			name: "should reject a path-only pattern on the spec route", pattern: openAPIPath,
@@ -672,7 +672,7 @@ func TestRun_ShouldReportAnIncompleteShutdownRatherThanClaimItDrained(t *testing
 
 	addr := waitForListenAddr(t, rec)
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+addr+healthPath, nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+addr+HealthPath, nil)
 	require.NoError(t, err)
 
 	go func() {
@@ -782,7 +782,7 @@ func TestRun_ShouldInvokeTheReadyCallbackOnceTheListenerIsBound(t *testing.T) {
 	// "running" on this signal is lying about a server that may still fail.
 	addr := waitForListenAddr(t, rec)
 
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+addr+healthPath, nil)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, "http://"+addr+HealthPath, nil)
 	require.NoError(t, err)
 
 	resp, err := http.DefaultClient.Do(req)

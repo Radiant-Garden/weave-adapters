@@ -48,7 +48,6 @@ const (
 	// at risk.
 	idleTimeout = 120 * time.Second
 
-	healthPath  = "/api/v1/health"
 	openAPIPath = "/openapi.yaml"
 
 	// openAPIContentType is the media type RFC 9512 registers for YAML. The
@@ -56,6 +55,14 @@ const (
 	// client and a reviewer read the same file.
 	openAPIContentType = "application/yaml"
 )
+
+// HealthPath is where the health endpoint is mounted.
+//
+// Exported because provisioning polls it to decide whether a service it just
+// started actually came up, and a second copy of the literal is a drift
+// nothing would report: the poll would simply 404 forever and read as a
+// service that never started.
+const HealthPath = "/api/v1/health"
 
 // DefaultShutdownGrace bounds the drain when a caller sets no other value.
 //
@@ -150,7 +157,7 @@ func validateRoute(pattern string) {
 
 	// Reserved paths are rejected by path, not by whole pattern: it is the
 	// method-qualified variants that ServeMux would let through silently.
-	if path == healthPath || path == openAPIPath {
+	if path == HealthPath || path == openAPIPath {
 		panic(fmt.Sprintf(
 			"httpserver: route pattern %q targets %s, which this package owns; "+
 				"an adapter route there would shadow the endpoint weave polls",
@@ -242,7 +249,7 @@ func New(addr string, healthHandler http.Handler, opts ...Option) *Server {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("GET "+healthPath, healthHandler)
+	mux.Handle("GET "+HealthPath, healthHandler)
 	mux.HandleFunc("GET "+openAPIPath, serveOpenAPI(set.spec))
 
 	// Validated then mounted, and after the standard routes: validateRoute
@@ -303,7 +310,7 @@ func NewHandler(router http.Handler, inner ...middleware.Middleware) http.Handle
 // 500 from a broken probe is not a poll, and suppressing the whole path would
 // hide the requests there most worth seeing.
 func skipHealthPolls(r *http.Request, status int) bool {
-	if r.URL.Path != healthPath || r.Method != http.MethodGet {
+	if r.URL.Path != HealthPath || r.Method != http.MethodGet {
 		return false
 	}
 
@@ -318,7 +325,7 @@ func skipHealthPolls(r *http.Request, status int) bool {
 // Everything else authenticates, including paths that match no route — an
 // unauthenticated caller learns nothing about which routes exist.
 func Unauthenticated(r *http.Request) bool {
-	return r.URL.Path == healthPath || r.URL.Path == openAPIPath
+	return r.URL.Path == HealthPath || r.URL.Path == openAPIPath
 }
 
 // serveOpenAPI answers the spec route with spec, or with a 404 when the caller

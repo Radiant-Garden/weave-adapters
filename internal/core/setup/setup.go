@@ -24,6 +24,11 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
 )
 
+// configFlag is the loader's own flag for the config file. Spelled once,
+// because every resolution in this package has to hand the loader the same
+// argument and a typo would silently resolve the defaults instead.
+const configFlag = "--config"
+
 // ManagerFactory opens an SCM connection.
 type ManagerFactory func() (winsvc.Manager, error)
 
@@ -45,4 +50,11 @@ type Deps struct {
 	NewManager ManagerFactory
 	Secure     SecureFunc
 	CheckDir   CheckDirFunc
+
+	// Get performs one HTTP GET, for the verification step. Injected like the
+	// rest: verification's decisions — what counts as reachable, which status
+	// proves the token store was read, what an unhealthy component means — are
+	// this package's, and testing them against a real listener would make them
+	// slow and flaky rather than more true.
+	Get GetFunc
 }

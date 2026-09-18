@@ -53,9 +53,13 @@ Additional Remarks:
 package setup
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,6 +67,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/config"
+	"github.com/radiantgarden/weave-adapters/internal/core/health"
+	"github.com/radiantgarden/weave-adapters/internal/core/httpserver"
 	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
 	"github.com/radiantgarden/weave-adapters/internal/core/winsvc/winsvctest"
 )
@@ -145,8 +151,50 @@ func testOptions(t *testing.T, configPath string) InstallOptions {
 	}
 }
 
+// runOptions is a complete, valid set of Options for a provisioning run.
+//
+// The layout lives in a real temp directory while the two path VALUES are
+// Windows-shaped, which is not an inconsistency: CheckServicePaths applies
+// Windows rules on every host — that is the point of it — so a config carrying
+// a /tmp path would be refused, while the directory this process actually
+// creates has to be one this host can create.
+func runOptions(t *testing.T) Options {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	binPath := filepath.Join(t.TempDir(), "adapter.exe")
+	require.NoError(t, os.WriteFile(binPath, []byte("not really a binary"), 0o600))
+
+	return Options{
+		Spec:            testSpec(),
+		Definition:      testDefinition(),
+		Validate:        validateTestAdapter,
+		HealthComponent: testComponent,
+		ProtectedPath:   "/api/v1/things",
+		BinPath:         binPath,
+		Layout: Layout{
+			Dir:            dir,
+			ConfigPath:     filepath.Join(dir, "config.toml"),
+			TokenStorePath: testTokenStore,
+			LogPath:        testLogFile,
+			BinDir:         filepath.Join(dir, "bin"),
+		},
+		Provisioned: []config.Provisioned{
+			{Key: config.KeyAuthTokensFile, Value: testTokenStore},
+			{Key: config.KeyLogFile, Value: testLogFile},
+			{Key: testAdapterKey, Value: "set"},
+		},
+		TokenLabel: "weave-prod",
+		Now:        func() time.Time { return time.Date(2026, time.September, 18, 12, 0, 0, 0, time.UTC) },
+	}
+}
+
 // okDeps returns dependencies that accept everything, and the doubles to
 // assert against.
+//
+// Get answers a healthy body for the component the run options name, so a test
+// that is not about verification does not have to arrange one.
 func okDeps() (Deps, *winsvctest.Manager, *winsvctest.Securer) {
 	m := &winsvctest.Manager{}
 	sec := &winsvctest.Securer{}
@@ -155,7 +203,36 @@ func okDeps() (Deps, *winsvctest.Manager, *winsvctest.Securer) {
 		NewManager: func() (winsvc.Manager, error) { return m, nil },
 		Secure:     sec.Secure,
 		CheckDir:   func(string) error { return nil },
+		Get:        healthyGet(testComponent),
 	}, m, sec
+}
+
+// testComponent is the health component the run options below require.
+const testComponent = "backend"
+
+// healthyGet answers a health body reporting the named component healthy, and
+// 200 on anything else.
+func healthyGet(component string) GetFunc {
+	return componentGet(component, health.StatusHealthy)
+}
+
+// componentGet answers a health body reporting the named component with the
+// given status.
+func componentGet(component string, status health.Status) GetFunc {
+	body, _ := json.Marshal(health.Response{
+		Status:     status,
+		Components: []health.Component{{Name: component, Status: status, Detail: "from the double"}},
+	})
+
+	return func(_ context.Context, url, _ string) (Response, error) {
+		if strings.Contains(url, httpserver.HealthPath) {
+			return Response{Status: http.StatusOK, Body: body}, nil
+		}
+
+		// A protected route on a host with no backend: not 401, which is the
+		// only answer that would disprove what the check is establishing.
+		return Response{Status: http.StatusBadGateway}, nil
+	}
 }
 
 func TestInstall_ShouldRegisterAnAbsoluteUnquotedDefinition(t *testing.T) {
