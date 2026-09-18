@@ -107,6 +107,16 @@ func isBareCommandName(value string) bool {
 	return !strings.ContainsAny(value, `/\`)
 }
 
+// IsAbsoluteServicePath reports whether value is absolute under WINDOWS rules,
+// which is the rule that decides whether a service could use it.
+//
+// Exported for callers that hold a path which is not a registered config key
+// and so is never seen by CheckServicePaths — a provisioning layout's
+// directory, and the --config argument a registration is built with. Those are
+// traps of exactly the same shape, and a second copy of the rule is one that
+// would drift.
+func IsAbsoluteServicePath(value string) bool { return isAbsoluteWindowsPath(value) }
+
 // isAbsoluteWindowsPath reports whether value is absolute under WINDOWS rules,
 // whatever host this is running on.
 //
