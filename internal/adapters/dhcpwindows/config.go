@@ -100,9 +100,15 @@ type Config struct {
 // and the FQDN. The read path is stateless, so nothing persists a previous
 // value to notice the change against.
 //
-// Both are settable from the environment, which the derived key convention
-// gives for free: config.toml enforces no file mode, and an environment path is
-// the standard answer for a backup-critical secret.
+// The config file is where both belong. The derived key convention makes them
+// settable from the environment as well, and from a console that is fine — but
+// under the Service Control Manager it is not. A service is handed the machine
+// environment, which any local user can read back out of the registry, and a
+// variable exported in the elevated shell that ran `service install` is not in
+// it at all: every check would pass and the value would then be absent at every
+// boot. M4a settled the channel by locking the config file down to SYSTEM and
+// Administrators at install, so the file — not the environment — is what
+// protects a backup-critical secret.
 func Keys() config.Spec {
 	return config.Spec{
 		{
@@ -151,11 +157,11 @@ func Keys() config.Spec {
 			Name: KeyNamespaceKey,
 			Type: config.TypeString,
 			// No flag: it is a backup-critical secret, and a flag value is an argv
-			// entry any local user can read from `ps`. It is set from the
-			// environment (or the config file), the standard channel for a
-			// provisioned secret.
+			// entry any local user can read from `ps`. It is set in the config
+			// file, which `service install` locks down — see Keys for why that is
+			// the channel rather than the environment.
 			NoFlag: true,
-			Usage:  "HMAC key for wadaptID derivation (required, backup-critical); set via " + config.EnvName(KeyNamespaceKey),
+			Usage:  "HMAC key for wadaptID derivation (required, backup-critical); set it in the config file",
 		},
 		{
 			Name:  KeyServerName,
@@ -249,8 +255,8 @@ func (c Config) validateIdentity() []error {
 	case c.NamespaceKey == "":
 		errs = append(errs, fmt.Errorf("%s is required and has no default: it is what makes wadaptIDs unique "+
 			"per installation, and an auto-generated one would re-key the whole fleet on reinstall. "+
-			"Provision it (%s), back it up like the token store, and never rotate it casually",
-			KeyNamespaceKey, config.EnvName(KeyNamespaceKey)))
+			"Provision it in the config file, back it up like the token store, and never rotate it casually",
+			KeyNamespaceKey))
 	case len(c.NamespaceKey) < minNamespaceKeyLength:
 		errs = append(errs, fmt.Errorf("%s must be at least %d characters, got %d",
 			KeyNamespaceKey, minNamespaceKeyLength, len(c.NamespaceKey)))
@@ -259,8 +265,8 @@ func (c Config) validateIdentity() []error {
 	if c.ServerName == "" {
 		errs = append(errs, fmt.Errorf("%s is required and has no os.Hostname() fallback: it is hashed into "+
 			"every wadaptID, and an identity that follows whatever the host is called would re-key the fleet "+
-			"on a rename. Provision it (%s)",
-			KeyServerName, config.EnvName(KeyServerName)))
+			"on a rename. Provision it in the config file",
+			KeyServerName))
 	}
 
 	return errs

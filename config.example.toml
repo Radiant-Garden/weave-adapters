@@ -70,8 +70,12 @@ disableAuth = false
 # Any string of at least 16 characters. Generate one with, for example:
 #   openssl rand -hex 32
 #
-# Prefer setting it via WEAVE_ADAPTER_IDENTITY_NAMESPACE_KEY: this file has no
-# enforced permissions, while the token store is written 0600.
+# Set it here, in this file. The environment still works from a console, but a
+# service is handed the MACHINE environment — which any local user can read back
+# out of the registry, and which does not contain what the elevated install shell
+# exported — so under the Service Control Manager this file is the only channel.
+# `service install` locks it down to SYSTEM and Administrators, and
+# `service secure` re-applies that; the file's protection is the ACL, not a mode.
 namespaceKey = "CHANGE-ME-see-the-comment-above"
 
 # The canonical identity of the DHCP server, as opposed to where to reach it
