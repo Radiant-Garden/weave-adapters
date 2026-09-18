@@ -174,7 +174,7 @@ func (configStep) refuseDisagreements(p *Plan, values *config.Values) error {
 			return err
 		}
 
-		if provisioned.Value == got {
+		if p.opts.equivalent(provisioned.Key, provisioned.Value, got) {
 			continue
 		}
 

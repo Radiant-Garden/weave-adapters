@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -14,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows"
 	"github.com/radiantgarden/weave-adapters/internal/core/config"
@@ -284,6 +287,7 @@ func setupOptions(args []string, p *printer, deps setup.Deps) (setup.Options, st
 			DrainBudget: drainBudget,
 		},
 		Validate:           validateAdapterConfig,
+		Equivalent:         equivalentAdapterValue,
 		HealthComponent:    healthComponent,
 		ProtectedPath:      protectedPath,
 		BinPath:            binPath,
@@ -504,7 +508,12 @@ func readNamespaceKey(path string) (string, error) {
 		return "", fmt.Errorf("setup: reading the namespace key from %q: %w", path, err)
 	}
 
-	key := strings.TrimSuffix(string(data), "\n")
+	text, err := decodeKeyFile(data)
+	if err != nil {
+		return "", fmt.Errorf("setup: reading the namespace key from %q: %w", path, err)
+	}
+
+	key := strings.TrimSuffix(text, "\n")
 	key = strings.TrimSuffix(key, "\r")
 
 	if key == "" {
@@ -512,6 +521,55 @@ func readNamespaceKey(path string) (string, error) {
 	}
 
 	return key, nil
+}
+
+// decodeKeyFile turns a key file's bytes into text, honouring a byte order
+// mark if one is there.
+//
+// It exists because the obvious way to write this file on the platform this
+// adapter runs on produces UTF-16. PowerShell 5.1's `>` and Out-File default
+// to UTF-16LE with a BOM, so an operator following "write the key to a file"
+// gets one — and read as bytes that is a NUL between every character plus two
+// leading marker bytes. The key would be silently wrong, the derived IDs would
+// all move, and the symptom would be a fingerprint that does not match the one
+// they were told to compare against. Nothing would say "your file is UTF-16".
+//
+// Decoding rather than refusing, because the operator's intent is not in
+// doubt: they wrote a key, the encoding is their shell's choice, and a tool
+// that can read it should.
+func decodeKeyFile(data []byte) (string, error) {
+	switch {
+	case bytes.HasPrefix(data, []byte{0xEF, 0xBB, 0xBF}):
+		return string(data[3:]), nil
+
+	case bytes.HasPrefix(data, []byte{0xFF, 0xFE}):
+		return decodeUTF16(data[2:], binary.LittleEndian)
+
+	case bytes.HasPrefix(data, []byte{0xFE, 0xFF}):
+		return decodeUTF16(data[2:], binary.BigEndian)
+
+	default:
+		return string(data), nil
+	}
+}
+
+// decodeUTF16 decodes UTF-16 code units in the given byte order.
+//
+// Surrogate pairs are decoded properly rather than passed through: a key is
+// most likely ASCII, but a tool that mangles one character of a
+// backup-critical secret is worse than one that refuses it, and utf16.Decode
+// costs nothing.
+func decodeUTF16(data []byte, order binary.ByteOrder) (string, error) {
+	if len(data)%2 != 0 {
+		return "", errors.New("the file looks like UTF-16 but has an odd number of bytes")
+	}
+
+	units := make([]uint16, 0, len(data)/2)
+	for i := 0; i < len(data); i += 2 {
+		units = append(units, order.Uint16(data[i:i+2]))
+	}
+
+	return string(utf16.Decode(units)), nil
 }
 
 // generateNamespaceKey returns a fresh key, hex-encoded.

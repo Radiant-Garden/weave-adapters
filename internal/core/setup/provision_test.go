@@ -15,6 +15,8 @@ Tested:
     - TestConfigStep_ShouldNeverRewriteAnExistingConfig: byte-for-byte, comments included.
     - TestConfigStep_ShouldAcceptAProvisionedValueThatMatchesTheExistingOne: a re-run with the same flags finishes the job.
     - TestConfigStep_ShouldRefuseAProvisionedValueThatDiffersFromTheExistingOne: and never print either value.
+    - TestConfigStep_ShouldAcceptAProvisionedValueTheCallerCallsEquivalent: sameness is the adapter's to define.
+    - TestConfigStep_ShouldFallBackToEqualityWithoutAnEquivalenceTest: == stays the default.
     - TestConfigStep_ShouldFailOnAnExistingConfigThatWouldNotStart
     - TestConfigStep_ShouldRefuseToOverwriteAConfigThatAppearedAfterTheCheck: O_EXCL, not stat-then-write.
   tokenStep
@@ -61,6 +63,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -340,6 +343,69 @@ func TestConfigStep_ShouldRefuseAProvisionedValueThatDiffersFromTheExistingOne(t
 	// put a backup-critical secret into scrollback and into an MSI log.
 	assert.NotContains(t, err.Error(), "a-different-value")
 	assert.NotContains(t, err.Error(), "the-one-already-there")
+}
+
+func TestConfigStep_ShouldAcceptAProvisionedValueTheCallerCallsEquivalent(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a provisioned value that differs as a string, and an
+	// Equivalent that says the two mean the same thing.
+	opts := runOptions(t)
+	opts.Provisioned = []config.Provisioned{
+		{Key: config.KeyAuthTokensFile, Value: testTokenStore},
+		{Key: config.KeyLogFile, Value: testLogFile},
+		{Key: testAdapterKey, Value: "SET"},
+	}
+	opts.Equivalent = func(_ string, a, b any) bool {
+		left, lok := a.(string)
+		right, rok := b.(string)
+
+		return lok && rok && strings.EqualFold(left, right)
+	}
+
+	body := "authTokensFile = '" + testTokenStore + "'\nlogFile = '" + testLogFile + "'\n" +
+		"[fake]\nrequired = 'set'\n"
+	require.NoError(t, os.WriteFile(opts.Layout.ConfigPath, []byte(body), 0o600))
+
+	deps, _, _ := okDeps()
+
+	// ACT
+	verdict, err := configStep{}.Check(context.Background(), planFor(opts, deps))
+
+	// ASSERT
+	// Sameness is not always string equality, and only the adapter knows
+	// where it is not: identity.serverName is canonicalized before it is
+	// hashed, so a re-run that spelled it differently would otherwise be
+	// refused for a change that is not a change.
+	require.NoError(t, err)
+	assert.Equal(t, Satisfied, verdict.Condition)
+}
+
+func TestConfigStep_ShouldFallBackToEqualityWithoutAnEquivalenceTest(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — the same mismatch, with no Equivalent supplied.
+	opts := runOptions(t)
+	opts.Provisioned = []config.Provisioned{
+		{Key: config.KeyAuthTokensFile, Value: testTokenStore},
+		{Key: config.KeyLogFile, Value: testLogFile},
+		{Key: testAdapterKey, Value: "SET"},
+	}
+
+	body := "authTokensFile = '" + testTokenStore + "'\nlogFile = '" + testLogFile + "'\n" +
+		"[fake]\nrequired = 'set'\n"
+	require.NoError(t, os.WriteFile(opts.Layout.ConfigPath, []byte(body), 0o600))
+
+	deps, _, _ := okDeps()
+
+	// ACT
+	_, err := configStep{}.Check(context.Background(), planFor(opts, deps))
+
+	// ASSERT
+	// == is the right default and has to stay the default: folding anything by
+	// guess would hide a real difference in a path or a secret.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), testAdapterKey)
 }
 
 func TestConfigStep_ShouldFailOnAnExistingConfigThatWouldNotStart(t *testing.T) {

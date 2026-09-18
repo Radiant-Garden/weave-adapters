@@ -27,7 +27,7 @@ Tested:
 	  - TestNamespaceKeyFingerprint_ShouldReturnNothingForNoKey: an absent key is a
 	    startup failure, not a value to fingerprint.
 
-	canonicalServerName
+	CanonicalServerName
 	  - TestCanonicalServerName_ShouldFoldTheFormsOfOneName: case, trailing dots and
 	    surrounding space are one identity, not several.
 
@@ -257,7 +257,7 @@ func TestCanonicalServerName_ShouldFoldTheFormsOfOneName(t *testing.T) {
 			t.Parallel()
 
 			// ACT
-			got := canonicalServerName(tc.in)
+			got := CanonicalServerName(tc.in)
 
 			// ASSERT — without this, an operator correcting the case of a
 			// config value would re-derive every ID in the deployment.

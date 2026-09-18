@@ -31,7 +31,11 @@ Tested:
     - TestWithLayoutPaths_ShouldProduceTheSameOrderEveryTime
   readNamespaceKey
     - TestReadNamespaceKey_ShouldTrimExactlyOneTrailingLineEnding: `openssl rand -hex 32 > key` leaves one.
+    - TestReadNamespaceKey_ShouldDecodeTheEncodingsAShellProduces: PowerShell's > writes UTF-16LE with a BOM.
+    - TestReadNamespaceKey_ShouldRefuseATruncatedUtf16File
     - TestReadNamespaceKey_ShouldRefuseAnEmptyFile
+  equivalentAdapterValue
+    - TestEquivalentAdapterValue_ShouldFoldTheServerNameButNothingElse: a canonicalized key folds; a path and a secret must not.
 
 Tested elsewhere:
   Every provisioning decision: internal/core/setup. What is asserted here is
@@ -69,11 +73,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -643,6 +649,128 @@ func TestReadNamespaceKey_ShouldTrimExactlyOneTrailingLineEnding(t *testing.T) {
 			// whitespace inside a deliberately chosen key is the operator's.
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestReadNamespaceKey_ShouldDecodeTheEncodingsAShellProduces(t *testing.T) {
+	t.Parallel()
+
+	const key = "a-provisioned-namespace-key"
+
+	// Encoded through utf16.Encode rather than by truncating runes, so the
+	// fixture is what a real encoder emits rather than what ASCII happens to
+	// make look the same.
+	encode := func(s string, bom []byte, order binary.ByteOrder) []byte {
+		out := append([]byte{}, bom...)
+
+		var pair [2]byte
+
+		for _, unit := range utf16.Encode([]rune(s)) {
+			order.PutUint16(pair[:], unit)
+			out = append(out, pair[:]...)
+		}
+
+		return out
+	}
+
+	utf16le := func(s string, bom []byte) []byte { return encode(s, bom, binary.LittleEndian) }
+	utf16be := func(s string, bom []byte) []byte { return encode(s, bom, binary.BigEndian) }
+
+	tests := map[string][]byte{
+		"should read plain ascii":                        []byte(key),
+		"should strip a utf-8 bom":                       append([]byte{0xEF, 0xBB, 0xBF}, key...),
+		"should decode utf-16le with bom":                utf16le(key, []byte{0xFF, 0xFE}),
+		"should decode utf-16be with bom":                utf16be(key, []byte{0xFE, 0xFF}),
+		"should decode utf-16le with a trailing newline": utf16le(key+"\r\n", []byte{0xFF, 0xFE}),
+	}
+
+	for name, contents := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// ARRANGE
+			path := filepath.Join(t.TempDir(), "key")
+			require.NoError(t, os.WriteFile(path, contents, 0o600))
+
+			// ACT
+			got, err := readNamespaceKey(path)
+
+			// ASSERT
+			// UTF-16LE with a BOM is what PowerShell 5.1's `>` and Out-File
+			// produce, which is the obvious way to write this file on the only
+			// platform this adapter runs on. Read as bytes that is a NUL
+			// between every character — the key would be silently wrong, every
+			// derived ID would move, and the only symptom would be a
+			// fingerprint mismatch with nothing naming the encoding.
+			require.NoError(t, err)
+			assert.Equal(t, key, got)
+		})
+	}
+}
+
+func TestReadNamespaceKey_ShouldRefuseATruncatedUtf16File(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a UTF-16 BOM and an odd number of bytes after it.
+	path := filepath.Join(t.TempDir(), "key")
+	require.NoError(t, os.WriteFile(path, []byte{0xFF, 0xFE, 'a', 0x00, 'b'}, 0o600))
+
+	// ACT
+	_, err := readNamespaceKey(path)
+
+	// ASSERT
+	// Refused rather than decoded to something. A truncated key file would
+	// otherwise yield a key that is almost right, which re-derives every ID
+	// exactly as thoroughly as one that is wholly wrong.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UTF-16")
+}
+
+func TestEquivalentAdapterValue_ShouldFoldTheServerNameButNothingElse(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		key                   string
+		provisioned, resolved any
+		want                  bool
+	}{
+		"should fold case in the server name": {
+			key:         dhcpwindows.KeyServerName,
+			provisioned: "win-01.radiantgarden.org", resolved: "WIN-01.radiantgarden.org", want: true,
+		},
+		"should fold a trailing dot in the server name": {
+			key:         dhcpwindows.KeyServerName,
+			provisioned: "WIN-01.radiantgarden.org.", resolved: "WIN-01.radiantgarden.org", want: true,
+		},
+		"should still see a genuinely different server name": {
+			key:         dhcpwindows.KeyServerName,
+			provisioned: "win-02.radiantgarden.org", resolved: "WIN-01.radiantgarden.org",
+		},
+		"should not fold case in a path": {
+			key:         config.KeyLogFile,
+			provisioned: `c:\logs\adapter.log`, resolved: `C:\logs\adapter.log`,
+		},
+		"should not fold case in the namespace key": {
+			key:         dhcpwindows.KeyNamespaceKey,
+			provisioned: "abcdef0123456789", resolved: "ABCDEF0123456789",
+		},
+		"should compare a non-string value directly": {
+			key: config.KeyPort, provisioned: 8444, resolved: 8444, want: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT / ASSERT
+			// Folding is the exception, not the rule. identity.serverName is
+			// canonicalized before it is hashed, so two spellings are one
+			// identity and refusing a re-run over the difference refuses a
+			// change that is not a change. Folding a path or a key would do
+			// the opposite: hide a real difference behind a false match.
+			assert.Equal(t, tc.want, equivalentAdapterValue(tc.key, tc.provisioned, tc.resolved))
 		})
 	}
 }

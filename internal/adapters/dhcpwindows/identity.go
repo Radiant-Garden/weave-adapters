@@ -91,7 +91,7 @@ func NamespaceKeyFingerprint(namespaceKey string) string {
 	return hex.EncodeToString(sum[:fingerprintBytes])
 }
 
-// canonicalServerName normalizes the provisioned server identity before it is
+// CanonicalServerName normalizes the provisioned server identity before it is
 // hashed: lowercased, trailing dot stripped, surrounding space removed.
 //
 // This runs once at load rather than per derivation, so that "DHCP01",
@@ -99,7 +99,14 @@ func NamespaceKeyFingerprint(namespaceKey string) string {
 // operator correcting the case of a config value would re-key the whole fleet —
 // the drift risk the plan mitigates by requiring the key to be provisioned in
 // the first place.
-func canonicalServerName(name string) string {
+//
+// Exported for the one caller outside this package that must reason about
+// identity without building a Config: provisioning, which decides whether a
+// server name it was handed means the same as the one an existing
+// configuration already holds. Comparing the two raw refuses a re-run that
+// merely spelled the name differently, which is a refusal of a change that
+// would not have been a change.
+func CanonicalServerName(name string) string {
 	// TrimRight rather than TrimSuffix: the job is that every spelling of one
 	// name folds to one identity, and TrimSuffix would leave
 	// "dhcp01.example.test.." as a second identity from the same host.

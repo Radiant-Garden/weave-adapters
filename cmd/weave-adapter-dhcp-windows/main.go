@@ -312,6 +312,33 @@ func validateAdapterConfig(v *config.Values) error {
 	return err
 }
 
+// equivalentAdapterValue reports whether a provisioned value means the same as
+// one an existing configuration already holds.
+//
+// It exists for identity.serverName. That value is canonicalized before it is
+// hashed — lower-cased, trailing dot stripped — so "WIN-01.example.test." and
+// "win-01.example.test" are one identity to this adapter. Comparing the two
+// raw would refuse a re-run for spelling a name differently, and the refusal
+// would be of a change that is not a change.
+//
+// Every other key is used as written, so string equality is the right test and
+// deliberately the default: folding case on a path or a key would hide a real
+// difference.
+func equivalentAdapterValue(key string, provisioned, resolved any) bool {
+	if key != dhcpwindows.KeyServerName {
+		return provisioned == resolved
+	}
+
+	a, aok := provisioned.(string)
+	b, bok := resolved.(string)
+
+	if !aok || !bok {
+		return provisioned == resolved
+	}
+
+	return dhcpwindows.CanonicalServerName(a) == dhcpwindows.CanonicalServerName(b)
+}
+
 // runWith is run with the launch-specific pieces supplied.
 func runWith(ctx context.Context, args []string, l launch) (io.Closer, error) {
 	// Taken before any work so uptime measures the process, not the server.

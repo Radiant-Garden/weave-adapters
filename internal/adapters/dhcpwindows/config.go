@@ -185,7 +185,7 @@ func NewConfig(v *config.Values) (Config, error) {
 		NamespaceKey:    v.String(KeyNamespaceKey),
 		// Canonicalized once, here, so that "DHCP01", "dhcp01" and "dhcp01."
 		// are one identity rather than three.
-		ServerName: canonicalServerName(v.String(KeyServerName)),
+		ServerName: CanonicalServerName(v.String(KeyServerName)),
 	}
 
 	return cfg, cfg.Validate()

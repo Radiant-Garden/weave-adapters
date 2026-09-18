@@ -34,7 +34,7 @@ Tested elsewhere:
 
 	The precedence machinery itself, and the loader's type coercion:
 	  internal/core/config's tests. This file asserts only what the adapter adds.
-	canonicalServerName's folding rules: identity_test.go.
+	CanonicalServerName's folding rules: identity_test.go.
 
 Declined:
 

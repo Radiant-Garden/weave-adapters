@@ -119,6 +119,21 @@ type Options struct {
 	// component; which one MATTERS is the binary's to say.
 	HealthComponent string
 
+	// Equivalent reports whether a provisioned value MEANS the same as the one
+	// an existing configuration already resolves to.
+	//
+	// Adapter-bound, like Validate, because sameness is not always string
+	// equality and only the adapter knows where it is not. identity.serverName
+	// is canonicalized before use — lower-cased and stripped of a trailing dot,
+	// so that "WIN-01.example.test." and "win-01.example.test" are one identity
+	// — and a raw comparison would refuse a re-run that spelled it differently
+	// while the adapter considers the two identical. That refusal is a false
+	// one: it blocks a run that would have changed nothing.
+	//
+	// A nil Equivalent falls back to ==, which is right for every key whose
+	// value is used as written.
+	Equivalent func(key string, provisioned, resolved any) bool
+
 	// ProtectedPath is a route the bearer middleware guards, used to prove
 	// that the service is reading the token store this run wrote.
 	//
@@ -251,6 +266,16 @@ func (o Options) verifyDeadline() time.Duration {
 	}
 
 	return defaultVerifyDeadline
+}
+
+// equivalent reports whether two values for a key mean the same thing, using
+// the caller's test when it supplied one.
+func (o Options) equivalent(key string, provisioned, resolved any) bool {
+	if o.Equivalent != nil {
+		return o.Equivalent(key, provisioned, resolved)
+	}
+
+	return provisioned == resolved
 }
 
 // now is the injected clock, or the real one.
