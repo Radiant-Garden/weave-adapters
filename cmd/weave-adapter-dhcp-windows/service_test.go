@@ -48,9 +48,13 @@ Additional Remarks:
 	are refusals -- no consent, no config, no --yes -- and a refusal that only
 	a Windows host could verify is a refusal nobody checks.
 
-	fakeManager records calls rather than simulating the SCM. What these tests
-	assert is what the command ASKED for; whether the SCM honours it is the
-	gate's question and was measured before this code was written.
+	winsvctest.Manager records calls rather than simulating the SCM. What these
+	tests assert is what the command ASKED for; whether the SCM honours it is
+	the gate's question and was measured before this code was written.
+
+	Both doubles moved to internal/core/winsvc/winsvctest in M4b Phase 0, so
+	that setup's tests drive the same ones rather than a second copy kept in
+	step by hand.
 */
 package main
 
@@ -66,99 +70,25 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
+	"github.com/radiantgarden/weave-adapters/internal/core/winsvc/winsvctest"
 )
-
-// fakeManager records what the command asked the SCM to do.
-type fakeManager struct {
-	installed  []winsvc.Definition
-	calls      []string
-	status     winsvc.ServiceStatus
-	installErr error
-	opErr      error
-	closed     bool
-}
-
-func (f *fakeManager) Install(d winsvc.Definition) error {
-	f.calls = append(f.calls, "install")
-	if f.installErr != nil {
-		return f.installErr
-	}
-
-	f.installed = append(f.installed, d)
-
-	return nil
-}
-
-func (f *fakeManager) Uninstall(string) error {
-	f.calls = append(f.calls, "uninstall")
-
-	return f.opErr
-}
-
-func (f *fakeManager) Start(string) error {
-	f.calls = append(f.calls, "start")
-
-	return f.opErr
-}
-
-func (f *fakeManager) Stop(string) error {
-	f.calls = append(f.calls, "stop")
-
-	return f.opErr
-}
-
-func (f *fakeManager) Status(string) (winsvc.ServiceStatus, error) {
-	f.calls = append(f.calls, "status")
-
-	return f.status, nil
-}
-
-func (f *fakeManager) Close() error {
-	f.closed = true
-
-	return nil
-}
-
-// fakeSecurer records what the lockdown was asked to cover.
-type fakeSecurer struct {
-	targets []winsvc.Securable
-	err     error
-	skip    bool
-}
-
-func (f *fakeSecurer) secure(targets []winsvc.Securable) ([]winsvc.SecureResult, error) {
-	f.targets = append(f.targets, targets...)
-
-	if f.err != nil {
-		return nil, f.err
-	}
-
-	results := make([]winsvc.SecureResult, 0, len(targets))
-	for _, t := range targets {
-		// Applied unless the fixture says otherwise, so a test asserting the
-		// skipped-target message has to ask for it.
-		results = append(results, winsvc.SecureResult{Target: t, Applied: !f.skip})
-	}
-
-	return results, nil
-}
 
 // depsFor returns serviceDeps handing out m, and records whether the SCM was
 // ever contacted — a refusal that still opened a privileged handle has
 // already done the thing it was refusing.
-func depsFor(m *fakeManager, opened *bool) serviceDeps {
-	return depsWith(m, opened, &fakeSecurer{})
+func depsFor(m *winsvctest.Manager, opened *bool) serviceDeps {
+	return depsWith(m, opened, &winsvctest.Securer{})
 }
 
 // depsWith is depsFor with a caller-supplied securer, for the tests that
 // assert on what was locked down.
-func depsWith(m *fakeManager, opened *bool, sec *fakeSecurer) serviceDeps {
+func depsWith(m *winsvctest.Manager, opened *bool, sec *winsvctest.Securer) serviceDeps {
 	return depsChecking(m, opened, sec, func(string) error { return nil })
 }
 
 // depsChecking is depsWith with a caller-supplied binary-directory check, for
 // the tests that assert install refuses a writable one.
-func depsChecking(m *fakeManager, opened *bool, sec *fakeSecurer, check checkDirFunc) serviceDeps {
+func depsChecking(m *winsvctest.Manager, opened *bool, sec *winsvctest.Securer, check checkDirFunc) serviceDeps {
 	return serviceDeps{
 		newManager: func() (winsvc.Manager, error) {
 			if opened != nil {
@@ -167,7 +97,7 @@ func depsChecking(m *fakeManager, opened *bool, sec *fakeSecurer, check checkDir
 
 			return m, nil
 		},
-		secure:   sec.secure,
+		secure:   sec.Secure,
 		checkDir: check,
 	}
 }
@@ -212,7 +142,7 @@ func TestRunService_ShouldRequireACommand(t *testing.T) {
 	var out bytes.Buffer
 
 	// ACT
-	err := runService(nil, &out, depsFor(&fakeManager{}, nil))
+	err := runService(nil, &out, depsFor(&winsvctest.Manager{}, nil))
 
 	// ASSERT
 	require.Error(t, err)
@@ -230,7 +160,7 @@ func TestRunService_ShouldPrintUsageForHelp(t *testing.T) {
 			var out bytes.Buffer
 
 			// ACT
-			err := runService([]string{verb}, &out, depsFor(&fakeManager{}, nil))
+			err := runService([]string{verb}, &out, depsFor(&winsvctest.Manager{}, nil))
 
 			// ASSERT — asking for help is not a failure.
 			require.NoError(t, err)
@@ -246,7 +176,7 @@ func TestRunService_ShouldRejectAnUnknownCommand(t *testing.T) {
 	var out bytes.Buffer
 
 	// ACT
-	err := runService([]string{"reinstall"}, &out, depsFor(&fakeManager{}, nil))
+	err := runService([]string{"reinstall"}, &out, depsFor(&winsvctest.Manager{}, nil))
 
 	// ASSERT
 	require.Error(t, err)
@@ -262,7 +192,7 @@ func TestRunServiceInstall_ShouldRefuseWithoutConsent(t *testing.T) {
 		opened bool
 	)
 
-	m := &fakeManager{}
+	m := &winsvctest.Manager{}
 
 	// ACT
 	err := runService([]string{"install", "--config", "C:\\x\\config.toml"}, &out, depsFor(m, &opened))
@@ -273,7 +203,7 @@ func TestRunServiceInstall_ShouldRefuseWithoutConsent(t *testing.T) {
 	// was being asked about.
 	require.Error(t, err)
 	assert.False(t, opened, "the SCM was contacted despite the refusal")
-	assert.Empty(t, m.installed)
+	assert.Empty(t, m.Installed)
 	assert.Contains(t, out.String(), "LocalSystem")
 	assert.Contains(t, out.String(), consentFlag)
 }
@@ -288,7 +218,7 @@ func TestRunServiceInstall_ShouldRequireAConfigPath(t *testing.T) {
 	)
 
 	// ACT
-	err := runService([]string{"install", "--" + consentFlag}, &out, depsFor(&fakeManager{}, &opened))
+	err := runService([]string{"install", "--" + consentFlag}, &out, depsFor(&winsvctest.Manager{}, &opened))
 
 	// ASSERT
 	// Without a config file the service has no way to receive
@@ -307,7 +237,7 @@ func TestRunServiceInstall_ShouldRegisterAnAbsoluteUnquotedDefinition(t *testing
 	// ARRANGE
 	var out bytes.Buffer
 
-	m := &fakeManager{}
+	m := &winsvctest.Manager{}
 
 	// A relative --config, to prove the registration resolves it: the path the
 	// SCM records must not depend on where the installer happened to be run.
@@ -320,9 +250,9 @@ func TestRunServiceInstall_ShouldRegisterAnAbsoluteUnquotedDefinition(t *testing
 
 	// ASSERT
 	require.NoError(t, err)
-	require.Len(t, m.installed, 1)
+	require.Len(t, m.Installed, 1)
 
-	def := m.installed[0]
+	def := m.Installed[0]
 
 	assert.True(t, filepath.IsAbs(def.BinPath), "the binary path must be absolute: under the SCM the "+
 		"working directory is C:\\Windows\\System32")
@@ -345,7 +275,7 @@ func TestRunServiceInstall_ShouldPassTheDrainBudgetThrough(t *testing.T) {
 	// ARRANGE
 	var out bytes.Buffer
 
-	m := &fakeManager{}
+	m := &winsvctest.Manager{}
 
 	// ACT
 	err := runService([]string{"install", "--" + consentFlag, "--config", writeServiceConfig(t, "")},
@@ -356,9 +286,9 @@ func TestRunServiceInstall_ShouldPassTheDrainBudgetThrough(t *testing.T) {
 	// and hands it to both the server and the SCM; the two drifting apart is
 	// what gets a legitimate drain killed.
 	require.NoError(t, err)
-	require.Len(t, m.installed, 1)
-	assert.Equal(t, drainBudget, m.installed[0].DrainBudget)
-	assert.Positive(t, m.installed[0].DrainBudget)
+	require.Len(t, m.Installed, 1)
+	assert.Equal(t, drainBudget, m.Installed[0].DrainBudget)
+	assert.Positive(t, m.Installed[0].DrainBudget)
 }
 
 func TestRunServiceInstall_ShouldReportAnAlreadyInstalledService(t *testing.T) {
@@ -367,7 +297,7 @@ func TestRunServiceInstall_ShouldReportAnAlreadyInstalledService(t *testing.T) {
 	// ARRANGE
 	var out bytes.Buffer
 
-	m := &fakeManager{installErr: winsvc.ErrAlreadyInstalled}
+	m := &winsvctest.Manager{InstallErr: winsvc.ErrAlreadyInstalled}
 
 	// ACT
 	err := runService([]string{"install", "--" + consentFlag, "--config", writeServiceConfig(t, "")},
@@ -375,7 +305,7 @@ func TestRunServiceInstall_ShouldReportAnAlreadyInstalledService(t *testing.T) {
 
 	// ASSERT
 	require.ErrorIs(t, err, winsvc.ErrAlreadyInstalled)
-	assert.True(t, m.closed, "the SCM connection was leaked")
+	assert.True(t, m.Closed, "the SCM connection was leaked")
 }
 
 func TestRunServiceUninstall_ShouldRefuseWithoutYes(t *testing.T) {
@@ -387,7 +317,7 @@ func TestRunServiceUninstall_ShouldRefuseWithoutYes(t *testing.T) {
 		opened bool
 	)
 
-	m := &fakeManager{}
+	m := &winsvctest.Manager{}
 
 	// ACT
 	err := runService([]string{"uninstall"}, &out, depsFor(m, &opened))
@@ -397,7 +327,7 @@ func TestRunServiceUninstall_ShouldRefuseWithoutYes(t *testing.T) {
 	// registration and removes the Event Log source.
 	require.Error(t, err)
 	assert.False(t, opened)
-	assert.Empty(t, m.calls)
+	assert.Empty(t, m.Calls)
 	assert.Contains(t, out.String(), "--yes")
 }
 
@@ -420,15 +350,15 @@ func TestRunServiceLifecycle_ShouldCallTheMatchingOperation(t *testing.T) {
 			// ARRANGE
 			var out bytes.Buffer
 
-			m := &fakeManager{}
+			m := &winsvctest.Manager{}
 
 			// ACT
 			err := runService(tc.args, &out, depsFor(m, nil))
 
 			// ASSERT
 			require.NoError(t, err)
-			assert.Equal(t, []string{tc.want}, m.calls)
-			assert.True(t, m.closed, "the SCM connection was leaked")
+			assert.Equal(t, []string{tc.want}, m.Calls)
+			assert.True(t, m.Closed, "the SCM connection was leaked")
 			assert.Contains(t, out.String(), serviceName)
 		})
 	}
@@ -440,7 +370,7 @@ func TestRunServiceLifecycle_ShouldNameAnUninstalledService(t *testing.T) {
 	// ARRANGE
 	var out bytes.Buffer
 
-	m := &fakeManager{opErr: winsvc.ErrNotInstalled}
+	m := &winsvctest.Manager{OpErr: winsvc.ErrNotInstalled}
 
 	// ACT
 	err := runService([]string{"start"}, &out, depsFor(m, nil))
@@ -459,7 +389,7 @@ func TestRunServiceStatus_ShouldReportAnAbsentService(t *testing.T) {
 	// ARRANGE
 	var out bytes.Buffer
 
-	m := &fakeManager{status: winsvc.ServiceStatus{Name: serviceName, Installed: false}}
+	m := &winsvctest.Manager{Reported: winsvc.ServiceStatus{Name: serviceName, Installed: false}}
 
 	// ACT
 	err := runService([]string{"status"}, &out, depsFor(m, nil))
@@ -475,7 +405,7 @@ func TestRunServiceStatus_ShouldWarnWhenRecoveryIsInert(t *testing.T) {
 	// ARRANGE
 	var out bytes.Buffer
 
-	m := &fakeManager{status: winsvc.ServiceStatus{
+	m := &winsvctest.Manager{Reported: winsvc.ServiceStatus{
 		Name:                serviceName,
 		Installed:           true,
 		State:               winsvc.StateRunning,
@@ -501,7 +431,7 @@ func TestRunServiceStatus_ShouldReportAnInstalledService(t *testing.T) {
 	// ARRANGE
 	var out bytes.Buffer
 
-	m := &fakeManager{status: winsvc.ServiceStatus{
+	m := &winsvctest.Manager{Reported: winsvc.ServiceStatus{
 		Name:                serviceName,
 		Installed:           true,
 		State:               winsvc.StateRunning,
@@ -592,7 +522,7 @@ func TestRunServiceInstall_ShouldRefuseAConfigurationThatCannotStart(t *testing.
 			path := filepath.Join(t.TempDir(), "config.toml")
 			require.NoError(t, os.WriteFile(path, []byte(tc.body), 0o600))
 
-			m := &fakeManager{}
+			m := &winsvctest.Manager{}
 
 			// ACT
 			err := runService([]string{"install", "--" + consentFlag, "--config", path}, &out, depsFor(m, nil))
@@ -600,7 +530,7 @@ func TestRunServiceInstall_ShouldRefuseAConfigurationThatCannotStart(t *testing.
 			// ASSERT
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.wantErr)
-			assert.Empty(t, m.installed, "a service was registered for a configuration that cannot start")
+			assert.Empty(t, m.Installed, "a service was registered for a configuration that cannot start")
 		})
 	}
 }
@@ -611,7 +541,7 @@ func TestRunServiceInstall_ShouldAcceptABarePowerShellName(t *testing.T) {
 	// ARRANGE
 	var out bytes.Buffer
 
-	m := &fakeManager{}
+	m := &winsvctest.Manager{}
 	cfg := writeServiceConfig(t, "[dhcp]\npowershellPath = 'powershell.exe'\n")
 
 	// ACT
@@ -623,7 +553,7 @@ func TestRunServiceInstall_ShouldAcceptABarePowerShellName(t *testing.T) {
 	// way a relative path does — and a rule that rejected it would be one
 	// nobody could satisfy.
 	require.NoError(t, err)
-	assert.Len(t, m.installed, 1)
+	assert.Len(t, m.Installed, 1)
 }
 
 func TestRunServiceInstall_ShouldRefuseAMissingConfigFile(t *testing.T) {
@@ -632,7 +562,7 @@ func TestRunServiceInstall_ShouldRefuseAMissingConfigFile(t *testing.T) {
 	// ARRANGE
 	var out bytes.Buffer
 
-	m := &fakeManager{}
+	m := &winsvctest.Manager{}
 	absent := filepath.Join(t.TempDir(), "not-there.toml")
 
 	// ACT
@@ -643,7 +573,7 @@ func TestRunServiceInstall_ShouldRefuseAMissingConfigFile(t *testing.T) {
 	// guarantees a failed start, three SCM retries, and an operator reading
 	// Event Viewer for something the installer could see.
 	require.Error(t, err)
-	assert.Empty(t, m.installed)
+	assert.Empty(t, m.Installed)
 }
 
 func TestRunServiceInstall_ShouldSecureEverythingTheConfigurationNames(t *testing.T) {
@@ -652,22 +582,22 @@ func TestRunServiceInstall_ShouldSecureEverythingTheConfigurationNames(t *testin
 	// ARRANGE
 	var out bytes.Buffer
 
-	sec := &fakeSecurer{}
+	sec := &winsvctest.Securer{}
 	cfg := writeServiceConfig(t, "")
 
 	// ACT
 	err := runService([]string{"install", "--" + consentFlag, "--config", cfg},
-		&out, depsWith(&fakeManager{}, nil, sec))
+		&out, depsWith(&winsvctest.Manager{}, nil, sec))
 
 	// ASSERT
 	// All three, from the configuration the installer just resolved — which
 	// is the argument for doing this in the binary rather than a script: a
 	// script has to be told the paths and drifts from them silently.
 	require.NoError(t, err)
-	require.Len(t, sec.targets, 3)
+	require.Len(t, sec.Targets, 3)
 
-	paths := make([]string, 0, len(sec.targets))
-	for _, target := range sec.targets {
+	paths := make([]string, 0, len(sec.Targets))
+	for _, target := range sec.Targets {
 		paths = append(paths, target.Path)
 	}
 
@@ -685,11 +615,11 @@ func TestRunServiceInstall_ShouldReportARegisteredServiceWhoseLockdownFailed(t *
 	// ARRANGE
 	var out bytes.Buffer
 
-	sec := &fakeSecurer{err: winsvc.ErrNotSecured}
+	sec := &winsvctest.Securer{Err: winsvc.ErrNotSecured}
 
 	// ACT
 	err := runService([]string{"install", "--" + consentFlag, "--config", writeServiceConfig(t, "")},
-		&out, depsWith(&fakeManager{}, nil, sec))
+		&out, depsWith(&winsvctest.Manager{}, nil, sec))
 
 	// ASSERT
 	// The service exists by this point, and the error has to say so: an
@@ -706,8 +636,8 @@ func TestRunServiceSecure_ShouldLockDownWithoutTouchingTheRegistration(t *testin
 	// ARRANGE
 	var out bytes.Buffer
 
-	m := &fakeManager{}
-	sec := &fakeSecurer{}
+	m := &winsvctest.Manager{}
+	sec := &winsvctest.Securer{}
 
 	// ACT
 	err := runService([]string{"secure", "--config", writeServiceConfig(t, "")},
@@ -717,8 +647,8 @@ func TestRunServiceSecure_ShouldLockDownWithoutTouchingTheRegistration(t *testin
 	// The console deployment's one-command lockdown, and the repair path
 	// after moving a store. It must not touch the SCM at all.
 	require.NoError(t, err)
-	assert.Len(t, sec.targets, 3)
-	assert.Empty(t, m.calls, "secure must not touch the service registration")
+	assert.Len(t, sec.Targets, 3)
+	assert.Empty(t, m.Calls, "secure must not touch the service registration")
 }
 
 func TestRunServiceSecure_ShouldRequireAConfigPath(t *testing.T) {
@@ -727,17 +657,17 @@ func TestRunServiceSecure_ShouldRequireAConfigPath(t *testing.T) {
 	// ARRANGE
 	var out bytes.Buffer
 
-	sec := &fakeSecurer{}
+	sec := &winsvctest.Securer{}
 
 	// ACT
-	err := runService([]string{"secure"}, &out, depsWith(&fakeManager{}, nil, sec))
+	err := runService([]string{"secure"}, &out, depsWith(&winsvctest.Manager{}, nil, sec))
 
 	// ASSERT
 	// It is the config that names the other two paths, so there is nothing to
 	// secure without it.
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--config is required")
-	assert.Empty(t, sec.targets)
+	assert.Empty(t, sec.Targets)
 }
 
 func TestRunServiceSecure_ShouldRefuseARelativeLogPath(t *testing.T) {
@@ -755,15 +685,15 @@ func TestRunServiceSecure_ShouldRefuseARelativeLogPath(t *testing.T) {
 		"[identity]\nnamespaceKey = 'install-namespace-key-0123456789'\nserverName = 'd.test'\n"
 	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
 
-	sec := &fakeSecurer{}
+	sec := &winsvctest.Securer{}
 
 	// ACT
-	err := runService([]string{"secure", "--config", path}, &out, depsWith(&fakeManager{}, nil, sec))
+	err := runService([]string{"secure", "--config", path}, &out, depsWith(&winsvctest.Manager{}, nil, sec))
 
 	// ASSERT
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "logFile")
-	assert.Empty(t, sec.targets, "nothing may be secured once a path is rejected")
+	assert.Empty(t, sec.Targets, "nothing may be secured once a path is rejected")
 }
 
 func TestRunServiceInstall_ShouldSayWhenATargetWasSkipped(t *testing.T) {
@@ -772,11 +702,11 @@ func TestRunServiceInstall_ShouldSayWhenATargetWasSkipped(t *testing.T) {
 	// ARRANGE
 	var out bytes.Buffer
 
-	sec := &fakeSecurer{skip: true}
+	sec := &winsvctest.Securer{Skip: true}
 
 	// ACT
 	err := runService([]string{"install", "--" + consentFlag, "--config", writeServiceConfig(t, "")},
-		&out, depsWith(&fakeManager{}, nil, sec))
+		&out, depsWith(&winsvctest.Manager{}, nil, sec))
 
 	// ASSERT
 	// Printing "secured" for a file that was never touched is worse than
@@ -793,8 +723,8 @@ func TestRunServiceInstall_ShouldRefuseAWritableBinaryDirectory(t *testing.T) {
 	// ARRANGE
 	var out bytes.Buffer
 
-	m := &fakeManager{}
-	sec := &fakeSecurer{}
+	m := &winsvctest.Manager{}
+	sec := &winsvctest.Securer{}
 
 	deps := depsChecking(m, nil, sec, func(string) error {
 		return fmt.Errorf("%w: C:\\gate\\bin grants write to [S-1-5-32-545]", winsvc.ErrNotSecured)
@@ -810,8 +740,8 @@ func TestRunServiceInstall_ShouldRefuseAWritableBinaryDirectory(t *testing.T) {
 	// next start. Refused before anything is registered.
 	require.ErrorIs(t, err, winsvc.ErrNotSecured)
 	assert.Contains(t, err.Error(), "LocalSystem")
-	assert.Empty(t, m.installed, "a service was registered despite a writable binary directory")
-	assert.Empty(t, sec.targets, "nothing should be secured once the install is refused")
+	assert.Empty(t, m.Installed, "a service was registered despite a writable binary directory")
+	assert.Empty(t, sec.Targets, "nothing should be secured once the install is refused")
 }
 
 func TestRunServiceInstall_ShouldCheckTheDirectoryTheServiceWillRunFrom(t *testing.T) {
@@ -823,7 +753,7 @@ func TestRunServiceInstall_ShouldCheckTheDirectoryTheServiceWillRunFrom(t *testi
 		checked string
 	)
 
-	deps := depsChecking(&fakeManager{}, nil, &fakeSecurer{}, func(dir string) error {
+	deps := depsChecking(&winsvctest.Manager{}, nil, &winsvctest.Securer{}, func(dir string) error {
 		checked = dir
 
 		return nil
@@ -859,13 +789,13 @@ func TestRunServiceLifecycle_ShouldTreatStartAndStopAsDesiredStates(t *testing.T
 
 			var out bytes.Buffer
 
-			m := &fakeManager{}
+			m := &winsvctest.Manager{}
 
 			// ACT
 			require.NoError(t, runService([]string{verb}, &out, depsFor(m, nil)))
 
 			// ASSERT
-			assert.Equal(t, []string{verb}, m.calls)
+			assert.Equal(t, []string{verb}, m.Calls)
 			assert.Contains(t, out.String(), serviceName)
 		})
 	}
