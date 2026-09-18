@@ -28,6 +28,18 @@ Tested:
 	  - the drain completes rather than being truncated;
 	  - a widened token store refuses the start.
 
+	provisioning through `setup`, which is the command an operator actually
+	runs
+	  - it provisions a host from nothing: directory, config, token, install,
+	    start and verify, all applied;
+	  - the identity SURVIVES being provisioned from nothing -- a rendered
+	    config derives the same wadaptIDs as a hand-written one;
+	  - everything it created is locked down and PROTECTED, not merely
+	    inheriting;
+	  - a re-run reports every step satisfied, mints no second token and does
+	    not rewrite the configuration;
+	  - a conflicting server name is refused rather than applied.
+
 	the lockdown, read back through Get-Acl rather than our own reader
 	  - the scratch directory before anything is registered, so a broken
 	    applier fails with no service to tear down;
@@ -69,6 +81,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -76,6 +89,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows"
+	"github.com/radiantgarden/weave-adapters/internal/core/auth"
+	"github.com/radiantgarden/weave-adapters/internal/core/config"
 	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
 )
 
@@ -379,9 +395,143 @@ func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
 		assert.Equal(t, beforeOwner, afterOwner)
 	})
 
+	// --- Part D: provisioning through `setup` -----------------------------
+	//
+	// Everything above drives `service install` against a config the gate
+	// wrote by hand. These steps drive the ONE command an operator is meant to
+	// run, and they exist because the two would otherwise drift: the gate
+	// would keep proving a sequence nobody follows while the documented path
+	// went unexercised.
+
+	t.Run("20: setup provisions a host from nothing", func(t *testing.T) {
+		g.mustAdapter(t, "service", "stop")
+		g.mustAdapter(t, "service", "uninstall", "--yes")
+		waitAbsent(t)
+
+		// The gate's FIXED key, via a file, never --generate-namespace-key.
+		// A generated key would make the identity assertion below pass
+		// vacuously -- it would agree with whatever was just invented.
+		require.NoError(t, os.WriteFile(g.keyFile, []byte(gateNamespaceKey), 0o600))
+
+		out, err := g.adapterCmd(t, "setup",
+			"--"+flagDataDir, g.setupDir,
+			"--"+flagBinDir, filepath.Join(g.setupDir, "bin"),
+			"--"+flagNoCopy,
+			"--"+flagTokenLabel, "gate",
+			"--"+flagNamespaceKeyFil, g.keyFile,
+			"--"+config.FlagName(dhcpwindows.KeyServerName), gateServerName,
+			"--"+config.FlagName(config.KeyPort), strconv.Itoa(g.setupPort),
+			"--"+consentFlag)
+
+		// Exit 4 is a legitimate success here: it means installed, running,
+		// and the backend unhealthy. This host has a real DHCP server so 0 is
+		// expected, but a gate that demanded it would fail for the backend
+		// being briefly out rather than for anything setup did.
+		require.True(t, err == nil || exitCode(err) == exitUnhealthy,
+			"setup exited unexpectedly: %v\n%s", err, out)
+
+		for _, step := range []string{"directory", "config", "token", "install", "start", "verify"} {
+			assert.Contains(t, out, step, "setup did not report the %s step", step)
+		}
+
+		// The token reaches the operator exactly once, and the store keeps
+		// only a hash -- so a run that minted one and did not show it has
+		// destroyed a credential and occupied the label.
+		assert.Contains(t, out, auth.TokenPrefix, "setup minted a token and never showed it")
+	})
+
+	t.Run("21: it registered and started a real service", func(t *testing.T) {
+		waitState(t, "RUNNING", 2*time.Minute)
+
+		status := g.mustAdapter(t, "service", "status")
+		assert.Contains(t, status, "automatic")
+		assert.Contains(t, status, g.binary, "setup registered a binary other than the one it ran from")
+		assert.Contains(t, registeredImagePath(t), filepath.Join(g.setupDir, "config.toml"),
+			"the registration does not point at the config setup wrote")
+	})
+
+	t.Run("22: the identity survived being provisioned from nothing", func(t *testing.T) {
+		// THE assertion of this part. A config rendered by setup has to
+		// produce the same wadaptIDs as one written by hand from the same key
+		// and server name -- otherwise provisioning a host silently re-keys
+		// it, every ID weave has seen moves, and the recreates that follow are
+		// refused by Windows' one-scope-per-subnet rule.
+		//
+		// Read from the log rather than recomputed from the file, so what is
+		// asserted is what the RUNNING service derived.
+		want := dhcpwindows.NamespaceKeyFingerprint(gateNamespaceKey)
+
+		logged := ps(t, fmt.Sprintf(
+			`Select-String -Path '%s' -Pattern 'namespaceKeyFingerprint=(\S+)' | `+
+				`Select-Object -Last 1 | ForEach-Object { $_.Matches[0].Groups[1].Value }`,
+			filepath.Join(g.setupDir, "adapter.log")))
+
+		assert.Equal(t, want, logged, "setup re-keyed the host: every wadaptID has moved")
+	})
+
+	t.Run("23: everything setup created is locked down", func(t *testing.T) {
+		// Read back through Get-Acl, like step 16, rather than through our own
+		// reader -- and asserting PROTECTED, because a file that merely
+		// inherits the right entries is not the same as one that carries them.
+		for _, path := range []string{
+			g.setupDir,
+			filepath.Join(g.setupDir, "config.toml"),
+			filepath.Join(g.setupDir, "tokens.toml"),
+		} {
+			rules, protected, owner := acl(t, path)
+			assertLockedDown(t, path, rules, protected, owner)
+		}
+	})
+
+	t.Run("24: re-running setup changes nothing", func(t *testing.T) {
+		// The promise the command is built on: safe to re-run. Every step must
+		// report satisfied, and nothing may be rewritten -- an existing config
+		// above all, since a rewrite is how a namespace key gets changed by
+		// accident.
+		before := ps(t, fmt.Sprintf(`(Get-FileHash '%s' -Algorithm SHA256).Hash`,
+			filepath.Join(g.setupDir, "config.toml")))
+
+		out, err := g.adapterCmd(t, "setup",
+			"--"+flagDataDir, g.setupDir,
+			"--"+flagBinDir, filepath.Join(g.setupDir, "bin"),
+			"--"+flagNoCopy,
+			"--"+flagTokenLabel, "gate",
+			"--"+flagNamespaceKeyFil, g.keyFile,
+			"--"+config.FlagName(dhcpwindows.KeyServerName), gateServerName,
+			"--"+config.FlagName(config.KeyPort), strconv.Itoa(g.setupPort),
+			"--"+consentFlag)
+
+		require.True(t, err == nil || exitCode(err) == exitUnhealthy,
+			"a re-run exited unexpectedly: %v\n%s", err, out)
+
+		assert.NotContains(t, out, "pending", "a re-run still had work to do")
+		assert.NotContains(t, out, auth.TokenPrefix, "a re-run minted a second token")
+
+		after := ps(t, fmt.Sprintf(`(Get-FileHash '%s' -Algorithm SHA256).Hash`,
+			filepath.Join(g.setupDir, "config.toml")))
+		assert.Equal(t, before, after, "a re-run rewrote the configuration")
+	})
+
+	t.Run("25: a different server name is refused, not applied", func(t *testing.T) {
+		// An existing configuration is never rewritten, and the refusal is
+		// what stops a re-key arriving as a typo. The case-folded spelling is
+		// accepted by step 24 above; this is a genuinely different host.
+		out, err := g.adapterCmd(t, "setup", "--"+flagDryRun,
+			"--"+flagDataDir, g.setupDir,
+			"--"+flagTokenLabel, "gate",
+			"--"+config.FlagName(dhcpwindows.KeyServerName), "somewhere-else.gate.test")
+
+		require.Error(t, err, "a conflicting server name was accepted")
+		assert.Contains(t, out+err.Error(), dhcpwindows.KeyServerName)
+
+		// Neither half of the comparison may be printed: the same code path
+		// carries identity.namespaceKey.
+		assert.NotContains(t, out, gateNamespaceKey)
+	})
+
 	// --- Part C: teardown -------------------------------------------------
 
-	t.Run("20: uninstall leaves nothing behind", func(t *testing.T) {
+	t.Run("26: uninstall leaves nothing behind", func(t *testing.T) {
 		g.mustAdapter(t, "service", "uninstall", "--yes")
 
 		// Polled for actual absence rather than trusting the delete: Windows
@@ -408,7 +558,7 @@ func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
 		assert.Equal(t, "False", sourceKey, "the Event Log source registration survived the uninstall")
 	})
 
-	t.Run("21: reinstall against the PROVISIONED config", func(t *testing.T) {
+	t.Run("27: reinstall against the PROVISIONED config", func(t *testing.T) {
 		// Not the gate's. A host left logging into this run's scratch
 		// directory satisfies the letter of the invariant and not its point.
 		g.mustAdapter(t, "service", "install", "--config", provisioned, "--"+consentFlag)

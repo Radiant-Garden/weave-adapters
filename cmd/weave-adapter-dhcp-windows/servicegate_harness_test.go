@@ -40,6 +40,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -87,7 +88,26 @@ type gate struct {
 	// drainWindowStart bounds the log search in step 15, so it observes the
 	// drain that step 14 provoked rather than an earlier clean shutdown.
 	drainWindowStart time.Time
+
+	// Part D's own layout. A SEPARATE directory from the one above, because
+	// setup writes the config itself and the whole point of that part is to
+	// exercise the writing -- pointing it at a config the gate hand-wrote
+	// would take the never-rewrite branch and prove nothing.
+	setupDir  string
+	setupPort int
+	keyFile   string
 }
+
+// The identity Part D provisions with.
+//
+// FIXED, and the same key the hand-written config above carries. Part D
+// asserts that a config setup RENDERED derives the same wadaptIDs as one
+// written by hand from the same inputs, and a generated key would make that
+// assertion agree with whatever had just been invented.
+const (
+	gateNamespaceKey = "service-gate-namespace-key-0123456789"
+	gateServerName   = "dhcp01.gate.test"
+)
 
 // newGate builds the binary and lays out a configuration the gate owns.
 func newGate(t *testing.T) *gate {
@@ -115,6 +135,12 @@ func newGate(t *testing.T) *gate {
 	}
 
 	g.baseURL = fmt.Sprintf("http://127.0.0.1:%d", g.port)
+
+	// Part D's layout, laid out here so a failed run leaves it beside
+	// everything else the evidence dump points at.
+	g.setupDir = filepath.Join(dir, "setup")
+	g.keyFile = filepath.Join(dir, "ns.key")
+	g.setupPort = freePort(t)
 
 	t.Cleanup(func() { g.dumpEvidenceOnFailure(t) })
 
@@ -661,4 +687,35 @@ func logLineTime(line string) (time.Time, bool) {
 	stamp, err := time.Parse(time.RFC3339Nano, rest)
 
 	return stamp, err == nil
+}
+
+// waitAbsent blocks until the SCM reports the service gone.
+//
+// Windows removes a registration only once the last handle closes, so an
+// uninstall that returned is not yet an uninstall that took effect -- and
+// installing over the gap fails with "already installed" for a service that is
+// on its way out.
+func waitAbsent(t *testing.T) {
+	t.Helper()
+
+	deadline := time.Now().Add(time.Minute)
+	for time.Now().Before(deadline) && state(t) != "ABSENT" {
+		time.Sleep(time.Second)
+	}
+
+	require.Equal(t, "ABSENT", state(t), "the service is still registered")
+}
+
+// exitCode returns the process exit code behind an error from adapterCmd.
+//
+// setup's codes are its machine-readable contract while --output json is
+// deferred, so the gate has to read them rather than treat every non-zero the
+// same: 4 means installed, running and the backend unhealthy, which is a
+// success on a host whose DHCP server is briefly out and a failure nowhere.
+func exitCode(err error) int {
+	if exit, ok := errors.AsType[*exec.ExitError](err); ok {
+		return exit.ExitCode()
+	}
+
+	return -1
 }
