@@ -155,6 +155,13 @@ func TestPlanWantsRestart_ShouldReachTheStartStepFromAnEarlierStepsCheck(t *test
 	opts := runOptions(t)
 	opts.DryRun = true
 
+	// The mint is pending only because the store is not there. Asserted rather
+	// than assumed: this test read the HOST's real token store once, on WS2022
+	// where the fixture path was a live deployment, and reported the mint
+	// already satisfied — which surfaced as an unreadable "expected 2, got 0"
+	// rather than as the fixture collision it was.
+	require.NoFileExists(t, testTokenStore, "the fixture path is a real file on this host")
+
 	deps, m, _ := okDeps()
 	m.Reported = winsvc.ServiceStatus{
 		Name:      opts.Definition.Name,

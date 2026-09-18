@@ -77,14 +77,25 @@ import (
 // core importing an adapter. See the doc block.
 const testAdapterKey = "fake.required"
 
-// Windows-shaped paths for the config bodies below. They need not exist —
-// Install validates the configuration, it does not open the token store or the
-// log — but they must be Windows-absolute, because the service-path rule
-// applies Windows rules on every host.
-const (
-	//nolint:gosec // G101: a path to the store, not a credential.
-	testTokenStore = `C:\ProgramData\weave-adapters\tokens.toml`
-	testLogFile    = `C:\ProgramData\weave-adapters\adapter.log`
+// testRoot is a Windows-absolute directory that exists on no host.
+//
+// Windows-absolute because the service-path rule applies Windows rules
+// everywhere, and UNIQUE because a fixed one is not a fixture on the machine
+// this software is built for. The first version used
+// C:\ProgramData\weave-adapters, which is not a made-up path on WS2022 — it is
+// the live deployment. The token step's Check reads authTokensFile, so on the
+// real host it loaded the REAL token store, found a usable token, and reported
+// the mint already satisfied. Green on a developer machine, wrong on the only
+// host that matters.
+//
+// The pid also keeps two test binaries running at once from sharing a fixture.
+var testRoot = fmt.Sprintf(`C:\weave-adapters-test-%d`, os.Getpid())
+
+// Paths for the config bodies below. Nothing creates or opens them: Install
+// validates a configuration, it does not open the token store or the log.
+var (
+	testTokenStore = testRoot + `\tokens.toml`
+	testLogFile    = testRoot + `\adapter.log`
 )
 
 // testSpec is core's keys plus one invented adapter key.

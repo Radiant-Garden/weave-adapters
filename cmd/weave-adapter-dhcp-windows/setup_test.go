@@ -70,6 +70,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -99,12 +100,21 @@ func setupDeps() (setup.Deps, *winsvctest.Manager, *winsvctest.Securer) {
 	}, m, sec
 }
 
-// windowsLayoutArgs points a run at Windows-shaped directories, so the
-// service-path rule — which applies Windows rules on every host — is satisfied.
+// windowsLayoutArgs points a run at Windows-shaped directories that exist on
+// no host.
+//
+// Windows-shaped because the service-path rule applies Windows rules
+// everywhere, and unique because these tests run on the WS2022 host too — where
+// a plausible-looking fixed path is a live deployment, not a fixture. The
+// re-key guard reads the data directory, so a fixture that collided with a real
+// one would exercise the opposite branch and pass while asserting the wrong
+// thing.
 func windowsLayoutArgs() []string {
+	root := fmt.Sprintf(`C:\weave-adapters-test-%d`, os.Getpid())
+
 	return []string{
-		"--" + flagDataDir, `C:\ProgramData\weave-adapters-test`,
-		"--" + flagBinDir, `C:\Program Files\weave-adapters-test`,
+		"--" + flagDataDir, root,
+		"--" + flagBinDir, root + `\bin`,
 	}
 }
 
