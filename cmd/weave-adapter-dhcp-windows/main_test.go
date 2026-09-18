@@ -16,6 +16,9 @@ Tested:
   isTokenCommand
     - TestIsTokenCommand_ShouldRecogniseOnlyTheTokenVerb: server args never route to the CLI.
 
+  isSetupCommand
+    - TestIsSetupCommand_ShouldRecogniseOnlyTheSetupVerb: and never a flag that merely contains it.
+
   the shipped config example
     - TestConfigExample_ShouldLoadAndValidate: the config file an operator copies from actually loads and validates.
 
@@ -225,6 +228,34 @@ func TestIsTokenCommand_ShouldRecogniseOnlyTheTokenVerb(t *testing.T) {
 
 			// ACT / ASSERT
 			assert.Equal(t, tt.want, isTokenCommand(tt.args))
+		})
+	}
+}
+
+func TestIsSetupCommand_ShouldRecogniseOnlyTheSetupVerb(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "should route provisioning to setup", args: []string{"setup", "--dry-run"}, want: true},
+		{name: "should run the server when no args are given", args: nil, want: false},
+		{name: "should run the server for flags", args: []string{"--port", "8444"}, want: false},
+		{name: "should not match a flag that merely contains the verb", args: []string{"--setup-only"}, want: false},
+		{name: "should not match another subcommand", args: []string{"service", "status"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT / ASSERT
+			// The setup arm is the one that owns its own exit codes, so a
+			// mis-routed invocation would not merely do the wrong thing — it
+			// would report the wrong thing to whatever is reading the code.
+			assert.Equal(t, tt.want, isSetupCommand(tt.args))
 		})
 	}
 }

@@ -70,6 +70,7 @@ func platformDeps() setup.Deps {
 		NewManager: winsvc.NewManager,
 		Secure:     winsvc.Secure,
 		CheckDir:   checkDirectoryGrants,
+		Get:        httpGet,
 	}
 }
 

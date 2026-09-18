@@ -85,6 +85,18 @@ func main() {
 	var err error
 
 	switch {
+	case isSetupCommand(args):
+		// The one command with an exit-code table of its own: an MSI custom
+		// action and the service gate read it, and collapsing every outcome
+		// to 0-or-1 here would discard the two that matter — a refusal that
+		// needs a flag, and a service that is running against a backend that
+		// is not.
+		result, setupErr := runSetup(context.Background(), args[1:], os.Stdout, platformDeps())
+		if setupErr != nil {
+			fmt.Fprintln(os.Stderr, "error:", setupErr)
+		}
+
+		os.Exit(result.code)
 	case isServiceCommand(args):
 		err = runService(args[1:], os.Stdout, platformDeps())
 		if err != nil {
@@ -116,6 +128,11 @@ func main() {
 // a server run.
 func isServiceCommand(args []string) bool {
 	return len(args) > 0 && args[0] == "service"
+}
+
+// isSetupCommand reports whether args invoke the provisioning command.
+func isSetupCommand(args []string) bool {
+	return len(args) > 0 && args[0] == "setup"
 }
 
 // isTokenCommand reports whether args invoke token management rather than a
