@@ -340,10 +340,12 @@ func TestScopeList_ShouldMatchTheSharedPageEnvelope(t *testing.T) {
 		require.Contains(t, side.fields, "items", side.name)
 		require.Contains(t, side.fields, "nextPageToken", side.name)
 		require.Contains(t, side.fields, "nextPageUrl", side.name)
+		require.Contains(t, side.fields, "total", side.name)
 
 		assert.False(t, side.fields["items"].OmitEmpty, "%s: items is always rendered", side.name)
 		assert.True(t, side.fields["nextPageToken"].OmitEmpty, "%s: absent on the last page", side.name)
 		assert.True(t, side.fields["nextPageUrl"].OmitEmpty, "%s: absent on the last page", side.name)
+		assert.True(t, side.fields["total"].OmitEmpty, "%s: optional in the shared envelope", side.name)
 	}
 
 	// Unlike the shared envelope, this one has a concrete item type, so the

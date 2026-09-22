@@ -11,7 +11,7 @@ Tested:
     - TestFieldError_ShouldMatchTheHandWrittenStruct: same for the errors[] element.
     - TestProblemType_ShouldMatchTheLiveTaxonomy: the enum and the Go taxonomy list exactly the same codes.
   pagination.yaml -> pagination.gen.go
-    - TestPageEnvelope_ShouldMatchTheHandWrittenStruct: generated envelope and pagination.Page agree on field names, and on optionality on both sides.
+    - TestPageEnvelope_ShouldMatchTheHandWrittenStruct: generated envelope and pagination.Page agree on field names, and on optionality on both sides — total included, which must stay optional so an adapter that cannot count is not made to lie.
     - TestPageParameters_ShouldMatchTheHandWrittenNames: the spec's query parameters are the constants handlers actually read.
   jobs.yaml -> jobs.gen.go
     - TestJob_ShouldOmitAbsentOptionalFields: a pending job renders exactly id/status/createdAt — no zero timestamp, no empty error object.
@@ -191,13 +191,15 @@ func TestPageEnvelope_ShouldMatchTheHandWrittenStruct(t *testing.T) {
 		require.Contains(t, side.fields, "items", side.name)
 		require.Contains(t, side.fields, "nextPageToken", side.name)
 		require.Contains(t, side.fields, "nextPageUrl", side.name)
+		require.Contains(t, side.fields, "total", side.name)
 
 		assert.False(t, side.fields["items"].OmitEmpty, "%s: items is always rendered", side.name)
 		assert.True(t, side.fields["nextPageToken"].OmitEmpty, "%s: absent on the last page", side.name)
 		assert.True(t, side.fields["nextPageUrl"].OmitEmpty, "%s: absent on the last page", side.name)
+		assert.True(t, side.fields["total"].OmitEmpty, "%s: absent when the adapter cannot count", side.name)
 	}
 
-	// Types too, for the cursor fields. Names and optionality alone would let
+	// Types too, for the cursor fields and the count. Names and optionality alone would let
 	// pagination.yaml retype nextPageToken to integer, regenerate it as an int,
 	// and still pass — while every generated client started rejecting the
 	// strings this adapter actually sends.
@@ -205,7 +207,7 @@ func TestPageEnvelope_ShouldMatchTheHandWrittenStruct(t *testing.T) {
 	// items is excluded deliberately: it is []T on the hand-written side and
 	// []interface{} on the generated one by construction, which is the one
 	// difference the envelope's genericity requires.
-	for _, name := range []string{"nextPageToken", "nextPageUrl"} {
+	for _, name := range []string{"nextPageToken", "nextPageUrl", "total"} {
 		assert.Equal(t, handWritten[name].Kind, generated[name].Kind, "%s type", name)
 	}
 }

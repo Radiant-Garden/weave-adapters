@@ -129,7 +129,9 @@ func (r *Resource) list(w http.ResponseWriter, req *http.Request) {
 		return it.ID
 	})
 
-	writeJSON(w, pagination.NewPage(page, next))
+	// The demo holds its whole collection, as the shipped list handler does,
+	// so it proves the count the same way it proves the cursors.
+	writeJSON(w, pagination.NewPage(page, next).WithTotal(len(r.items)))
 }
 
 // get serves one item, or a problem+json 404.

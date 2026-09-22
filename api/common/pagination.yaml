@@ -50,7 +50,7 @@ components:
       type: object
       description: >-
         The collection envelope every list endpoint returns. Adapters define
-        their own list schema with the same two fields and a concrete item type;
+        their own list schema with the same fields and a concrete item type;
         this component fixes the field names and their optionality, which is
         what a generic client depends on.
       required:
@@ -85,3 +85,18 @@ components:
             only pageToken replaced — a link-following client sends nothing but
             this link, so a dropped filter would yield unfiltered later pages.
           example: /api/v1/leases?pageSize=50&pageToken=eyJ2IjoxLCJzIjoibGVhc2VzIn0
+        total:
+          type: integer
+          minimum: 0
+          description: >-
+            The number of items in the whole collection after filtering, across
+            every page of this listing. Optional: an adapter that would need a
+            second backend call to count leaves it out; one that has the full
+            collection in hand sends it on every page, including 0 for a
+            filter that matched nothing.
+
+            A consumer's truncation defence, not a snapshot: the count may
+            change between pages of one walk as the backend changes. Take the
+            maximum seen over the walk — a count that grew reads as "this walk
+            missed something", which is the safe conclusion.
+          example: 137

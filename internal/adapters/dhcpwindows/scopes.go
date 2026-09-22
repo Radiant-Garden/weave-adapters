@@ -198,10 +198,15 @@ func (h *ScopesHandler) list(w http.ResponseWriter, r *http.Request) error {
 
 	w.Header().Set("Content-Type", "application/json")
 
+	// The whole filtered collection is in hand — one backend call returned it —
+	// so its length is the exact total, at no cost. weave uses it as its only
+	// defence against a truncated walk, and takes the maximum across pages, so
+	// a count that changes mid-walk biases the safe way.
+	//
 	// The ETag wrapper buffers this write, and the status is committed either
 	// way, so a write failure here is not actionable; API-010 records what was
 	// sent.
-	_ = json.NewEncoder(w).Encode(pagination.NewPage(page, next))
+	_ = json.NewEncoder(w).Encode(pagination.NewPage(page, next).WithTotal(len(scopes)))
 
 	return nil
 }

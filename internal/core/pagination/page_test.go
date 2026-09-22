@@ -34,6 +34,9 @@ Tested:
     - TestNewPage_ShouldRenderAnEmptyCollectionAsAnArray: never "items": null.
     - TestPage_ShouldRenderItemsAsAnArrayHoweverItWasBuilt: the guarantee survives a struct literal, not just NewPage.
     - TestPage_ShouldMarshalThroughAPointer: the value receiver keeps &page rendering identically.
+  Page.WithTotal
+    - TestWithTotal_ShouldRenderZeroRatherThanOmittingIt: a filter that matched nothing says "total": 0; only a page never counted omits the field.
+    - TestWithTotal_ShouldNotAliasTheReceiver: a value method returns a page carrying the count without touching the one it was called on.
 
 Tested elsewhere:
   The cursor encoding itself is covered in token_test.go. That WriteError emits
@@ -671,4 +674,61 @@ func containsKey(t *testing.T, encoded []byte, key string) bool {
 	_, ok := fields[key]
 
 	return ok
+}
+
+func TestWithTotal_ShouldRenderZeroRatherThanOmittingIt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		page Page[string]
+		want string
+	}{
+		{
+			name: "should omit total when no handler counted",
+			page: NewPage([]string{"a"}, NextPage{}),
+			want: `{"items":["a"]}`,
+		},
+		{
+			name: "should render a zero total for a filter that matched nothing",
+			page: NewPage[string](nil, NextPage{}).WithTotal(0),
+			want: `{"items":[],"total":0}`,
+		},
+		{
+			name: "should render the whole collection's size, not the page's",
+			page: NewPage([]string{"a", "b"}, NextPage{Token: "t", URL: "/x?pageToken=t"}).WithTotal(7),
+			want: `{"items":["a","b"],"nextPageToken":"t","nextPageUrl":"/x?pageToken=t","total":7}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT
+			encoded, err := json.Marshal(tt.page)
+			require.NoError(t, err)
+
+			// ASSERT — zero must survive to the wire: weave reads total as its
+			// truncation defence, and an omitted field is "never counted", not
+			// "counted nothing".
+			assert.JSONEq(t, tt.want, string(encoded))
+		})
+	}
+}
+
+func TestWithTotal_ShouldNotAliasTheReceiver(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	original := NewPage([]string{"a"}, NextPage{})
+
+	// ACT
+	counted := original.WithTotal(1)
+
+	// ASSERT — the value receiver means the original is untouched, and the
+	// count is the copy's own rather than a pointer into a shared local.
+	assert.Nil(t, original.Total)
+	require.NotNil(t, counted.Total)
+	assert.Equal(t, 1, *counted.Total)
 }

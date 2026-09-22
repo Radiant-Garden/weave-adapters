@@ -10,7 +10,7 @@ Tested:
     - TestDemo_ShouldServeAnAuthenticatedListWithAnETag: the happy path, tagged.
     - TestDemo_ShouldAnswer304OnARepoll: the polling loop weave actually runs.
     - TestDemo_ShouldWalkEveryPageByToken: the token cursor reaches the last page and stops.
-    - TestDemo_ShouldWalkEveryPageByLink: the link cursor walks the same items, as weave pages.
+    - TestDemo_ShouldWalkEveryPageByLink: the link cursor walks the same items, as weave pages, and every page carries the collection's total.
     - TestDemo_ShouldRejectAnUnauthenticatedRequest: 401 problem+json correlated with its header.
     - TestDemo_ShouldAttributeTheRequestToTheAuthenticatedCaller: the token label reaches API-010's caller.subject.
     - TestDemo_ShouldNotLetAConditionalRequestBypassAuth: a valid ETag replayed without credentials is 401, not 304.
@@ -269,6 +269,11 @@ func TestDemo_ShouldWalkEveryPageByLink(t *testing.T) {
 			seen = append(seen, item.ID)
 		}
 
+		// Every page of a walk names the whole collection's size, which is what
+		// lets weave compare what it walked against what there was.
+		require.NotNil(t, page.Total)
+		assert.Equal(t, len(demoItems), *page.Total)
+
 		if page.NextPageURL == "" {
 			break
 		}
@@ -352,7 +357,7 @@ func TestDemo_ShouldServeAnEmptyCollectionAsAnArray(t *testing.T) {
 	// ASSERT — items is [] and never null; a client iterates it directly, and
 	// the empty listing carries no cursor to follow.
 	require.Equal(t, http.StatusOK, recorder.Code)
-	assert.JSONEq(t, `{"items":[]}`, recorder.Body.String())
+	assert.JSONEq(t, `{"items":[],"total":0}`, recorder.Body.String())
 }
 
 func TestDemo_ShouldEndTheWalkForACursorPastTheEnd(t *testing.T) {

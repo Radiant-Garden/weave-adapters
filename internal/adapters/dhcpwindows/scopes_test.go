@@ -11,7 +11,7 @@ Pending:
 Tested:
 
 	ScopesHandler.ServeHTTP / list
-	  - TestScopes_ShouldServeAPageOfScopes: the envelope, its content type, and items always an array.
+	  - TestScopes_ShouldServeAPageOfScopes: the envelope, its content type, items always an array, and total — which this adapter always sends.
 	  - TestScopes_ShouldAnswer405ForAnUnsupportedMethodRatherThanServingAList: the default arm is a 405, never a silent list for a DELETE.
 	  - TestScopes_ShouldRenderAnEmptyCollectionAsAnArray: no scopes is [], never null.
 	  - TestScopes_ShouldWalkEveryScopeExactlyOnceViaNextPageUrl: the link form weave follows, across a multi-page collection.
@@ -229,6 +229,7 @@ type page struct {
 	Items         []Scope `json:"items"`
 	NextPageToken string  `json:"nextPageToken"`
 	NextPageURL   string  `json:"nextPageUrl"`
+	Total         *int    `json:"total"`
 }
 
 // getScopes drives the handler for a query string and returns the raw response.
@@ -281,6 +282,9 @@ func TestScopes_ShouldServeAPageOfScopes(t *testing.T) {
 	assert.Len(t, decoded.Items, 2)
 	assert.Empty(t, decoded.NextPageToken, "both scopes fit on one page")
 
+	require.NotNil(t, decoded.Total, "this adapter holds the whole collection, so it always counts")
+	assert.Equal(t, 2, *decoded.Total)
+
 	// Every served scope carries an identity — the milestone's central
 	// invariant, asserted on what actually reaches the wire rather than on the
 	// struct the handler was handed.
@@ -324,7 +328,7 @@ func TestScopes_ShouldRenderAnEmptyCollectionAsAnArray(t *testing.T) {
 	// an empty slice just as happily, so decoding first would hide exactly the
 	// difference this asserts. Clients iterate items directly.
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `{"items":[]}`, rec.Body.String())
+	assert.JSONEq(t, `{"items":[],"total":0}`, rec.Body.String())
 }
 
 func TestScopes_ShouldWalkEveryScopeExactlyOnceViaNextPageUrl(t *testing.T) {
@@ -466,10 +470,19 @@ func TestScopes_ShouldFilterByScopeId(t *testing.T) {
 	require.Len(t, decoded.Items, 1)
 	assert.Equal(t, "10.0.2.0", decoded.Items[0].ScopeID)
 
+	// The total counts what the filter matched, not what the backend returned:
+	// weave compares it against the items it walked, and the unfiltered three
+	// would read as a truncated walk every cycle.
+	require.NotNil(t, decoded.Total)
+	assert.Equal(t, 1, *decoded.Total)
+
 	// A filter matching nothing is an empty page, not a 404: the collection
-	// exists, and it has no member on that subnet.
+	// exists, and it has no member on that subnet — and it says so as a zero,
+	// not by leaving the count out.
 	empty := getPage(t, handler, "scopeId=10.0.9.0")
 	assert.Empty(t, empty.Items)
+	require.NotNil(t, empty.Total)
+	assert.Equal(t, 0, *empty.Total)
 }
 
 func TestScopes_ShouldNotMutateTheCollectionWhenFiltering(t *testing.T) {

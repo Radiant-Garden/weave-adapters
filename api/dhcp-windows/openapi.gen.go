@@ -262,6 +262,12 @@ type ScopeList struct {
 	//
 	// Example: /api/v1/scopes?pageSize=50&pageToken=eyJ2IjoxLCJzIjoic2NvcGVzIn0
 	NextPageUrl string `json:"nextPageUrl,omitempty"`
+
+	// Total The number of scopes matching the request across every page. This adapter always sends it: the backend returns the whole collection in one call and the adapter filters and pages it in memory, so the count is exact and free. A `scopeId` filter that matched nothing sends 0.
+	// Optional in the shared envelope because not every adapter can count without a second backend call — a consumer must tolerate its absence elsewhere, and should take the maximum seen over a walk rather than trust any one page's value.
+	//
+	// Example: 137
+	Total int `json:"total,omitempty"`
 }
 
 // ScopeState Whether the scope is currently leasing addresses.

@@ -242,6 +242,21 @@ type Page[T any] struct {
 	// follow links rather than echo tokens. Absent on the last page, always
 	// alongside NextPageToken and never instead of it.
 	NextPageURL string `json:"nextPageUrl,omitempty"`
+	// Total is the number of items in the whole collection after filtering,
+	// across every page of this listing. Optional on the wire: an adapter that
+	// cannot count without a second backend call leaves it out, and one that
+	// has the full collection in hand sets it with WithTotal.
+	//
+	// A pointer rather than an int with omitempty, because zero is the most
+	// important value it can carry: a filter that matched nothing must say so
+	// as "total": 0, not by dropping the field and looking like an adapter
+	// that never counted.
+	//
+	// It need not be snapshot-consistent across pages. weave takes the
+	// maximum over one walk, so a count that grows mid-walk reads as "the
+	// walk was incomplete" — the safe direction — and one that shrinks is
+	// simply superseded.
+	Total *int `json:"total,omitempty"`
 }
 
 // NewPage builds the envelope. Pass a zero NextPage for the last page:
@@ -249,6 +264,16 @@ type Page[T any] struct {
 //	pagination.NewPage(items, pages.Next(r.URL, lastKey))
 func NewPage[T any](items []T, next NextPage) Page[T] {
 	return Page[T]{Items: items, NextPageToken: next.Token, NextPageURL: next.URL}
+}
+
+// WithTotal records the size of the whole filtered collection on the page. A
+// handler that already holds every item — one that lists, filters and then
+// pages in memory — calls it with the post-filter length; a handler that would
+// need another backend round trip to count does not call it at all.
+func (p Page[T]) WithTotal(total int) Page[T] {
+	p.Total = &total
+
+	return p
 }
 
 // MarshalJSON renders the envelope, normalizing a nil Items to an empty array
