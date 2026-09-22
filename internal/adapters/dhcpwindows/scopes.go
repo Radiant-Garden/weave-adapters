@@ -129,7 +129,16 @@ func (h *ScopesHandler) create(w http.ResponseWriter, r *http.Request) error {
 
 	scope, err := h.backend.CreateScope(r.Context(), in)
 	if err != nil {
-		return createProblemFor(err, in)
+		// A conflict points at the scope that is already there. The header is
+		// set before the error is returned, and that is the whole of what this
+		// handler does with the response: apierror.WriteError still owns the
+		// status, the body and the BACKEND-105 line, and a header set ahead of
+		// WriteHeader is the one thing net/http lets a handler leave behind.
+		if conflict, ok := errors.AsType[*scopeExistsError](err); ok {
+			w.Header().Set("Location", ScopesPath+"/"+conflict.existing.WadaptID)
+		}
+
+		return createProblemFor(err)
 	}
 
 	// Location must resolve, which is why the item route ships with this one.
@@ -149,24 +158,18 @@ func (h *ScopesHandler) create(w http.ResponseWriter, r *http.Request) error {
 // A conflict is a 409 rather than a backend code: the backend answered
 // correctly and the answer was "that subnet is taken". It is also the one
 // failure here a client can act on without an operator — the fix is to update
-// the scope that is already there.
-//
-// The subnet is recomputed from the input rather than parsed out of the error
-// string. Both name the same value — CreateScope derives it the same way — and
-// deriving it is the option that cannot break when someone rewords the error.
-func createProblemFor(err error, in ScopeInput) error {
-	if errors.Is(err, ErrScopeExists) {
-		// The subnet reaches the client, because "a scope already exists" with
-		// no subnet named is unactionable when a client is reconciling several.
-		// It is the client's own input echoed back, not internal state.
-		//
-		// The error is ignored: reaching a conflict means CreateScope already
-		// derived this successfully, so it cannot fail here. An empty string
-		// would render a detail naming no subnet, which is the pre-existing
-		// behaviour rather than a new failure.
-		scopeID, _ := in.ScopeID()
-
-		return apierror.New(adapterevents.BACKEND105, "scopeId", scopeID).WithCause(err)
+// the scope that is already there, which the detail and the Location name.
+func createProblemFor(err error) error {
+	if conflict, ok := errors.AsType[*scopeExistsError](err); ok {
+		// The existing scope's subnet and identity reach the client, because
+		// "a scope already exists" with nothing named is unactionable when a
+		// client is reconciling several — and with overlap, the existing subnet
+		// need not be the one requested. Both are backend-served values the
+		// client could read from GET /api/v1/scopes, not internal state.
+		return apierror.New(adapterevents.BACKEND105,
+			"scopeId", conflict.existing.ScopeID,
+			"wadaptId", conflict.existing.WadaptID,
+		).WithCause(err)
 	}
 
 	return problemFor(err, opCreateScope)

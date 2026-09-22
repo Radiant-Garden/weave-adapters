@@ -395,24 +395,25 @@
 - **Level:** DEBUG
 - **Category / Topic:** BACKEND / Calls
 - **External source:** yes
-- **Description:** Emitted when a create names a subnet that already holds a scope. Windows permits exactly one scope per subnet, so this is the backend answering correctly rather than failing — there is no BACKEND-101 line for it.
+- **Description:** Emitted when a create names a subnet that overlaps an existing scope — the same subnet, or one inside or around it. Windows permits exactly one scope per subnet and none that intersect, so this is the backend answering correctly rather than failing — there is no BACKEND-101 line for it.
 
 | Field | Type | Required | Description |
 |---|---|---|---|
 | subject | string | false | Authenticated caller, empty when auth is disabled. |
 | role | string | false | Caller role, empty when auth is disabled. |
 | remoteAddr | string | true | Client address. |
-| scopeId | string | true | The subnet that already holds a scope. |
+| scopeId | string | true | The subnet of the existing scope the request overlaps. |
+| wadaptId | string | true | The existing scope's identity, which the response's Location header also carries. |
 
 **Client response**
 
 - **Problem type:** `weave-adapters:conflict`
-- **Detail:** A scope already exists on subnet {{scopeId}}.
+- **Detail:** A scope already exists on subnet {{scopeId}}, which overlaps the requested range; it is {{wadaptId}}.
 - **Impacts:** `request_rejected`
 
-**Example:** `{"eventId":"BACKEND-105","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"POST","path":"/api/v1/scopes"},"data":{"scopeId":"10.0.30.0"}}`
+**Example:** `{"eventId":"BACKEND-105","caller":{"subject":"weave-prod","role":"service","remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"POST","path":"/api/v1/scopes"},"data":{"scopeId":"10.0.30.0","wadaptId":"8k2f5r9tc0hqm"}}`
 
-**Troubleshooting:** Not a fault. The caller asked for a subnet that is already scoped; the answer is to update the existing scope rather than create a second one, which Windows would refuse anyway. GET /api/v1/scopes?scopeId=<subnet> returns the one that is there. Note the pre-create check is not atomic: two creates racing on one subnet can both pass it, and the loser surfaces as a backend error rather than as this event.
+**Troubleshooting:** Not a fault. The caller asked for a subnet that overlaps one already scoped; the answer is to update the existing scope rather than create a second one, which Windows would refuse anyway. The response's Location header and wadaptId name it. Note the pre-create check is not atomic: two creates racing on one subnet can both pass it, and the loser surfaces as a backend error rather than as this event.
 
 ## DHCP-001 — dhcp adapter identity resolved
 

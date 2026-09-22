@@ -239,7 +239,7 @@ type ScopeCreate struct {
 	// State Whether the scope leases addresses immediately. Defaults to `Active` when omitted, matching the cmdlet.
 	State ScopeState `json:"state,omitempty"`
 
-	// SubnetMask The subnet mask. With `startRange` this determines the subnet, and therefore the scope's identity — two creates whose ranges fall in one subnet are the same scope and the second is a 409.
+	// SubnetMask The subnet mask. With `startRange` this determines the subnet, and therefore the scope's identity — two creates whose ranges fall in one subnet are the same scope and the second is a 409, as is a subnet that overlaps an existing one.
 	// Must be contiguous and leave at least two host addresses: /31 and /32 describe no leasable range and are a `400`, not a scope.
 	//
 	// Example: 255.255.255.0

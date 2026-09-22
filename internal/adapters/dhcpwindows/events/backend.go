@@ -51,7 +51,7 @@ const (
 	BACKEND103 coreevents.EventID = "BACKEND-103"
 	// BACKEND104 backs a 502 when the backend answered unusably.
 	BACKEND104 coreevents.EventID = "BACKEND-104"
-	// BACKEND105 backs a 409 when the subnet already holds a scope.
+	// BACKEND105 backs a 409 when the requested subnet overlaps an existing scope.
 	BACKEND105 coreevents.EventID = "BACKEND-105"
 )
 
@@ -117,29 +117,35 @@ func init() {
 		ID:              BACKEND105,
 		Level:           slog.LevelDebug,
 		MessageTemplate: "request rejected: scope already exists",
-		Description: "Emitted when a create names a subnet that already holds a scope. Windows permits exactly " +
-			"one scope per subnet, so this is the backend answering correctly rather than failing — there is no " +
-			"BACKEND-101 line for it.",
+		Description: "Emitted when a create names a subnet that overlaps an existing scope — the same subnet, or " +
+			"one inside or around it. Windows permits exactly one scope per subnet and none that intersect, so " +
+			"this is the backend answering correctly rather than failing — there is no BACKEND-101 line for it.",
 		Category:       coreevents.CategoryBackend.String(),
 		Topic:          "Calls",
 		ExternalSource: true,
 
-		ResponseCode:   coreevents.CodeConflict,
-		ResponseDetail: "A scope already exists on subnet {{scopeId}}.",
-		Impacts:        []coreevents.Impact{coreevents.ImpactRequestRejected},
+		ResponseCode: coreevents.CodeConflict,
+		ResponseDetail: "A scope already exists on subnet {{scopeId}}, which overlaps the requested range; " +
+			"it is {{wadaptId}}.",
+		Impacts: []coreevents.Impact{coreevents.ImpactRequestRejected},
 
-		Fields: append(coreevents.CallerFields(), coreevents.FieldDef{
-			Name: "scopeId", Type: "string", Required: true,
-			Description: "The subnet that already holds a scope.",
-		}),
+		Fields: append(coreevents.CallerFields(),
+			coreevents.FieldDef{
+				Name: "scopeId", Type: "string", Required: true,
+				Description: "The subnet of the existing scope the request overlaps.",
+			},
+			coreevents.FieldDef{
+				Name: "wadaptId", Type: "string", Required: true,
+				Description: "The existing scope's identity, which the response's Location header also carries.",
+			}),
 		Example: `{"eventId":"BACKEND-105","caller":{"subject":"weave-prod","role":"service",` +
 			`"remoteAddr":"192.0.2.1:1234"},"request":{"requestId":"9f1c…","method":"POST",` +
-			`"path":"/api/v1/scopes"},"data":{"scopeId":"10.0.30.0"}}`,
-		Troubleshooting: "Not a fault. The caller asked for a subnet that is already scoped; the answer is to " +
-			"update the existing scope rather than create a second one, which Windows would refuse anyway. " +
-			"GET /api/v1/scopes?scopeId=<subnet> returns the one that is there. Note the pre-create check is not " +
-			"atomic: two creates racing on one subnet can both pass it, and the loser surfaces as a backend error " +
-			"rather than as this event.",
+			`"path":"/api/v1/scopes"},"data":{"scopeId":"10.0.30.0","wadaptId":"8k2f5r9tc0hqm"}}`,
+		Troubleshooting: "Not a fault. The caller asked for a subnet that overlaps one already scoped; the answer " +
+			"is to update the existing scope rather than create a second one, which Windows would refuse anyway. " +
+			"The response's Location header and wadaptId name it. Note the pre-create check is not atomic: two " +
+			"creates racing on one subnet can both pass it, and the loser surfaces as a backend error rather " +
+			"than as this event.",
 	})
 
 	for _, r := range responseEvents {

@@ -263,6 +263,12 @@ reference (Microsoft Learn), **not yet host-verified** — confirm at M3b sign-o
   between resolve and remove surfaces as a `502`; weave retries it and the next
   DELETE resolves as `404`, which weave counts as success. Mirrors the non-atomic
   create conflict check.
+- **A create checks overlap, not just equality, before it runs.** The script
+  already holds the full scope list; the predicate is "any existing block
+  intersects the requested one", so a `/25` inside an existing `/24` is the
+  `409` it would otherwise have been a `502` for. The overlapping scope is
+  emitted after the marker, and the `409` carries its `wadaptId` in `Location`
+  and in the detail.
 
 Two behaviours to close at sign-off, both consequences of the range facts above:
 a one-sided range in a single `Set` call must fail (proving the both-or-neither

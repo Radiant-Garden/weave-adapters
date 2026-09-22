@@ -230,8 +230,9 @@ const (
 	envScopeType        = "WADAPT_SCOPE_TYPE"
 )
 
-// conflictMarker is what createScopeScript prints when the subnet already holds
-// a scope.
+// conflictMarker is the first line createScopeScript prints when the requested
+// subnet overlaps a scope that already exists. The existing scope follows it,
+// through scopeProjection, so the 409 can point at the resource to update.
 //
 // A marker rather than the shell's own error text, because that text is
 // localized — the WS2022 host this was developed against answers in German, so
@@ -245,12 +246,21 @@ const conflictMarker = "WADAPT_CONFLICT"
 // into both scripts and only the listing copy was pinned by a test; sharing the
 // constant is what makes it structural.
 //
-// The subnet is checked BEFORE the create rather than classified afterwards.
-// Windows permits one scope per subnet, and that is the one failure a client
-// can act on, so it earns a clean answer instead of an error message parsed out
-// of a localized exception. Everything else keeps its own message and becomes a
-// backend error, because inventing categories for failures nobody has observed
-// is how a taxonomy fills with entries that never match.
+// Overlap is checked BEFORE the create rather than classified afterwards.
+// Windows permits one scope per subnet and refuses a subnet that intersects an
+// existing one — 10.0.0.128/25 inside 10.0.0.0/24 as much as a second /24 — and
+// that is the one failure a client can act on, so it earns a clean answer
+// instead of an error message parsed out of a localized exception. An exact
+// ScopeId match was the first cut; the full scope list is in hand either way,
+// so the wider predicate costs no second call. Everything else keeps its own
+// message and becomes a backend error, because inventing categories for
+// failures nobody has observed is how a taxonomy fills with entries that never
+// match.
+//
+// Two blocks intersect exactly when each one's network address is at or below
+// the other's broadcast address. The arithmetic is done on [uint64] rather
+// than with -shl, because PowerShell 5.1's shift operators widen [uint32]
+// operands in ways worth not depending on.
 //
 // ⚠️ That check is not atomic. Two creates racing on one subnet can both pass
 // it, and the loser then fails inside Add-DhcpServerv4Scope and surfaces as a
@@ -273,10 +283,23 @@ const conflictMarker = "WADAPT_CONFLICT"
 // adapter chose one for you". A scope created without a lease duration gets the
 // server's default, and that default stays the server's to change.
 const createScopeScript = scriptPreamble + serverParams + `
-$existing = @(Get-DhcpServerv4Scope @params |
-  Where-Object { $_.ScopeId.IPAddressToString -eq $env:` + envScopeID + ` })
+function ToUInt32([System.Net.IPAddress]$ip) {
+  $b = $ip.GetAddressBytes()
+  return [uint64]$b[0] * 16777216 + [uint64]$b[1] * 65536 + [uint64]$b[2] * 256 + [uint64]$b[3]
+}
+
+$newNet   = ToUInt32 ([System.Net.IPAddress]::Parse($env:` + envScopeID + `))
+$newBcast = $newNet + (4294967295 - (ToUInt32 ([System.Net.IPAddress]::Parse($env:` + envScopeSubnetMask + `))))
+
+$existing = @(Get-DhcpServerv4Scope @params | Where-Object {
+  $net   = ToUInt32 $_.ScopeId
+  $bcast = $net + (4294967295 - (ToUInt32 $_.SubnetMask))
+  ($newNet -le $bcast) -and ($net -le $newBcast)
+})
 if ($existing.Count -gt 0) {
   Write-Output '` + conflictMarker + `'
+  $conflict = $existing[0] |` + scopeProjection +
+	`  ConvertTo-Json -InputObject @($conflict) -Depth 5
   exit 0
 }
 

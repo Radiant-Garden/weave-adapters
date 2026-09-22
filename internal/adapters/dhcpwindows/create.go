@@ -14,12 +14,28 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 )
 
-// ErrScopeExists reports that the subnet already holds a scope.
+// ErrScopeExists reports that the requested subnet overlaps a scope that already
+// exists.
 //
 // Distinct from the other backend failures because it is the one a client can
-// act on: Windows permits exactly one scope per subnet, so the answer is not
-// "retry" but "you meant to update the scope that is already there".
-var ErrScopeExists = errors.New("a scope already exists on that subnet")
+// act on: Windows permits exactly one scope per subnet and none that intersect,
+// so the answer is not "retry" but "you meant to update the scope that is
+// already there".
+var ErrScopeExists = errors.New("a scope already exists on an overlapping subnet")
+
+// scopeExistsError carries the existing scope, so the handler can point the
+// 409 at it. It wraps ErrScopeExists, so errors.Is still recognises it.
+type scopeExistsError struct {
+	requested string
+	existing  Scope
+}
+
+func (e *scopeExistsError) Error() string {
+	return fmt.Sprintf("%s: %s overlaps scope %s (%s)",
+		ErrScopeExists, e.requested, e.existing.ScopeID, e.existing.WadaptID)
+}
+
+func (e *scopeExistsError) Unwrap() error { return ErrScopeExists }
 
 // ScopeInput is what a caller supplies to create a scope.
 //
@@ -299,8 +315,8 @@ func (c *Client) CreateScope(ctx context.Context, in ScopeInput) (Scope, error) 
 		return Scope{}, c.backendError(ctx, opCreateScope, runError(err, stderr))
 	}
 
-	// The subnet was already taken. Checked before the create rather than
-	// classified from a localized error message; see createScopeScript.
+	// The subnet overlaps an existing scope. Checked before the create rather
+	// than classified from a localized error message; see createScopeScript.
 	//
 	// Returned without backendError, deliberately: that emits BACKEND-101 at
 	// ERROR with "dhcp backend call failed", and nothing failed here. The shell
@@ -309,25 +325,26 @@ func (c *Client) CreateScope(ctx context.Context, in ScopeInput) (Scope, error) 
 	// error would alert an operator to ordinary client behaviour and point them
 	// at a DHCP server that is working. BACKEND-105 is the only line this
 	// deserves, and the handler emits it with the response.
-	if isConflict(stdout) {
-		return Scope{}, fmt.Errorf("%w: %s", ErrScopeExists, scopeID)
-	}
+	//
+	// The existing scope rides along so the 409 can carry its Location. That
+	// payload is held to the same standard as a created one: if it does not
+	// decode to exactly one identifiable scope, the script did something other
+	// than what it was written to do, and that is a backend fault.
+	if payload, ok := conflictPayload(stdout); ok {
+		existing, err := c.decodeOne(payload, stderr)
+		if err != nil {
+			return Scope{}, c.backendError(ctx, opCreateScope, err)
+		}
 
-	scopes, err := decodeScopes(stdout, stderr)
-	if err != nil {
-		return Scope{}, c.backendError(ctx, opCreateScope, err)
+		return Scope{}, &scopeExistsError{requested: scopeID, existing: existing}
 	}
 
 	// -PassThru returns exactly the scope it created. Anything else means the
 	// script did something other than what it was written to do, and serving a
 	// scope from an unexpected payload would report a create that may not have
 	// happened as described.
-	if len(scopes) != 1 {
-		return Scope{}, c.backendError(ctx, opCreateScope,
-			fmt.Errorf("%w: create returned %d scopes, expected 1", ErrBackendMalformed, len(scopes)))
-	}
-
-	if err := c.identify(scopes); err != nil {
+	created, err := c.decodeOne(stdout, stderr)
+	if err != nil {
 		return Scope{}, c.backendError(ctx, opCreateScope, err)
 	}
 
@@ -335,18 +352,18 @@ func (c *Client) CreateScope(ctx context.Context, in ScopeInput) (Scope, error) 
 	// path the drift ledger exists for rather than an afterthought on it: a
 	// scope created on a subnet that held one before derives the same wadaptID
 	// as its predecessor, and this is where that becomes observable.
-	c.reportDrift(ctx, scopes)
+	c.reportDrift(ctx, []Scope{created})
 
 	// The scope Windows created must be the subnet the client described. If it
 	// is not, the identity we are about to hand back in a Location header would
 	// name a different resource.
-	if scopes[0].ScopeID != scopeID {
+	if created.ScopeID != scopeID {
 		return Scope{}, c.backendError(ctx, opCreateScope,
 			fmt.Errorf("%w: asked for scope %s, backend created %s",
-				ErrBackendMalformed, scopeID, scopes[0].ScopeID))
+				ErrBackendMalformed, scopeID, created.ScopeID))
 	}
 
-	return scopes[0], nil
+	return created, nil
 }
 
 // env renders the input as the script's parameters.
@@ -383,13 +400,38 @@ func (in ScopeInput) env(scopeID string) map[string]string {
 	return env
 }
 
-// isConflict reports whether the script signalled the subnet was taken.
+// conflictPayload reports whether the script signalled that the subnet was
+// taken, and returns what followed the marker: the existing scope's projection.
 //
-// An exact match on the trimmed output, not a substring search: a scope
-// description containing the marker text would otherwise turn a successful
-// create into a reported conflict.
-func isConflict(stdout []byte) bool {
-	return strings.TrimSpace(string(stdout)) == conflictMarker
+// The marker must be the whole first line, not merely present: a successful
+// create's output opens with the JSON array, so a scope description containing
+// the marker text cannot turn a create into a reported conflict.
+func conflictPayload(stdout []byte) ([]byte, bool) {
+	first, rest, _ := strings.Cut(strings.TrimLeft(string(stdout), " \t\r\n"), "\n")
+	if strings.TrimSpace(first) != conflictMarker {
+		return nil, false
+	}
+
+	return []byte(rest), true
+}
+
+// decodeOne decodes a payload the script promised would hold exactly one scope,
+// and derives its identity.
+func (c *Client) decodeOne(payload, stderr []byte) (Scope, error) {
+	scopes, err := decodeScopes(payload, stderr)
+	if err != nil {
+		return Scope{}, err
+	}
+
+	if len(scopes) != 1 {
+		return Scope{}, fmt.Errorf("%w: expected exactly 1 scope, got %d", ErrBackendMalformed, len(scopes))
+	}
+
+	if err := c.identify(scopes); err != nil {
+		return Scope{}, err
+	}
+
+	return scopes[0], nil
 }
 
 // parseIPv4 parses an IPv4 address, rejecting anything else — including an

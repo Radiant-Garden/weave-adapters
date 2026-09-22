@@ -27,7 +27,8 @@ Tested:
 	Client.CreateScope
 	  - TestCreateScope_ShouldReturnTheCreatedScopeWithItsIdentity: decode, derive, serve.
 	  - TestCreateScope_ShouldNeverInterpolateInputIntoTheScript: the injection property.
-	  - TestCreateScope_ShouldReportAConflictWhenTheSubnetIsTaken: the typed error a 409 renders from.
+	  - TestCreateScope_ShouldReportAConflictWhenTheSubnetIsTaken: the typed error a 409 renders from, carrying the existing scope with its identity so the response can point at it.
+	  - TestCreateScope_ShouldTreatAMalformedConflictPayloadAsABackendFault: a marker followed by anything but one scope is the script misbehaving, not a conflict.
 	  - TestCreateScope_ShouldRejectAScopeOnADifferentSubnetThanAsked: the Location-would-lie guard.
 	  - TestCreateScope_ShouldRejectAPayloadThatIsNotExactlyOneScope: -PassThru returns one or the script misbehaved.
 	  - TestCreateScope_ShouldNotMistakeAScopeDescriptionForTheConflictMarker: the marker is matched exactly, so a payload containing it is still a create.
@@ -64,6 +65,7 @@ package dhcpwindows
 
 import (
 	"context"
+	"errors"
 	"math"
 	"strings"
 	"testing"
@@ -463,17 +465,63 @@ func TestCreateScope_ShouldNeverInterpolateInputIntoTheScript(t *testing.T) {
 func TestCreateScope_ShouldReportAConflictWhenTheSubnetIsTaken(t *testing.T) {
 	t.Parallel()
 
-	// ARRANGE — the marker the script prints when it finds the subnet occupied.
-	client := clientWith(&fakeRunner{stdout: []byte(conflictMarker + "\r\n")})
+	// ARRANGE — the marker the script prints when it finds the subnet occupied,
+	// followed by the occupant. The request is a /25 inside the existing /24,
+	// so the existing subnet is not the one asked for — the reason the error
+	// carries the scope rather than echoing the request.
+	client := clientWith(&fakeRunner{stdout: []byte(conflictMarker + "\r\n" + createdScopeJSON)})
+
+	in := validInput()
+	in.StartRange = "10.0.30.130"
+	in.EndRange = "10.0.30.250"
+	in.SubnetMask = "255.255.255.128"
 
 	// ACT
-	_, err := client.CreateScope(context.Background(), validInput())
+	_, err := client.CreateScope(context.Background(), in)
 
 	// ASSERT — a typed error, so the handler can answer 409 rather than a
-	// generic backend failure. The subnet is named, because "which one" is the
-	// first thing anyone asks.
+	// generic backend failure, carrying the existing scope with the identity
+	// the 409's Location needs.
 	require.ErrorIs(t, err, ErrScopeExists)
+
+	conflict, ok := errors.AsType[*scopeExistsError](err)
+	require.True(t, ok)
+	assert.Equal(t, "10.0.30.128", conflict.requested)
+	assert.Equal(t, "10.0.30.0", conflict.existing.ScopeID)
+	assert.NotEmpty(t, conflict.existing.WadaptID, "the existing scope is identified, or Location has nothing to name")
 	assert.Contains(t, err.Error(), "10.0.30.0")
+}
+
+func TestCreateScope_ShouldTreatAMalformedConflictPayloadAsABackendFault(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		stdout string
+	}{
+		{name: "nothing after the marker", stdout: conflictMarker + "\r\n"},
+		{name: "two scopes after the marker", stdout: conflictMarker + "\n[" +
+			strings.TrimSuffix(strings.TrimPrefix(createdScopeJSON, "["), "]") + "," +
+			strings.TrimSuffix(strings.TrimPrefix(createdScopeJSON, "["), "]") + "]"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ARRANGE
+			client := clientWith(&fakeRunner{stdout: []byte(tt.stdout)})
+
+			// ACT
+			_, err := client.CreateScope(context.Background(), validInput())
+
+			// ASSERT — the script promised one scope after the marker and did not
+			// deliver, which is the script misbehaving: a backend fault, not a
+			// conflict the client should go and update.
+			require.ErrorIs(t, err, ErrBackendMalformed)
+			assert.NotErrorIs(t, err, ErrScopeExists)
+		})
+	}
 }
 
 func TestCreateScope_ShouldNotMistakeAScopeDescriptionForTheConflictMarker(t *testing.T) {

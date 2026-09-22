@@ -39,7 +39,9 @@ Tested:
 	    agrees with Windows, the optional values survive exec.Cmd.Env, and the
 	    Location a client is handed actually resolves.
 	  - TestE2E_ShouldRejectADuplicateSubnetWithAConflict: 409 rather than a
-	    backend error, which means the conflict marker survived a real round trip.
+	    backend error, which means the conflict marker survived a real round trip;
+	    the same for a /25 inside the existing /24, which proves the overlap
+	    arithmetic in a real PowerShell 5.1; and Location points at the occupant.
 	  - TestE2E_ShouldRejectABadCreateBeforeReachingTheBackend: four rejections,
 	    and nothing reached the DHCP server.
 	  - TestE2E_ShouldUpdateAScopeWithoutMovingItsIdentity: PATCH changes the
@@ -809,21 +811,39 @@ func TestE2E_ShouldRejectADuplicateSubnetWithAConflict(t *testing.T) {
 	a.requireHealthyBackend(t)
 	reserveTestSubnet(t)
 
-	status, _, _ := a.createScope(t, createBody("e2e-first"))
+	status, _, created := a.createScope(t, createBody("e2e-first"))
 	require.Equal(t, http.StatusCreated, status)
 
+	existing := created.Get("Location")
+	require.NotEmpty(t, existing)
+
 	// ACT — the same subnet again. Windows permits exactly one scope per subnet.
-	status, _, _ = a.createScope(t, createBody("e2e-second"))
+	status, _, header := a.createScope(t, createBody("e2e-second"))
 
 	// ASSERT — 409, which means the pre-create check saw the existing scope and
-	// the conflict marker survived a round trip through a real shell. That
-	// marker match is exact rather than a substring search, so a projection
-	// change on the host would surface here as a 502 instead.
+	// the conflict marker survived a round trip through a real shell. The
+	// marker must be the whole first line, so a projection change on the host
+	// would surface here as a 502 instead.
 	require.Equal(t, http.StatusConflict, status,
 		"a duplicate subnet must be a conflict, not a backend error")
+	assert.Equal(t, existing, header.Get("Location"),
+		"the 409 points at the scope that is already there")
 
-	// The subnet is still the one scope it was, so the failed create changed
-	// nothing on the server.
+	// ACT — a /25 inside that /24: a different scopeId, so the old exact-match
+	// check let it through to Add-DhcpServerv4Scope, which threw, and the client
+	// read a 502. The overlap arithmetic runs in the shell, so only a real
+	// PowerShell 5.1 can prove it.
+	status, _, header = a.createScope(t,
+		`{"name":"e2e-inner","startRange":"198.51.100.130","endRange":"198.51.100.200",`+
+			`"subnetMask":"255.255.255.128"}`)
+
+	// ASSERT
+	require.Equal(t, http.StatusConflict, status,
+		"a subnet inside an existing one must be a conflict, not a backend error")
+	assert.Equal(t, existing, header.Get("Location"))
+
+	// The subnet is still the one scope it was, so neither failed create
+	// changed anything on the server.
 	page := a.listScopes(t, "scopeId="+testSubnet)
 	assert.Len(t, page.Items, 1)
 	assert.Equal(t, "e2e-first", page.Items[0].Name)
