@@ -127,6 +127,16 @@ adapter itself is broken and sends an operator to the wrong logs. The duplicate
 case is genuinely ours — the backend answered correctly and our derivation
 collided — so it keeps the `500`.
 
+**The `502` class is wider than "unreachable", by design.** Any non-zero exit
+lands there, including a cmdlet throwing on an argument, because the honest
+alternative is classifying localized exception text. weave reads a `502` as
+recoverable and retries it every cycle, so a client mistake that reaches the
+shell becomes a permanent false outage. The remedy is to shrink the class from
+the front: every addressing mistake the adapter can judge without the backend —
+a non-contiguous mask, a `/31` or `/32`, an end on the network or broadcast
+address, a range spanning two subnets, an out-of-range lease — is a `400`
+naming the field, and never spawns a shell.
+
 **Raw stderr never reaches a response.** It can name internal hosts and paths.
 It reaches the operator through `BACKEND-101`, which carries the shell's own
 message; the client gets the curated `ResponseDetail`.
@@ -235,7 +245,10 @@ reference (Microsoft Learn), **not yet host-verified** — confirm at M3b sign-o
   Windows Server 2016/2019/2022/2025), so a range change is a real `Set`, not a
   delete-and-recreate. The identity guard still holds: the adapter rejects any
   resize whose `networkOf(start/end, mask)` would leave the existing subnet, so
-  the derived `wadaptID` never moves.
+  the derived `wadaptID` never moves. It also rejects an end resting on the
+  subnet's network or broadcast address, as create does — inside the subnet,
+  but a range Windows throws on, which the adapter could only report as a
+  `502`.
 - **`-StartRange` and `-EndRange` are mandatory together.** The `WithRange` set
   requires both; passing one alone binds it with a missing mandatory parameter
   and fails. So the update script splats the two as a pair or not at all — Go

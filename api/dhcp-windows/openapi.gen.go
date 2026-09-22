@@ -216,7 +216,7 @@ type ScopeCreate struct {
 	// Example: created by weave
 	Description string `json:"description,omitempty"`
 
-	// EndRange Last address the scope may lease. Must be at or after `startRange` and inside the same subnet.
+	// EndRange Last address the scope may lease. Must be at or after `startRange`, inside the same subnet, and not the subnet's broadcast address.
 	//
 	// Example: 10.0.30.250
 	EndRange string `json:"endRange"`
@@ -231,7 +231,7 @@ type ScopeCreate struct {
 	// Example: lab-vlan-30
 	Name string `json:"name"`
 
-	// StartRange First address the scope may lease.
+	// StartRange First address the scope may lease. Must not be the subnet's network address.
 	//
 	// Example: 10.0.30.10
 	StartRange string `json:"startRange"`
@@ -240,6 +240,7 @@ type ScopeCreate struct {
 	State ScopeState `json:"state,omitempty"`
 
 	// SubnetMask The subnet mask. With `startRange` this determines the subnet, and therefore the scope's identity — two creates whose ranges fall in one subnet are the same scope and the second is a 409.
+	// Must be contiguous and leave at least two host addresses: /31 and /32 describe no leasable range and are a `400`, not a scope.
 	//
 	// Example: 255.255.255.0
 	SubnetMask string `json:"subnetMask"`
@@ -287,7 +288,7 @@ type ScopeUpdate struct {
 	// Example: reconciled by weave
 	Description string `json:"description,omitempty"`
 
-	// EndRange New last address of the pool. Must be at or after `startRange`, inside the existing subnet, and sent together with `startRange`.
+	// EndRange New last address of the pool. Must be at or after `startRange`, inside the existing subnet, not its broadcast address, and sent together with `startRange`.
 	//
 	// Example: 10.0.30.250
 	EndRange string `json:"endRange,omitempty"`
@@ -302,7 +303,7 @@ type ScopeUpdate struct {
 	// Example: lab-vlan-30
 	Name string `json:"name,omitempty"`
 
-	// StartRange New first address of the pool. Must stay inside the existing subnet, and be sent together with `endRange`.
+	// StartRange New first address of the pool. Must stay inside the existing subnet, not be its network address, and be sent together with `endRange`.
 	//
 	// Example: 10.0.30.10
 	StartRange string `json:"startRange,omitempty"`

@@ -182,10 +182,12 @@ func (in ScopeUpdate) env(existing Scope) map[string]string {
 // leave the existing subnet, and therefore change the scope's identity.
 //
 // Effective (provided-or-existing) endpoints, so a one-sided resize is judged
-// against the side left unchanged. Returns no fields when no range change was
-// requested. The second return is a backend fault reserved for an existing mask
-// that will not parse — which decode should have caught, but which cannot be a
-// client error if it ever reaches here.
+// against the side left unchanged, and also names an end that lands on the
+// subnet's network or broadcast address — inside the subnet, but not leasable.
+// Returns no fields when no range change was requested. The second return is a
+// backend fault reserved for an existing mask that will not parse — which
+// decode should have caught, but which cannot be a client error if it ever
+// reaches here.
 func (in ScopeUpdate) rangeFieldsOutsideSubnet(existing Scope) ([]string, error) {
 	if in.StartRange == nil && in.EndRange == nil {
 		return nil, nil
@@ -199,6 +201,9 @@ func (in ScopeUpdate) rangeFieldsOutsideSubnet(existing Scope) ([]string, error)
 
 	var offending []string
 
+	ends := make([]netip.Addr, 0, 2)
+	parsed := true
+
 	for _, f := range []struct{ name, value string }{
 		{name: "startRange", value: effective(in.StartRange, existing.StartRange)},
 		{name: "endRange", value: effective(in.EndRange, existing.EndRange)},
@@ -206,6 +211,23 @@ func (in ScopeUpdate) rangeFieldsOutsideSubnet(existing Scope) ([]string, error)
 		addr, ok := parseIPv4(f.value)
 		if !ok || networkOf(addr, mask) != existing.ScopeID {
 			offending = append(offending, f.name)
+		}
+
+		parsed = parsed && ok
+
+		ends = append(ends, addr)
+	}
+
+	// An end on the subnet's network or broadcast address is inside the subnet
+	// and still not a range Windows will set — the same rule create enforces,
+	// reported through the same error so the handler renders one 400 for both.
+	// Only judged on parsed ends: an unparseable one is already named above,
+	// and the zero Addr has no bytes to mask.
+	if parsed {
+		for _, e := range checkLeasableEnds(ends[0], ends[1], mask) {
+			if !slices.Contains(offending, e.Field) {
+				offending = append(offending, e.Field)
+			}
 		}
 	}
 

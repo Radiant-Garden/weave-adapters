@@ -215,7 +215,7 @@ func updateProblemFor(err error, wadaptID string) error {
 		fieldErrors := make([]apierror.FieldError, 0, len(rangeErr.fields))
 		for _, field := range rangeErr.fields {
 			fieldErrors = append(fieldErrors,
-				fieldError(field, "must keep the scope inside its existing subnet "+rangeErr.scopeID))
+				fieldError(field, "must be a leasable address inside the scope's existing subnet "+rangeErr.scopeID))
 		}
 
 		return apierror.Validation(fieldErrors...)

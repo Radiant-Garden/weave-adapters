@@ -23,6 +23,8 @@ Tested:
 	ScopeUpdate.rangeFieldsOutsideSubnet
 	  - TestScopeUpdate_ShouldAcceptAResizeWithinTheSubnet: a range that stays in the subnet moves no identity.
 	  - TestScopeUpdate_ShouldNameARangeFieldThatLeavesTheSubnet: the offending end is reported, using the existing counterpart for the side left out.
+	  - TestScopeUpdate_ShouldNameARangeEndOnTheNetworkOrBroadcastAddress: inside the subnet and still not leasable — the same rule create enforces, through the same error.
+	  - TestScopeUpdate_ShouldNotJudgeLeasabilityOfAnUnparseableEnd: a value that does not parse is named once, for not parsing, and the leasable check does not touch the zero address.
 
 Tested elsewhere:
 
@@ -229,6 +231,62 @@ func TestScopeUpdate_ShouldAcceptAResizeWithinTheSubnet(t *testing.T) {
 	// ASSERT — nothing leaves the subnet, so the identity does not move.
 	require.NoError(t, err)
 	assert.Empty(t, offending)
+}
+
+func TestScopeUpdate_ShouldNameARangeEndOnTheNetworkOrBroadcastAddress(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		in   ScopeUpdate
+		want []string
+	}{
+		{
+			name: "start on the network address",
+			in:   ScopeUpdate{StartRange: new("10.0.30.0")},
+			want: []string{"startRange"},
+		},
+		{
+			name: "end on the broadcast address",
+			in:   ScopeUpdate{EndRange: new("10.0.30.255")},
+			want: []string{"endRange"},
+		},
+		{
+			name: "both at once",
+			in:   ScopeUpdate{StartRange: new("10.0.30.0"), EndRange: new("10.0.30.255")},
+			want: []string{"startRange", "endRange"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT
+			offending, err := tt.in.rangeFieldsOutsideSubnet(existingScope())
+
+			// ASSERT — named, so the resize is a 400 rather than the 502 the
+			// thrown Set-DhcpServerv4Scope exception produced.
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, offending)
+		})
+	}
+}
+
+func TestScopeUpdate_ShouldNotJudgeLeasabilityOfAnUnparseableEnd(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — an end Validate would already have refused, reaching the subnet
+	// check anyway. The zero netip.Addr has no bytes to mask, so this is the
+	// path that must skip the leasable check rather than panic in it.
+	in := ScopeUpdate{EndRange: new("not-an-address")}
+
+	// ACT
+	offending, err := in.rangeFieldsOutsideSubnet(existingScope())
+
+	// ASSERT — named exactly once.
+	require.NoError(t, err)
+	assert.Equal(t, []string{"endRange"}, offending)
 }
 
 func TestScopeUpdate_ShouldNameARangeFieldThatLeavesTheSubnet(t *testing.T) {

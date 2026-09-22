@@ -17,10 +17,12 @@ import (
 var ErrScopeNotFound = errors.New("no scope with that wadaptID")
 
 // ErrRangeOutsideSubnet reports that a requested range change would move the
-// pool out of the scope's subnet, and so would change the derived identity. The
-// handler renders it as a field validation failure rather than a backend error,
-// because it is the client's input to fix.
-var ErrRangeOutsideSubnet = errors.New("range would leave the scope's subnet")
+// pool out of the scope's subnet, and so would change the derived identity — or
+// would rest an end on the subnet's network or broadcast address, which stays
+// inside the subnet and is still not a range Windows will set. The handler
+// renders it as a field validation failure rather than a backend error, because
+// it is the client's input to fix.
+var ErrRangeOutsideSubnet = errors.New("range would leave the scope's leasable subnet")
 
 // rangeOutsideSubnetError carries which range fields left the subnet, so the
 // handler can render a field error against the ones the caller actually got
@@ -32,7 +34,7 @@ type rangeOutsideSubnetError struct {
 }
 
 func (e *rangeOutsideSubnetError) Error() string {
-	return fmt.Sprintf("%s: %s would leave subnet %s",
+	return fmt.Sprintf("%s: %s not leasable in subnet %s",
 		ErrRangeOutsideSubnet, strings.Join(e.fields, ", "), e.scopeID)
 }
 

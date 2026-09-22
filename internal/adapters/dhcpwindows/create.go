@@ -175,6 +175,14 @@ func (in ScopeInput) validateAddressing() []apierror.FieldError {
 		errs = append(errs, fieldError("subnetMask",
 			"must be a contiguous subnet mask, e.g. 255.255.255.0"))
 		maskOK = false
+	case !hasHostAddresses(mask):
+		// /31 and /32 are contiguous and describe no leasable address: the
+		// network and broadcast addresses are all there is. Add-DhcpServerv4Scope
+		// throws on them, the shell exits non-zero, and the client was told the
+		// backend was unreachable — the same false outage the lease bound closes.
+		errs = append(errs, fieldError("subnetMask",
+			"must leave at least two host addresses; /31 and /32 describe no leasable range"))
+		maskOK = false
 	}
 
 	if !startOK || !endOK {
@@ -185,12 +193,38 @@ func (in ScopeInput) validateAddressing() []apierror.FieldError {
 		errs = append(errs, fieldError("endRange", "must not be before startRange"))
 	}
 
+	if !maskOK {
+		return errs
+	}
+
 	// Both ends must be in the subnet the mask defines, or the scope Windows
 	// creates would not be the scope the client described — and its identity
 	// derives from that subnet.
-	if maskOK && networkOf(start, mask) != networkOf(end, mask) {
+	if networkOf(start, mask) != networkOf(end, mask) {
 		errs = append(errs, fieldError("endRange",
 			"must be in the same subnet as startRange under subnetMask"))
+	}
+
+	// The subnet's own two addresses are not leasable, and a range touching
+	// either is the other addressing mistake Windows reports late, as a thrown
+	// exception the adapter could only classify as a backend failure.
+	errs = append(errs, checkLeasableEnds(start, end, mask)...)
+
+	return errs
+}
+
+// checkLeasableEnds names whichever range end sits on the subnet's network or
+// broadcast address. The rule is the same on create and on resize, so both
+// validators call it.
+func checkLeasableEnds(start, end, mask netip.Addr) []apierror.FieldError {
+	var errs []apierror.FieldError
+
+	if start == networkAddr(start, mask) {
+		errs = append(errs, fieldError("startRange", "must not be the subnet's network address"))
+	}
+
+	if end == broadcastAddr(end, mask) {
+		errs = append(errs, fieldError("endRange", "must not be the subnet's broadcast address"))
 	}
 
 	return errs
@@ -370,8 +404,14 @@ func parseIPv4(s string) (netip.Addr, bool) {
 	return addr, true
 }
 
-// networkOf returns the network address of addr under mask, as a string.
+// networkOf returns the network address of addr under mask, as a string — the
+// form scopeId takes everywhere the adapter compares one.
 func networkOf(addr, mask netip.Addr) string {
+	return networkAddr(addr, mask).String()
+}
+
+// networkAddr returns the network address of addr under mask.
+func networkAddr(addr, mask netip.Addr) netip.Addr {
 	a, m := addr.As4(), mask.As4()
 
 	var network [4]byte
@@ -379,7 +419,30 @@ func networkOf(addr, mask netip.Addr) string {
 		network[i] = a[i] & m[i]
 	}
 
-	return netip.AddrFrom4(network).String()
+	return netip.AddrFrom4(network)
+}
+
+// broadcastAddr returns the directed broadcast address of addr's subnet under
+// mask: the network address with every host bit set.
+func broadcastAddr(addr, mask netip.Addr) netip.Addr {
+	a, m := addr.As4(), mask.As4()
+
+	var broadcast [4]byte
+	for i := range broadcast {
+		broadcast[i] = a[i] | ^m[i]
+	}
+
+	return netip.AddrFrom4(broadcast)
+}
+
+// hasHostAddresses reports whether a contiguous mask leaves any address that is
+// neither the network nor the broadcast address — i.e. at least two host bits,
+// /30 or wider. A /31 has exactly the two, a /32 has one address that is both.
+func hasHostAddresses(mask netip.Addr) bool {
+	b := mask.As4()
+	value := uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+
+	return ^value >= 3
 }
 
 // isContiguousMask reports whether mask is a run of ones followed by a run of

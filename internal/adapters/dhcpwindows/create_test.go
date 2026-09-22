@@ -16,8 +16,9 @@ Tested:
 
 	ScopeInput.Validate
 	  - TestValidate_ShouldAcceptAWellFormedInput: the happy path reports nothing, including a non-ASCII name.
-	  - TestValidate_ShouldAcceptTheContiguousMaskEdges: /30, /31 and /32 are contiguous and accepted — the boundary isContiguousMask is likeliest to misjudge.
-	  - TestValidate_ShouldRejectEachMalformedField: every rule, one case each — including the int32 lease bound and control-character rejection that keep a client mistake from reading as a 502.
+	  - TestValidate_ShouldAcceptTheTightestLeasableMask: /30 is the boundary — contiguous, and the narrowest mask that leaves a host address.
+	  - TestValidate_ShouldRejectMasksWithNoHostAddresses: /31 and /32 are contiguous and still no scope; Windows threw on them and the client read a 502.
+	  - TestValidate_ShouldRejectEachMalformedField: every rule, one case each — including the int32 lease bound, the network/broadcast ends, and control-character rejection that keep a client mistake from reading as a 502.
 	  - TestValidate_ShouldReportEveryFailureAtOnce: a wholly invalid input names all its fields.
 	ScopeInput.ScopeID
 	  - TestScopeID_ShouldBeTheNetworkAddress: start masked by subnetMask, for several masks.
@@ -132,22 +133,36 @@ func TestValidate_ShouldAcceptAWellFormedInput(t *testing.T) {
 	assert.Empty(t, in.Validate())
 }
 
-func TestValidate_ShouldAcceptTheContiguousMaskEdges(t *testing.T) {
+func TestValidate_ShouldAcceptTheTightestLeasableMask(t *testing.T) {
 	t.Parallel()
 
-	// ARRANGE — the tightest masks are the ones isContiguousMask is most likely
-	// to get wrong: /31 and /32 are all-ones runs with a zero or one-bit tail,
-	// exactly the boundary the power-of-two trick turns on. They pass through
-	// validateAddressing untested elsewhere, and Windows rejects a bad mask late
-	// with a message about a cmdlet parameter, so accepting the good ones here is
-	// what keeps that rejection from ever being reached for a legitimate input.
+	// ARRANGE — /30 is where two rules meet: it is the all-ones run with the
+	// shortest zero tail that isContiguousMask accepts, and the narrowest mask
+	// that still leaves hasHostAddresses anything to lease. Its two host
+	// addresses are the whole range.
+	in := validInput()
+	in.SubnetMask = "255.255.255.252"
+	in.StartRange = "192.168.1.5"
+	in.EndRange = "192.168.1.6"
+
+	// ACT / ASSERT
+	assert.Empty(t, in.Validate())
+}
+
+func TestValidate_ShouldRejectMasksWithNoHostAddresses(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — both are contiguous, so the mask rule alone let them through to
+	// Add-DhcpServerv4Scope, which threw; the shell exited non-zero, and the
+	// client was told the backend was unreachable. Neither describes a range: a
+	// /31 is exactly the network and broadcast addresses, and a /32 is one
+	// address that is both.
 	tests := []struct {
 		name  string
 		mask  string
 		start string
 		end   string
 	}{
-		{name: "/30", mask: "255.255.255.252", start: "192.168.1.4", end: "192.168.1.6"},
 		{name: "/31", mask: "255.255.255.254", start: "192.168.1.4", end: "192.168.1.5"},
 		{name: "/32", mask: "255.255.255.255", start: "192.168.1.4", end: "192.168.1.4"},
 	}
@@ -162,8 +177,9 @@ func TestValidate_ShouldAcceptTheContiguousMaskEdges(t *testing.T) {
 			in.StartRange = tt.start
 			in.EndRange = tt.end
 
-			// ACT / ASSERT — a contiguous mask, however tight, is accepted.
-			assert.Empty(t, in.Validate(), "%s should be a valid contiguous mask", tt.mask)
+			// ACT / ASSERT — the mask is the field named, and only the mask:
+			// the ends are not judged against a subnet that has no host part.
+			assert.Equal(t, []string{"subnetMask"}, fieldNamesOf(t, in))
 		})
 	}
 }
@@ -230,6 +246,19 @@ func TestValidate_ShouldRejectEachMalformedField(t *testing.T) {
 			// described.
 			name:      "should reject an end in another subnet",
 			mutate:    func(in *ScopeInput) { in.EndRange = "10.0.31.10" },
+			wantField: "endRange",
+		},
+		{
+			// Inside the subnet, and the one address in it that is nobody's to
+			// lease. Windows reports it as a thrown exception, which the adapter
+			// could only classify as a backend failure.
+			name:      "should reject a start on the network address",
+			mutate:    func(in *ScopeInput) { in.StartRange = "10.0.30.0" },
+			wantField: "startRange",
+		},
+		{
+			name:      "should reject an end on the broadcast address",
+			mutate:    func(in *ScopeInput) { in.EndRange = "10.0.30.255" },
 			wantField: "endRange",
 		},
 		{
