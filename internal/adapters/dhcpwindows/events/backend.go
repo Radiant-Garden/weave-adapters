@@ -189,18 +189,19 @@ var responseEvents = []struct {
 }
 
 // registerCollisionEvents registers BACKEND-105 and BACKEND-106, the two
-// answers to a create that collides with a scope already there.
+// answers to a create that collides with a scope already there. Registered
+// apart from responseEvents because they differ in the two fields that table
+// holds constant.
 func registerCollisionEvents() {
-	//
-	// Level: the others are Warn because they record that a request could not be
-	// served. This one records that it was served correctly with a "no" — an
-	// ordinary 4xx, which the guideline's severity table puts at Debug alongside
-	// API-900/902/903.
+	// Level: the responseEvents are Warn because they record that a request
+	// could not be served. These record that it was served correctly with a
+	// "no" — an ordinary 4xx, which the guideline's severity table puts at
+	// Debug alongside API-900/902/903.
 	//
 	// Description: the others point at a BACKEND-101 line carrying the cause.
 	// There is none here, and saying so matters — an operator who goes looking
 	// for the companion ERROR line would find nothing and conclude the log had
-	// dropped it. The create path returns a conflict without emitting
+	// dropped it. The create path returns a collision without emitting
 	// BACKEND-101, because nothing failed.
 	coreevents.Register(&coreevents.Event{
 		ID:              BACKEND105,
