@@ -40,8 +40,8 @@ Tested:
 	    Location a client is handed actually resolves.
 	  - TestE2E_ShouldRejectADuplicateSubnetWithAConflict: 409 rather than a
 	    backend error, which means the conflict marker survived a real round trip;
-	    the same for a /25 inside the existing /24, which proves the overlap
-	    arithmetic in a real PowerShell 5.1; and Location points at the occupant.
+	    422 for a /25 inside the existing /24, which proves the overlap arithmetic
+	    in a real PowerShell 5.1; and Location points at the occupant on both.
 	  - TestE2E_ShouldRejectABadCreateBeforeReachingTheBackend: four rejections,
 	    and nothing reached the DHCP server.
 	  - TestE2E_ShouldUpdateAScopeWithoutMovingItsIdentity: PATCH changes the
@@ -832,14 +832,16 @@ func TestE2E_ShouldRejectADuplicateSubnetWithAConflict(t *testing.T) {
 	// ACT — a /25 inside that /24: a different scopeId, so the old exact-match
 	// check let it through to Add-DhcpServerv4Scope, which threw, and the client
 	// read a 502. The overlap arithmetic runs in the shell, so only a real
-	// PowerShell 5.1 can prove it.
+	// PowerShell 5.1 can prove it. A 422 rather than a 409: the occupant is
+	// keyed by a subnet the caller did not ask for, so weave parks it rather
+	// than re-sending it every cycle.
 	status, _, header = a.createScope(t,
 		`{"name":"e2e-inner","startRange":"198.51.100.130","endRange":"198.51.100.200",`+
 			`"subnetMask":"255.255.255.128"}`)
 
 	// ASSERT
-	require.Equal(t, http.StatusConflict, status,
-		"a subnet inside an existing one must be a conflict, not a backend error")
+	require.Equal(t, http.StatusUnprocessableEntity, status,
+		"a subnet inside an existing one must be unprocessable, not a backend error or a retryable conflict")
 	assert.Equal(t, existing, header.Get("Location"))
 
 	// The subnet is still the one scope it was, so neither failed create

@@ -82,6 +82,9 @@ func TestTaxonomy_ShouldMapEachCodeToItsHTTPStatus(t *testing.T) {
 	}{
 		{name: "should map not found to 404", code: events.CodeNotFound, wantStatus: http.StatusNotFound, wantTitle: "Not found"},
 		{name: "should map internal to 500", code: events.CodeInternal, wantStatus: http.StatusInternalServerError, wantTitle: "Internal server error"},
+		// The split weave's classifier reads: 409 is retried, 422 is parked.
+		{name: "should map conflict to 409", code: events.CodeConflict, wantStatus: http.StatusConflict, wantTitle: "Conflict"},
+		{name: "should map unprocessable to 422", code: events.CodeUnprocessable, wantStatus: http.StatusUnprocessableEntity, wantTitle: "Unprocessable"},
 	}
 
 	for _, tt := range tests {

@@ -239,7 +239,7 @@ type ScopeCreate struct {
 	// State Whether the scope leases addresses immediately. Defaults to `Active` when omitted, matching the cmdlet.
 	State ScopeState `json:"state,omitempty"`
 
-	// SubnetMask The subnet mask. With `startRange` this determines the subnet, and therefore the scope's identity — two creates whose ranges fall in one subnet are the same scope and the second is a 409, as is a subnet that overlaps an existing one.
+	// SubnetMask The subnet mask. With `startRange` this determines the subnet, and therefore the scope's identity — two creates whose ranges fall in one subnet are the same scope and the second is a 409; a subnet that overlaps an existing one without being it is a 422.
 	// Must be contiguous and leave at least two host addresses: /31 and /32 describe no leasable range and are a `400`, not a scope.
 	//
 	// Example: 255.255.255.0
@@ -350,6 +350,9 @@ type PayloadTooLarge = externalRef0.Problem
 
 // Unauthorized An RFC 9457 problem detail. Returned with Content-Type application/problem+json for every client-facing error, including the 401 and 404/405 produced by middleware rather than by a handler.
 type Unauthorized = externalRef0.Problem
+
+// Unprocessable An RFC 9457 problem detail. Returned with Content-Type application/problem+json for every client-facing error, including the 401 and 404/405 produced by middleware rather than by a handler.
+type Unprocessable = externalRef0.Problem
 
 // UnsupportedMediaType An RFC 9457 problem detail. Returned with Content-Type application/problem+json for every client-facing error, including the 401 and 404/405 produced by middleware rather than by a handler.
 type UnsupportedMediaType = externalRef0.Problem

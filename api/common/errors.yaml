@@ -115,7 +115,10 @@ components:
         payload-too-large and unsupported-media-type are request-body
         rejections, raised before a body is decoded and so before any handler
         sees it. conflict is raised by a handler that found the resource it was
-        asked to create already there.
+        asked to create already there under the same key, so a consumer can
+        rediscover and adopt it; unprocessable is the collision it cannot —
+        a well-formed request the backend's current state can never accept as
+        sent, which wants an operator rather than a retry.
       enum:
         - weave-adapters:validation-failed
         - weave-adapters:unauthorized
@@ -125,6 +128,7 @@ components:
         - weave-adapters:payload-too-large
         - weave-adapters:unsupported-media-type
         - weave-adapters:conflict
+        - weave-adapters:unprocessable
         - weave-adapters:backend-unavailable
         - weave-adapters:backend-timeout
         - weave-adapters:backend-error

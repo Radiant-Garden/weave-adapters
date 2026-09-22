@@ -14,6 +14,7 @@ const (
 	WeaveAdaptersNotFound             ProblemType = "weave-adapters:not-found"
 	WeaveAdaptersPayloadTooLarge      ProblemType = "weave-adapters:payload-too-large"
 	WeaveAdaptersUnauthorized         ProblemType = "weave-adapters:unauthorized"
+	WeaveAdaptersUnprocessable        ProblemType = "weave-adapters:unprocessable"
 	WeaveAdaptersUnsupportedMediaType ProblemType = "weave-adapters:unsupported-media-type"
 	WeaveAdaptersValidationFailed     ProblemType = "weave-adapters:validation-failed"
 )
@@ -38,6 +39,8 @@ func (e ProblemType) Valid() bool {
 	case WeaveAdaptersPayloadTooLarge:
 		return true
 	case WeaveAdaptersUnauthorized:
+		return true
+	case WeaveAdaptersUnprocessable:
 		return true
 	case WeaveAdaptersUnsupportedMediaType:
 		return true
@@ -105,5 +108,5 @@ type Problem struct {
 
 // ProblemType The problem types this version of core defines. An adapter may add its own, but never a second error shape.
 // Entries exist only for codes something actually returns. The backend codes are live: an adapter maps its backend”'s failures onto them, so a client sees backend-unavailable or backend-error with a 502 and backend-timeout with a 504 rather than one indistinguishable 500. The rest of the taxonomy in 02-shared-core.md (precondition-failed) still arrives with the code that emits it.
-// payload-too-large and unsupported-media-type are request-body rejections, raised before a body is decoded and so before any handler sees it. conflict is raised by a handler that found the resource it was asked to create already there.
+// payload-too-large and unsupported-media-type are request-body rejections, raised before a body is decoded and so before any handler sees it. conflict is raised by a handler that found the resource it was asked to create already there under the same key, so a consumer can rediscover and adopt it; unprocessable is the collision it cannot — a well-formed request the backend's current state can never accept as sent, which wants an operator rather than a retry.
 type ProblemType string

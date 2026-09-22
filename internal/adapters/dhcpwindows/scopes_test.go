@@ -34,7 +34,8 @@ Tested:
 	  - TestCreate_ShouldPointLocationAtTheItemRoute: Location names the wadaptId, never the scopeId — the item route is keyed by identity.
 	  - TestCreate_ShouldPassTheDecodedInputToTheBackend: the optional fields survive JSON, which is what ScopeInput's wire tags exist for.
 	  - TestCreate_ShouldRejectAnInvalidInputBeforeTouchingTheBackend: 400 with every failure at once, and zero backend calls.
-	  - TestCreate_ShouldAnswer409WhenTheSubnetIsTaken: a conflict, not a backend code; the existing scope's subnet reaches the client and Location points at it.
+	  - TestCreate_ShouldAnswer409WhenTheSubnetIsTaken: the same subnet is a conflict weave can adopt; the existing scope's subnet reaches the client and Location points at it.
+	  - TestCreate_ShouldAnswer422WhenTheSubnetOverlapsADifferentOne: an overlap is not adoptable, so it is parked rather than retried; both subnets reach the client and Location still points at the occupant.
 	  - TestCreate_ShouldMapBackendFailuresTheSameWayListDoes: the distinction weave reads survives the write path too.
 	  - TestCreate_ShouldRejectABodyThatIsNotJSON: proof the create path is wired through requestbody at all.
 	  - TestCreate_ShouldRejectAnAttemptToAssertTheDerivedIdentity: sending wadaptId is a 400, not a silent drop.
@@ -945,8 +946,41 @@ func TestCreate_ShouldRejectAnInvalidInputBeforeTouchingTheBackend(t *testing.T)
 func TestCreate_ShouldAnswer409WhenTheSubnetIsTaken(t *testing.T) {
 	t.Parallel()
 
-	// ARRANGE — the client reports the scope the request overlaps: a /24 the
-	// requested /25 sits inside, so the existing subnet is not the requested one.
+	// ARRANGE — the client reports the occupant of exactly the requested subnet.
+	backend := &fakeLister{createScope: func(ScopeInput) (Scope, error) {
+		return Scope{}, &scopeExistsError{
+			requested: "10.0.30.0",
+			existing:  Scope{ScopeID: "10.0.30.0", SubnetMask: "255.255.255.0", WadaptID: "existing0id"},
+		}
+	}}
+	handler := NewScopesHandler(backend, testPageConfig(50, 500), testMaxBodyBytes)
+
+	// ACT
+	rec := postScope(t, handler, mustJSON(t, validInput()))
+
+	// ASSERT — a conflict, not a backend failure. The backend answered
+	// correctly; the answer was "taken". And a 409 rather than a 422, because
+	// the occupant carries the key the caller asked for: weave's next cycle
+	// rediscovers it and adopts it without an operator.
+	require.Equal(t, http.StatusConflict, rec.Code)
+
+	var problem apierror.Problem
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &problem))
+	assert.Equal(t, "weave-adapters:conflict", problem.Type)
+
+	// The subnet and identity reach the client, or a caller reconciling
+	// several scopes cannot tell which one collided.
+	assert.Contains(t, problem.Detail, "10.0.30.0")
+	assert.Contains(t, problem.Detail, "existing0id")
+	assert.Equal(t, ScopesPath+"/existing0id", rec.Header().Get("Location"),
+		"the 409 points at the scope to update instead")
+}
+
+func TestCreate_ShouldAnswer422WhenTheSubnetOverlapsADifferentOne(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — a /24 the requested /25 sits inside: the occupant is keyed by
+	// a subnet the caller did not ask for.
 	backend := &fakeLister{createScope: func(ScopeInput) (Scope, error) {
 		return Scope{}, &scopeExistsError{
 			requested: "10.0.30.128",
@@ -962,21 +996,23 @@ func TestCreate_ShouldAnswer409WhenTheSubnetIsTaken(t *testing.T) {
 	// ACT
 	rec := postScope(t, handler, mustJSON(t, in))
 
-	// ASSERT — a conflict, not a backend failure. The backend answered
-	// correctly; the answer was "taken".
-	require.Equal(t, http.StatusConflict, rec.Code)
+	// ASSERT — 422, not 409. weave routes a 409 to "retry next cycle" on the
+	// premise that it will rediscover the occupant under the requested key;
+	// here it cannot, so a 409 was re-sent forever. A 422 parks the object as
+	// an error row an operator sees.
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 
 	var problem apierror.Problem
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &problem))
-	assert.Equal(t, "weave-adapters:conflict", problem.Type)
+	assert.Equal(t, "weave-adapters:unprocessable", problem.Type)
 
-	// The existing subnet and identity reach the client, or a caller
-	// reconciling several scopes cannot tell which one collided — and with
-	// overlap it is not necessarily the subnet it asked for.
+	// Both subnets reach the client: the one asked for, and the one that is
+	// in the way — an operator resolving this needs both.
+	assert.Contains(t, problem.Detail, "10.0.30.128")
 	assert.Contains(t, problem.Detail, "10.0.30.0")
 	assert.Contains(t, problem.Detail, "existing0id")
 	assert.Equal(t, ScopesPath+"/existing0id", rec.Header().Get("Location"),
-		"the 409 points at the scope to update instead")
+		"the occupant is still named, for the operator rather than the machine")
 }
 
 func TestCreate_ShouldMapBackendFailuresTheSameWayListDoes(t *testing.T) {

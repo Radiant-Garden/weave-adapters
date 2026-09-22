@@ -71,7 +71,18 @@ const (
 	CodeUnsupportedMediaType ResponseCode = "unsupported-media-type"
 	// CodeConflict — the resource cannot be created or changed as asked because
 	// it would collide with one that already exists (409).
+	//
+	// The 409/422 line is drawn by what weave does next, not by how the request
+	// looked. weave routes a 409 to its recoverable class on the premise that
+	// the next cycle's matcher rediscovers the occupant under the same natural
+	// key and adopts it. A collision where that premise holds is a 409; one
+	// where it cannot — the occupant keys differently — is CodeUnprocessable.
 	CodeConflict ResponseCode = "conflict"
+	// CodeUnprocessable — the request was well-formed and every field valid,
+	// but the backend's current state means it can never be applied as sent,
+	// and nothing the caller can rediscover resolves it (422). weave parks it
+	// for an operator rather than re-sending it every cycle.
+	CodeUnprocessable ResponseCode = "unprocessable"
 )
 
 // The backend codes. An adapter maps its backend's failures onto these; the

@@ -129,11 +129,12 @@ func (h *ScopesHandler) create(w http.ResponseWriter, r *http.Request) error {
 
 	scope, err := h.backend.CreateScope(r.Context(), in)
 	if err != nil {
-		// A conflict points at the scope that is already there. The header is
-		// set before the error is returned, and that is the whole of what this
-		// handler does with the response: apierror.WriteError still owns the
-		// status, the body and the BACKEND-105 line, and a header set ahead of
-		// WriteHeader is the one thing net/http lets a handler leave behind.
+		// A collision points at the scope that is already there, on the 409
+		// and the 422 alike. The header is set before the error is returned,
+		// and that is the whole of what this handler does with the response:
+		// apierror.WriteError still owns the status, the body and the
+		// BACKEND-105/106 line, and a header set ahead of WriteHeader is the
+		// one thing net/http lets a handler leave behind.
 		if conflict, ok := errors.AsType[*scopeExistsError](err); ok {
 			w.Header().Set("Location", ScopesPath+"/"+conflict.existing.WadaptID)
 		}
@@ -153,26 +154,42 @@ func (h *ScopesHandler) create(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// createProblemFor maps a create failure, which has one outcome list does not.
+// createProblemFor maps a create failure, which has two outcomes list does not.
 //
-// A conflict is a 409 rather than a backend code: the backend answered
-// correctly and the answer was "that subnet is taken". It is also the one
-// failure here a client can act on without an operator — the fix is to update
-// the scope that is already there, which the detail and the Location name.
+// Neither is a backend code: the backend answered correctly and the answer was
+// "that address space is taken". The split between them is drawn by what weave
+// does next, because its classifier reads the status and nothing else:
+//
+//   - The same subnet is a 409. The occupant carries exactly the key the caller
+//     asked for, so weave's next cycle rediscovers it and adopts it unattended.
+//     Recoverable, and correctly so.
+//   - Any other overlap is a 422. The occupant is keyed by a different subnet,
+//     so nothing weave can rediscover resolves it; a 409 here was re-sent every
+//     cycle for as long as the source range existed. A 422 parks it as an
+//     error row an operator sees.
+//
+// Both name the existing scope. "A scope already exists" with nothing named is
+// unactionable when a client is reconciling several, and on an overlap the
+// existing subnet is not the one requested. Both values are backend-served, the
+// same ones GET /api/v1/scopes returns — not internal state.
 func createProblemFor(err error) error {
-	if conflict, ok := errors.AsType[*scopeExistsError](err); ok {
-		// The existing scope's subnet and identity reach the client, because
-		// "a scope already exists" with nothing named is unactionable when a
-		// client is reconciling several — and with overlap, the existing subnet
-		// need not be the one requested. Both are backend-served values the
-		// client could read from GET /api/v1/scopes, not internal state.
+	conflict, ok := errors.AsType[*scopeExistsError](err)
+	if !ok {
+		return problemFor(err, opCreateScope)
+	}
+
+	if conflict.requested == conflict.existing.ScopeID {
 		return apierror.New(adapterevents.BACKEND105,
 			"scopeId", conflict.existing.ScopeID,
 			"wadaptId", conflict.existing.WadaptID,
 		).WithCause(err)
 	}
 
-	return problemFor(err, opCreateScope)
+	return apierror.New(adapterevents.BACKEND106,
+		"requestedScopeId", conflict.requested,
+		"scopeId", conflict.existing.ScopeID,
+		"wadaptId", conflict.existing.WadaptID,
+	).WithCause(err)
 }
 
 // list resolves the query, reads the backend, and writes one page.

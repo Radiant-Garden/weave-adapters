@@ -265,10 +265,16 @@ reference (Microsoft Learn), **not yet host-verified** — confirm at M3b sign-o
   create conflict check.
 - **A create checks overlap, not just equality, before it runs.** The script
   already holds the full scope list; the predicate is "any existing block
-  intersects the requested one", so a `/25` inside an existing `/24` is the
-  `409` it would otherwise have been a `502` for. The overlapping scope is
-  emitted after the marker, and the `409` carries its `wadaptId` in `Location`
-  and in the detail.
+  intersects the requested one", so a `/25` inside an existing `/24` no longer
+  reaches the cmdlet and becomes a `502`. The overlapping scope is emitted
+  after the marker, and the response carries its `wadaptId` in `Location` and
+  in the detail. Which response depends on what weave can do next, since its
+  classifier reads only the status: the **same** subnet is a `409`
+  (`BACKEND-105`), which weave retries because its next cycle rediscovers the
+  occupant under the requested key and adopts it; any **other** overlap is a
+  `422` (`BACKEND-106`), which weave parks as an error row for an operator —
+  a `409` there was re-sent every cycle for as long as the source range
+  existed, since nothing weave can rediscover is keyed by the requested subnet.
 
 Two behaviours to close at sign-off, both consequences of the range facts above:
 a one-sided range in a single `Set` call must fail (proving the both-or-neither
