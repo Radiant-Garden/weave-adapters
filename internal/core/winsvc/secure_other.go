@@ -6,5 +6,5 @@ package winsvc
 // is tested here; only the application of it needs the platform.
 func Secure([]Securable) ([]SecureResult, error) { return nil, ErrUnsupported }
 
-// ReadGrants always fails off Windows.
-func ReadGrants(string) ([]Grant, error) { return nil, ErrUnsupported }
+// ReadSecurity always fails off Windows.
+func ReadSecurity(string) (Security, error) { return Security{}, ErrUnsupported }

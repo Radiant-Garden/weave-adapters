@@ -16,9 +16,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -524,8 +526,8 @@ func buildAuth(ctx context.Context, cfg *config.Config) ([]middleware.Middleware
 	return []middleware.Middleware{auth.Bearer(verifier, httpserver.Unauthenticated)}, nil
 }
 
-// checkFileSecurity refuses to start when anything the service depends on
-// grants write to a principal outside the policy.
+// checkFileSecurity refuses to start when anything the service depends on is
+// not locked down.
 //
 // The list comes from winsvc.SecurablesFor — the same function the installer
 // secures from — so the set checked here cannot drift from the set that was
@@ -537,22 +539,92 @@ func buildAuth(ctx context.Context, cfg *config.Config) ([]middleware.Middleware
 // and trusts every hash in it, so anyone who can append one has a bearer
 // token the API accepts. The config file is next — a write there re-keys
 // every wadaptID on the host.
+//
+// It fails CLOSED. The earlier version logged an unreadable descriptor at
+// debug and carried on, which made the whole check optional to anyone who
+// could make one unreadable: an owner may deny READ_CONTROL to everyone, and
+// LocalSystem can read what it owns, so a descriptor this process cannot read
+// is a fact about the host rather than a quirk to shrug at. The one thing that
+// is genuinely not a refusal is an Optional target that is simply absent,
+// which the token store legitimately is before the first mint.
 func checkFileSecurity(values *config.Values, cfg *config.Config) error {
 	var errs []error
 
 	for _, target := range winsvc.SecurablesFor(values.ConfigPath(), cfg.AuthTokensFile, cfg.LogFile) {
-		grants, err := winsvc.ReadGrants(target.Path)
-		if err != nil {
-			// Unreadable is not the same as insecure, and refusing to start
-			// over a descriptor this process could not read would take the
-			// adapter down for a permissions quirk rather than a risk.
-			slog.Debug("could not read the access list", "path", target.Path, "error", err)
-
-			continue
-		}
-
-		errs = append(errs, winsvc.CheckGrants(target.Path, grants))
+		errs = append(errs, checkSecurable(target, winsvc.PolicyOwned))
 	}
 
+	// The binary and the directory it runs from, which SecurablesFor does not
+	// name because the lockdown never touches them — install checks the
+	// directory once and then nothing looks again, and the executable's own
+	// list was never checked at all. Both are the escalation the install-time
+	// check exists to prevent, and an ACL can be widened at any time after an
+	// install: replace the exe, and the SCM runs it as LocalSystem at the next
+	// start.
+	//
+	// PolicyNoForeignWrite, for the reason Install uses it: %ProgramFiles% is
+	// owned by TrustedInstaller and a subdirectory by whoever created it, so
+	// ownership is not something this can demand.
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locating this executable, which is what the service runs: %w", err)
+	}
+
+	errs = append(errs,
+		checkSecurable(winsvc.Securable{
+			Path: filepath.Dir(exe),
+			Kind: winsvc.SecurableDirectory,
+			Why:  "the directory the service runs from, where a write replaces what LocalSystem executes",
+		}, winsvc.PolicyNoForeignWrite),
+		checkSecurable(winsvc.Securable{
+			Path: exe,
+			Kind: winsvc.SecurableFile,
+			Why:  "the service executable itself",
+		}, winsvc.PolicyNoForeignWrite),
+	)
+
 	return errors.Join(errs...)
+}
+
+// checkSecurable reads one target back and judges it, treating an absent
+// optional target as nothing to judge.
+//
+// Lstat before the descriptor read does two jobs: it is how "absent" is told
+// apart from "unreadable" without decoding a Windows error number, and it is
+// the reparse-point refusal. Everything here names a path, and every call on a
+// name follows a junction — so without it the check would faithfully report on
+// whatever the junction points at while the service reads something else.
+func checkSecurable(target winsvc.Securable, policy winsvc.Policy) error {
+	if err := winsvc.CheckNotReparsePoint(target.Path); err != nil {
+		return fmt.Errorf("%s (%s): %w", target.Path, target.Why, err)
+	}
+
+	if _, err := os.Lstat(target.Path); err != nil {
+		if target.Optional && errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+
+		return fmt.Errorf("checking %s (%s): %w", target.Path, target.Why, err)
+	}
+
+	sec, err := winsvc.ReadSecurity(target.Path)
+
+	switch {
+	case errors.Is(err, winsvc.ErrUnsupported):
+		// Off Windows there is no security descriptor to read and no SCM to
+		// have started this, so there is nothing for this check to say. Named
+		// as its own case rather than folded into the failure below, because
+		// that is the distinction the old blanket "log at debug and carry on"
+		// lost: a platform with no answer and a descriptor somebody made
+		// unreadable are not the same fact.
+		return nil
+
+	case err != nil:
+		return fmt.Errorf("the access list of %s (%s) could not be read, so this service cannot tell "+
+			"whether it is safe to trust — an explicit deny for READ_CONTROL looks exactly like this. "+
+			"Run `weave-adapter-dhcp-windows service secure` from an elevated prompt: %w",
+			target.Path, target.Why, err)
+	}
+
+	return winsvc.CheckSecurity(target.Path, sec, policy)
 }

@@ -49,6 +49,19 @@ func (s directoryStep) Check(_ context.Context, p *Plan) (Verdict, error) {
 		return satisfied("the configuration is the operator's; its files are locked per-file at install"), nil
 	}
 
+	// Lstat, and before the Stat below, because Stat is what is being defended
+	// against: C:\ProgramData admits any authenticated account to create a
+	// subdirectory, so an unprivileged user who puts a junction at this path
+	// before setup runs has every step below act on a directory of their own —
+	// Stat follows it, the lockdown secures its target, and the config and the
+	// token store are written through it.
+	//
+	// An error rather than a Blocked verdict: no flag should clear this, and
+	// the operator has to look at what is there before anything else happens.
+	if err := winsvc.CheckNotReparsePoint(dir); err != nil {
+		return Verdict{}, err
+	}
+
 	info, err := os.Stat(dir)
 	if errors.Is(err, fs.ErrNotExist) {
 		return pending("create %s and lock it to SYSTEM and Administrators", dir), nil
@@ -62,14 +75,20 @@ func (s directoryStep) Check(_ context.Context, p *Plan) (Verdict, error) {
 		return Verdict{}, fmt.Errorf("%q exists and is not a directory", dir)
 	}
 
-	// CheckDir reports only write grants beyond the policy, which is the
-	// escalation that matters: a stray read entry on a directory is not worth
-	// a refusal nobody can satisfy.
-	if err := p.deps.CheckDir(dir); err != nil {
+	// PolicyOwned, because this is a directory this package creates and locks
+	// down itself: Apply sets the owner to Administrators along with the list,
+	// so anything the lockdown has touched answers it. A directory that does
+	// not is one somebody else created first — and this Check returning
+	// satisfied is what would skip Apply and leave their ownership in place,
+	// with the config and the token store written into it.
+	//
+	// Write grants and ownership only. A stray read entry on a directory is
+	// not worth a refusal nobody can satisfy.
+	if err := p.deps.CheckDir(dir, winsvc.PolicyOwned); err != nil {
 		return pending("re-lock %s: %s", dir, err), nil
 	}
 
-	return satisfied("%s exists and grants write to nobody outside the policy", dir), nil
+	return satisfied("%s exists, is owned inside the policy, and grants write to nobody outside it", dir), nil
 }
 
 func (s directoryStep) Apply(_ context.Context, p *Plan) error {

@@ -213,7 +213,7 @@ func okDeps() (Deps, *winsvctest.Manager, *winsvctest.Securer) {
 	return Deps{
 		NewManager: func() (winsvc.Manager, error) { return m, nil },
 		Secure:     sec.Secure,
-		CheckDir:   func(string) error { return nil },
+		CheckDir:   func(string, winsvc.Policy) error { return nil },
 		Get:        healthyGet(testComponent),
 	}, m, sec
 }
@@ -416,13 +416,17 @@ func TestInstall_ShouldCheckTheDirectoryTheServiceWillRunFrom(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE
-	var checked string
+	var (
+		checked       string
+		checkedPolicy winsvc.Policy
+	)
 
 	deps, _, _ := okDeps()
 	opts := testOptions(t, writeConfig(t, ""))
 
-	deps.CheckDir = func(dir string) error {
+	deps.CheckDir = func(dir string, policy winsvc.Policy) error {
 		checked = dir
+		checkedPolicy = policy
 
 		return nil
 	}
@@ -436,6 +440,14 @@ func TestInstall_ShouldCheckTheDirectoryTheServiceWillRunFrom(t *testing.T) {
 	// will launch the binary from.
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Dir(opts.BinPath), checked)
+
+	// And at the weaker policy, deliberately. This directory is checked and
+	// never repaired: %ProgramFiles% is owned by TrustedInstaller and a
+	// subdirectory of it by whichever elevated operator created it, so
+	// demanding SYSTEM or Administrators as the owner would refuse every
+	// correct install. Foreign write is the escalation, and it is what is
+	// refused.
+	assert.Equal(t, winsvc.PolicyNoForeignWrite, checkedPolicy)
 }
 
 func TestInstall_ShouldRefuseAWritableBinaryDirectory(t *testing.T) {
@@ -443,7 +455,7 @@ func TestInstall_ShouldRefuseAWritableBinaryDirectory(t *testing.T) {
 
 	// ARRANGE
 	deps, m, sec := okDeps()
-	deps.CheckDir = func(string) error {
+	deps.CheckDir = func(string, winsvc.Policy) error {
 		return fmt.Errorf("%w: C:\\gate\\bin grants write to [S-1-5-32-545]", winsvc.ErrNotSecured)
 	}
 
@@ -524,7 +536,7 @@ func TestInstall_ShouldReportEverySecuredTarget(t *testing.T) {
 	assert.Contains(t, paths, testTokenStore)
 	// The log DIRECTORY, not the log: the adapter creates the file at runtime
 	// and it inherits the directory's entries.
-	assert.Contains(t, paths, filepath.Dir(testLogFile))
+	assert.Contains(t, paths, testRoot)
 	assert.NotContains(t, paths, testLogFile)
 }
 

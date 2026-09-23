@@ -63,6 +63,25 @@ type Layout struct {
 func (l Layout) check() error {
 	var errs []error
 
+	// The two DIRECTORIES, checked before the paths below, because the failure
+	// is of a different kind: a lockdown applied to a volume root or a shared
+	// system directory replaces the inherited access list of everything under
+	// it. `--data-dir C:\ProgramData` is one missing path segment away from
+	// what an operator meant, needs only the Administrator they already have,
+	// and is not undone by re-running anything.
+	//
+	// BinDir is here too although nothing locks it down today: it is the other
+	// directory a caller names on the command line, and it is copied into.
+	for name, dir := range map[string]string{"Dir": l.Dir, "BinDir": l.BinDir} {
+		if dir != "" && winsvc.IsProtectedLocation(dir) {
+			errs = append(errs, fmt.Errorf(
+				"setup: Layout.%s is %q, which is a volume root or a shared system directory: this "+
+					"provisions into it and locks it to SYSTEM and Administrators, which would strip every "+
+					"other application's access to its own files. Name a directory of this adapter's own",
+				name, dir))
+		}
+	}
+
 	for name, path := range map[string]string{
 		"Dir":            l.Dir,
 		"ConfigPath":     l.ConfigPath,

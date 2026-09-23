@@ -7,7 +7,7 @@ Pending:
 
 Tested:
 
-	Secure / ReadGrants -> - TestSecureStubs_ShouldRefuseOffWindows
+	Secure / ReadSecurity -> - TestSecureStubs_ShouldRefuseOffWindows
 
 Tested elsewhere:
 
@@ -41,7 +41,7 @@ func TestSecureStubs_ShouldRefuseOffWindows(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsupported)
 	assert.Nil(t, results)
 
-	grants, err := ReadGrants(`C:\cfg\c.toml`)
+	sec, err := ReadSecurity(`C:\cfg\c.toml`)
 	require.ErrorIs(t, err, ErrUnsupported)
-	assert.Nil(t, grants)
+	assert.Zero(t, sec)
 }

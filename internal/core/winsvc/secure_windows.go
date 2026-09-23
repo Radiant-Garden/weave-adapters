@@ -49,6 +49,18 @@ func Secure(targets []Securable) ([]SecureResult, error) {
 // reports whether anything was applied — an absent optional target is skipped,
 // and the caller must be able to say so rather than claim it was secured.
 func secureOne(t Securable) (bool, error) {
+	// Before anything, including MkdirAll. A junction already at t.Path makes
+	// every call below act on its target: MkdirAll succeeds, Stat follows it,
+	// and SetNamedSecurityInfo locks down a directory somebody else owns and
+	// can re-point afterwards.
+	if err := CheckNotReparsePoint(t.Path); err != nil {
+		return false, err
+	}
+
+	if err := CheckSecurables([]Securable{t}); err != nil {
+		return false, err
+	}
+
 	if t.Kind == SecurableDirectory {
 		// Created rather than demanded. Install is elevated and holds the
 		// resolved path, and failing here would leave a REGISTERED service
@@ -103,12 +115,16 @@ func secureOne(t Securable) (bool, error) {
 	// would say it was secured. This is also the verifier the startup check
 	// uses, so there is one implementation of "is this locked down" rather
 	// than a checker that has to agree with an applier.
-	grants, err := ReadGrants(t.Path)
+	sec, err := ReadSecurity(t.Path)
 	if err != nil {
 		return false, fmt.Errorf("verifying %s: %w", t.Path, err)
 	}
 
-	if err := CheckGrants(t.Path, grants); err != nil {
+	// PolicyOwned: the call above set the owner as well as the list, so the
+	// read-back is what proves BOTH took. Verifying only the list would report
+	// success for an object whose owner was never replaced — and an owner
+	// holds WRITE_DAC implicitly, so it could undo the list at any moment.
+	if err := CheckSecurity(t.Path, sec, PolicyOwned); err != nil {
 		return false, fmt.Errorf("the lockdown did not take on %s (%s): %w", t.Path, t.Why, err)
 	}
 
@@ -163,17 +179,48 @@ func lockdownDACL(inherit Inheritance) (*windows.ACL, error) {
 	return acl, nil
 }
 
-// ReadGrants reads a path's access-control entries into the portable shape
-// CheckGrants understands.
+// ReadSecurity reads a path's owner and access-control entries into the
+// portable shape CheckSecurity understands.
+//
+// The owner is requested alongside the list, and that is the point: an owner
+// holds READ_CONTROL and WRITE_DAC implicitly, so an access list read without
+// one describes a lock whose key may be in somebody else's pocket. Asking for
+// both in one call is also what keeps them consistent — two calls could
+// straddle a change.
 //
 // Only allow entries are reported. A deny entry narrows access, and this check
 // is about who has more than the policy permits.
-func ReadGrants(path string) ([]Grant, error) {
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+func ReadSecurity(path string) (Security, error) {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
-		return nil, fmt.Errorf("reading the security descriptor of %q: %w", path, err)
+		return Security{}, fmt.Errorf("reading the security descriptor of %q: %w", path, err)
 	}
 
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return Security{}, fmt.Errorf("reading the owner of %q: %w", path, err)
+	}
+
+	// A descriptor may carry no owner at all, in which case the call above
+	// succeeds and hands back nil. Reported as an empty owner rather than
+	// papered over: CheckSecurity refuses that under PolicyOwned, which is the
+	// right answer for an object nobody is recorded as owning.
+	var ownerSID string
+	if owner != nil {
+		ownerSID = owner.String()
+	}
+
+	grants, err := readGrants(path, sd)
+	if err != nil {
+		return Security{}, err
+	}
+
+	return Security{Owner: ownerSID, Grants: grants}, nil
+}
+
+// readGrants pulls the allow entries out of a descriptor already read.
+func readGrants(path string, sd *windows.SECURITY_DESCRIPTOR) ([]Grant, error) {
 	dacl, _, err := sd.DACL()
 	if err != nil {
 		// The DACL-present bit is clear. Reported as wide open rather than as
@@ -230,7 +277,17 @@ func everyoneWrites() []Grant {
 // contents. Taking the whole set rather than GENERIC_WRITE alone matters:
 // FILE_WRITE_DATA on the token store is the escalation, and it is granted
 // independently of the generic bit.
+//
+// FILE_DELETE_CHILD is spelled out below because x/sys does not define it. On
+// a DIRECTORY it lets its holder delete or rename any child whatever the
+// child's own list says, so a principal holding only that on the data
+// directory can remove the token store or the executable — not a replacement,
+// but a clean denial of service, and it is granted independently of DELETE.
+// The bit has no meaning on a file, so including it costs nothing there.
+const fileDeleteChild = 0x00000040
+
 const writeMask = windows.GENERIC_ALL |
+	fileDeleteChild |
 	windows.GENERIC_WRITE |
 	windows.WRITE_OWNER |
 	windows.WRITE_DAC |

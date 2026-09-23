@@ -9,6 +9,8 @@ Tested:
     - TestDirectoryStep_ShouldLockADirectoryWhoseGrantsAreTooWide
     - TestDirectoryStep_ShouldLeaveAnOperatorsOwnLayoutAlone: a config elsewhere is locked per-file at install instead.
     - TestDirectoryStep_ShouldFailWhenTheTargetIsNotADirectory
+    - TestDirectoryStep_ShouldRefuseADirectoryThatRedirectsSomewhereElse
+    - TestDirectoryStep_ShouldAskWhetherTheDirectoryIsOwnedAsWellAsClosed
   configStep
     - TestConfigStep_ShouldWriteAConfigThatResolvesToWhatWasProvisioned
     - TestConfigStep_ShouldValidateBeforeWritingRatherThanAfter: a refused configuration leaves no file, and no fresh key on disk.
@@ -143,7 +145,7 @@ func TestDirectoryStep_ShouldLockADirectoryWhoseGrantsAreTooWide(t *testing.T) {
 	// ARRANGE — the directory exists, but somebody outside the policy can write.
 	opts := runOptions(t)
 	deps, _, _ := okDeps()
-	deps.CheckDir = func(string) error { return winsvc.ErrNotSecured }
+	deps.CheckDir = func(string, winsvc.Policy) error { return winsvc.ErrNotSecured }
 
 	// ACT
 	verdict, err := directoryStep{}.Check(context.Background(), planFor(opts, deps))
@@ -676,4 +678,67 @@ func TestTokenStep_ShouldSkipMintingWhenAuthIsDisabled(t *testing.T) {
 	assert.Equal(t, Satisfied, verdict.Condition)
 	assert.Contains(t, verdict.Detail, config.KeyDisableAuth)
 	assert.NoFileExists(t, store)
+}
+
+func TestDirectoryStep_ShouldRefuseADirectoryThatRedirectsSomewhereElse(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// The S1 shape: C:\ProgramData admits any authenticated account to create
+	// a subdirectory, so an unprivileged user who puts a junction at the
+	// provisioning path before setup runs has the whole sequence act on a
+	// directory of their own — os.Stat follows it, the lockdown secures its
+	// target, and the config with identity.namespaceKey in it is written
+	// through it. A symlink stands in here: os.Lstat reports a junction as
+	// ModeIrregular and a symlink as ModeSymlink, and the check refuses both.
+	opts := runOptions(t)
+	deps, _, sec := okDeps()
+
+	elsewhere := filepath.Join(t.TempDir(), "attacker")
+	require.NoError(t, os.MkdirAll(elsewhere, 0o700))
+	require.NoError(t, os.RemoveAll(opts.Layout.Dir))
+	require.NoError(t, os.Symlink(elsewhere, opts.Layout.Dir))
+
+	// ACT
+	verdict, err := directoryStep{}.Check(context.Background(), planFor(opts, deps))
+
+	// ASSERT
+	// An error, not a Blocked verdict: no flag should clear this, and the
+	// operator has to look at what is there before anything else happens.
+	require.ErrorIs(t, err, winsvc.ErrReparsePoint)
+	assert.Zero(t, verdict.Condition)
+	assert.Empty(t, sec.Targets, "nothing may be secured through a redirection")
+}
+
+func TestDirectoryStep_ShouldAskWhetherTheDirectoryIsOwnedAsWellAsClosed(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	opts := runOptions(t)
+	deps, _, _ := okDeps()
+
+	require.NoError(t, os.MkdirAll(opts.Layout.Dir, 0o700))
+
+	var asked winsvc.Policy
+
+	deps.CheckDir = func(_ string, policy winsvc.Policy) error {
+		asked = policy
+
+		return nil
+	}
+
+	// ACT
+	verdict, err := directoryStep{}.Check(context.Background(), planFor(opts, deps))
+
+	// ASSERT
+	// PolicyOwned, because Apply sets the owner to Administrators along with
+	// the access list — so a directory the lockdown has touched answers it,
+	// and one that does not is one somebody else created first. An owner holds
+	// WRITE_DAC implicitly, so a clean-looking list on a directory they own is
+	// a list they can replace at any moment; without this, this very Check
+	// would return satisfied, skip Apply, and leave their ownership in place
+	// with the config and the token store written into it.
+	require.NoError(t, err)
+	assert.Equal(t, Satisfied, verdict.Condition)
+	assert.Equal(t, winsvc.PolicyOwned, asked)
 }

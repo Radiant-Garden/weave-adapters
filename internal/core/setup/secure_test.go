@@ -9,6 +9,7 @@ Tested:
     - TestSecurePaths_ShouldSecureTheLogDirectoryRatherThanTheLogFile: the adapter creates the file, so the directory's entries decide its ACL.
     - TestSecurePaths_ShouldOmitPathsTheConfigurationDoesNotSet: an unset target is not a "" path handed to the lockdown.
     - TestSecurePaths_ShouldPropagateAFailure: a failed lockdown is never reported as coverage.
+    - TestSecurePaths_ShouldRefuseALockdownAimedAtAVolumeRoot: before anything is applied, because this one is not undone by noticing.
 
 Tested elsewhere:
   What the lockdown actually does to a Windows ACL: internal/core/winsvc's
@@ -27,6 +28,12 @@ Declined:
   nothing.
 
 Additional Remarks:
+  The refusal runs BEFORE deps.Secure rather than inside it, and the ordering
+  is the assertion: the entries the lockdown applies are protected and
+  inheriting, so a directory target that turned out to be a volume root would
+  already have had the whole subtree's inherited grants replaced by the time
+  anything reported it.
+
   The point of this function is that the targets come from the RESOLVED
   configuration rather than from what a caller was told. That is the argument
   for the installer being a Go subcommand rather than a script: a script has to
@@ -113,7 +120,10 @@ func TestSecurePaths_ShouldSecureTheLogDirectoryRatherThanTheLogFile(t *testing.
 		paths = append(paths, target.Path)
 	}
 
-	assert.Contains(t, paths, filepath.Dir(testLogFile))
+	// testRoot rather than filepath.Dir: the derivation is Windows', not the
+	// host's, so filepath.Dir off Windows sees no separator in this path at
+	// all and answers "." — which is what this assertion used to accept.
+	assert.Contains(t, paths, testRoot)
 	assert.NotContains(t, paths, testLogFile)
 }
 
@@ -157,4 +167,28 @@ func TestSecurePaths_ShouldPropagateAFailure(t *testing.T) {
 	// comes to believe a file is protected when it is not.
 	require.ErrorIs(t, err, winsvc.ErrNotSecured)
 	assert.Nil(t, results)
+}
+
+func TestSecurePaths_ShouldRefuseALockdownAimedAtAVolumeRoot(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// `logFile = C:\adapter.log` is the whole typo. SecurablesFor secures the
+	// log file's DIRECTORY — the adapter creates the file at runtime and it
+	// inherits — and the directory of a file at the volume root is the volume
+	// root. CheckServicePaths passes it: the path is absolute.
+	deps, _, sec := okDeps()
+	cfg, values := resolve(t,
+		"authTokensFile = '"+testTokenStore+"'\nlogFile = 'C:\\adapter.log'\n")
+
+	// ACT
+	_, err := SecurePaths(deps, cfg, values)
+
+	// ASSERT
+	// Refused, and nothing reached the lockdown: a protected, inheriting
+	// SYSTEM-and-Administrators list applied to C:\ strips every other
+	// application's access to its own files across the whole volume, and no
+	// re-run undoes it.
+	require.ErrorIs(t, err, winsvc.ErrProtectedLocation)
+	assert.Empty(t, sec.Targets, "nothing may be secured once a target is refused")
 }

@@ -13,6 +13,7 @@ Tested:
     - TestLayoutCheck_ShouldRequireEveryPath
     - TestLayoutCheck_ShouldAcceptAWindowsAbsolutePathOnAnyHost
     - TestLayoutCheck_ShouldRefuseARelativePath
+    - TestLayoutCheck_ShouldRefuseAVolumeRootOrASharedSystemDirectory
   Options.configPath
     - TestOptionsConfigPath_ShouldPreferTheCallersOverrideOverTheLayout
   Options.verifyDeadline / Options.now
@@ -30,6 +31,15 @@ Declined:
   the struct literal and fail only if the compiler had already failed.
 
 Additional Remarks:
+  Two of the four paths are DIRECTORIES this command provisions into, and the
+  lockdown it applies to Dir is protected and inheriting — it replaces the
+  inherited access list of that directory and everything created in it. So
+  `--data-dir C:\ProgramData`, one path segment away from what an operator
+  meant, would strip every other application's rights to its own files, needs
+  only the Administrator they already have, and is not undone by re-running
+  anything. That refusal is here rather than in the lockdown because this is
+  where the operator's own spelling still exists.
+
   The layout rule accepts a path absolute under EITHER Windows' rules or the
   host's, and that is worth a test rather than a comment alone. Windows' rule
   is the one that finally decides — CheckServicePaths applies it to these same
@@ -256,4 +266,56 @@ func TestOptionsDefaults_ShouldFillTheInjectableValues(t *testing.T) {
 	assert.Equal(t, fixed, Options{Now: func() time.Time { return fixed }}.now())
 
 	assert.Equal(t, time.Second, Options{VerifyDeadline: time.Second}.verifyDeadline())
+}
+
+func TestLayoutCheck_ShouldRefuseAVolumeRootOrASharedSystemDirectory(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		mutate func(*Layout)
+		want   string
+	}{
+		"should refuse a shared system directory as the data directory": {
+			// One missing path segment from C:\ProgramData\weave-adapters.
+			mutate: func(l *Layout) { l.Dir = `C:\ProgramData` },
+			want:   "Layout.Dir",
+		},
+		"should refuse a volume root as the data directory": {
+			mutate: func(l *Layout) { l.Dir = `C:\` },
+			want:   "Layout.Dir",
+		},
+		"should refuse a shared system directory as the binary directory": {
+			mutate: func(l *Layout) { l.BinDir = `C:\Program Files` },
+			want:   "Layout.BinDir",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// ARRANGE
+			//nolint:gosec // G101: paths to a store, not credentials.
+			layout := Layout{
+				Dir:            `C:\ProgramData\weave-adapters`,
+				ConfigPath:     `C:\ProgramData\weave-adapters\config.toml`,
+				TokenStorePath: `C:\ProgramData\weave-adapters\tokens.toml`,
+				LogPath:        `C:\ProgramData\weave-adapters\adapter.log`,
+				BinDir:         `C:\Program Files\weave-adapters`,
+			}
+			tc.mutate(&layout)
+
+			// ACT
+			err := layout.check()
+
+			// ASSERT
+			// The lockdown this command applies is protected and inheriting,
+			// so it does not add to the directory's access list — it replaces
+			// it, for the whole subtree. An administrator can do this, which
+			// is exactly why it has to be refused before it is done.
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+			assert.Contains(t, err.Error(), "shared system directory")
+		})
+	}
 }

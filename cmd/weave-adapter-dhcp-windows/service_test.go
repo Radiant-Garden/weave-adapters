@@ -33,6 +33,8 @@ Tested:
 	runServiceStatus -> - TestRunServiceStatus_ShouldReportAnAbsentService
 	                    - TestRunServiceStatus_ShouldWarnWhenRecoveryIsInert
 	                    - TestRunServiceStatus_ShouldReportAnInstalledService
+	checkDirectoryGrants -> - TestCheckDirectoryGrants_ShouldRefuseADirectoryThatRedirects
+	                        - TestCheckDirectoryGrants_ShouldAcceptARealDirectoryOffWindows
 
 Tested elsewhere:
 
@@ -78,6 +80,13 @@ Additional Remarks:
 	Both doubles moved to internal/core/winsvc/winsvctest in M4b Phase 0, so
 	that setup's tests drive the same ones rather than a second copy kept in
 	step by hand.
+
+	checkDirectoryGrants fails CLOSED on a descriptor it cannot read, and the
+	half of that which a non-Windows host can exercise is the reparse-point
+	refusal and the unsupported-platform arm. The unreadable-descriptor arm
+	needs a real deny for READ_CONTROL and belongs to task service-gate, which
+	is also where the ownership half of S1 has to be proved — the same reason
+	secure_windows.go declines unit coverage.
 */
 package main
 
@@ -85,6 +94,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -106,7 +116,7 @@ func depsFor(m *winsvctest.Manager, opened *bool) setup.Deps {
 // depsWith is depsFor with a caller-supplied securer, for the tests that
 // assert on what was locked down.
 func depsWith(m *winsvctest.Manager, opened *bool, sec *winsvctest.Securer) setup.Deps {
-	return depsChecking(m, opened, sec, func(string) error { return nil })
+	return depsChecking(m, opened, sec, func(string, winsvc.Policy) error { return nil })
 }
 
 // depsChecking is depsWith with a caller-supplied binary-directory check, for
@@ -662,7 +672,7 @@ func TestRunServiceInstall_ShouldCheckTheDirectoryTheServiceWillRunFrom(t *testi
 		checked string
 	)
 
-	deps := depsChecking(&winsvctest.Manager{}, nil, &winsvctest.Securer{}, func(dir string) error {
+	deps := depsChecking(&winsvctest.Manager{}, nil, &winsvctest.Securer{}, func(dir string, _ winsvc.Policy) error {
 		checked = dir
 
 		return nil
@@ -708,4 +718,44 @@ func TestRunServiceLifecycle_ShouldTreatStartAndStopAsDesiredStates(t *testing.T
 			assert.Contains(t, out.String(), serviceName)
 		})
 	}
+}
+
+func TestCheckDirectoryGrants_ShouldRefuseADirectoryThatRedirects(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// A symlink stands in for the junction an unprivileged user can create
+	// under C:\ProgramData: os.Lstat reports the first as ModeSymlink and the
+	// second as ModeIrregular, and the check refuses both.
+	base := t.TempDir()
+	target := filepath.Join(base, "attacker")
+	link := filepath.Join(base, "weave-adapters")
+
+	require.NoError(t, os.Mkdir(target, 0o700))
+	require.NoError(t, os.Symlink(target, link))
+
+	// ACT / ASSERT
+	// Both policies, because the redirection defeats either: everything
+	// downstream resolves the path by name, so the answer would describe the
+	// target while the service uses whatever the link points at next.
+	for _, policy := range []winsvc.Policy{winsvc.PolicyNoForeignWrite, winsvc.PolicyOwned} {
+		err := checkDirectoryGrants(link, policy)
+		require.ErrorIs(t, err, winsvc.ErrReparsePoint)
+		assert.Contains(t, err.Error(), link)
+	}
+}
+
+func TestCheckDirectoryGrants_ShouldAcceptARealDirectoryOffWindows(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE / ACT / ASSERT
+	// Off Windows there is no security descriptor to read, and ReadSecurity
+	// says so with ErrUnsupported. That arm answers nil deliberately — it is
+	// the one case that is genuinely "nothing to judge", and keeping it apart
+	// from the failure arm is what lets the failure arm refuse.
+	if runtime.GOOS == "windows" {
+		t.Skip("the descriptor is real here; the gate covers it")
+	}
+
+	assert.NoError(t, checkDirectoryGrants(t.TempDir(), winsvc.PolicyOwned))
 }

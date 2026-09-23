@@ -31,6 +31,11 @@ Tested:
 	  - TestRunWith_ShouldInvokeReadyOnceTheListenerIsBound
 	  - TestRunWith_ShouldNotInvokeReadyWhenStartupFails
 
+	checkFileSecurity / checkSecurable
+	  - TestCheckSecurable_ShouldRefuseATargetThatRedirectsSomewhereElse
+	  - TestCheckSecurable_ShouldSkipAnAbsentOptionalTargetAndRefuseAnAbsentRequiredOne
+	  - TestCheckFileSecurity_ShouldCoverTheBinaryAndItsDirectoryAsWellAsTheConfiguredPaths
+
 Tested elsewhere:
   Each wired component (config.Load, observability.Setup, httpserver.New/Run,
   health.NewHandler, auth.Bearer) is unit-tested in its own package; the tests
@@ -52,6 +57,12 @@ Declined:
 Additional Remarks:
   These tests call observability.Setup, which replaces the process-global default
   slog logger, so they cannot run in parallel.
+
+  checkFileSecurity fails CLOSED on a descriptor it cannot read, and the arm
+  that proves it needs a real deny for READ_CONTROL — which needs Windows and
+  belongs to task service-gate, like the ownership half of S1. What is
+  exercised here is the part a developer host can answer: the reparse-point
+  refusal, the absent-target rule, and which targets are covered at all.
 
   Tests bind a port discovered by the OS rather than a hard-coded one. Config
   validation rejects port 0, so the port cannot be left for the kernel to pick at
@@ -89,6 +100,7 @@ import (
 	eventstest "github.com/radiantgarden/weave-adapters/internal/core/events/testing"
 	"github.com/radiantgarden/weave-adapters/internal/core/health"
 	"github.com/radiantgarden/weave-adapters/internal/core/httpserver"
+	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
 )
 
 // testNamespaceKey is the provisioned namespace key every server run here
@@ -865,4 +877,95 @@ func TestRunWith_ShouldRefuseAConsoleConfigurationInServiceMode(t *testing.T) {
 			rec.AssertNotEmitted(t, catalog.SYS002)
 		})
 	}
+}
+
+func TestCheckSecurable_ShouldRefuseATargetThatRedirectsSomewhereElse(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// Everything here names a path, and every call on a name follows a
+	// junction: without this the check would faithfully describe whatever the
+	// link points at while the service reads something else.
+	base := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(base, "real"), 0o700))
+	require.NoError(t, os.Symlink(filepath.Join(base, "real"), filepath.Join(base, "link")))
+
+	target := winsvc.Securable{
+		Path: filepath.Join(base, "link"),
+		Kind: winsvc.SecurableDirectory,
+		Why:  "the log directory",
+	}
+
+	// ACT
+	err := checkSecurable(target, winsvc.PolicyOwned)
+
+	// ASSERT
+	require.ErrorIs(t, err, winsvc.ErrReparsePoint)
+	assert.Contains(t, err.Error(), "the log directory")
+}
+
+func TestCheckSecurable_ShouldSkipAnAbsentOptionalTargetAndRefuseAnAbsentRequiredOne(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// The token store legitimately does not exist before the first mint, which
+	// is the one case that is genuinely not a refusal. Everything else being
+	// absent is a fact worth stopping for.
+	absent := filepath.Join(t.TempDir(), "not-there")
+
+	// ACT / ASSERT
+	require.NoError(t, checkSecurable(winsvc.Securable{
+		Path: absent, Kind: winsvc.SecurableFile, Why: "the token store", Optional: true,
+	}, winsvc.PolicyOwned))
+
+	err := checkSecurable(winsvc.Securable{
+		Path: absent, Kind: winsvc.SecurableFile, Why: "the config file",
+	}, winsvc.PolicyOwned)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the config file")
+}
+
+func TestCheckFileSecurity_ShouldCoverTheBinaryAndItsDirectoryAsWellAsTheConfiguredPaths(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// The binary and the directory it runs from are not in SecurablesFor: the
+	// lockdown never touches them, install checks the directory once, and the
+	// executable's own list was never checked at all. Both are the escalation
+	// the install-time check exists to prevent, and an access list can be
+	// widened at any time after an install.
+	dir := t.TempDir()
+
+	values, err := config.LoadWithoutEnvironment(adapterSpec(), withIdentity(t))
+	require.NoError(t, err)
+
+	cfg, err := config.Core(values)
+	require.NoError(t, err)
+
+	// ACT
+	// Off Windows ReadSecurity answers ErrUnsupported and every target is
+	// skipped, so what this asserts is the SHAPE — that the binary is reached
+	// at all, which a missing executable makes visible.
+	require.NoError(t, checkFileSecurity(values, cfg))
+
+	exe, err := os.Executable()
+	require.NoError(t, err)
+
+	// ASSERT
+	targets := winsvc.SecurablesFor(values.ConfigPath(), cfg.AuthTokensFile, cfg.LogFile)
+
+	paths := make([]string, 0, len(targets))
+	for _, target := range targets {
+		paths = append(paths, target.Path)
+	}
+
+	assert.NotContains(t, paths, exe, "SecurablesFor must not start locking down the binary")
+	assert.NotContains(t, paths, filepath.Dir(exe))
+
+	// The redirection refusal reaches the executable's directory too, which is
+	// the observable half of "this target is checked" on a non-Windows host.
+	assert.Error(t, checkSecurable(winsvc.Securable{
+		Path: filepath.Join(dir, "absent-exe"), Kind: winsvc.SecurableFile, Why: "the service executable itself",
+	}, winsvc.PolicyNoForeignWrite))
 }

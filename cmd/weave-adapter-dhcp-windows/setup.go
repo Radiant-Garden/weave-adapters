@@ -416,6 +416,17 @@ func withNamespaceKey(
 // existed on this host even when the config has been deleted, and a
 // registration proves it even when the whole directory has.
 //
+// Empty still counts as fresh, and repo-assessment-02's S1 proposed tightening
+// that to "absent". It was not taken, because the state it would refuse is one
+// this command produces itself: directoryStep creates and locks the directory
+// before the config step writes anything, so a first run that fails at
+// validation leaves exactly an existing empty directory behind — and refusing
+// it would break the re-run promise the whole reconciler is built on. What S1
+// was actually reaching for is below: an unprivileged user can create this
+// path under C:\ProgramData, and what makes that dangerous is the redirection
+// and the ownership, both of which are refused rather than inferred from
+// emptiness.
+//
 // It gates only --generate-namespace-key. Staging a key file in that directory
 // and passing --namespace-key-file is unaffected, which is the deliberate
 // escape hatch.
@@ -424,6 +435,14 @@ func guardRekey(configPath string, layout setup.Layout, deps setup.Deps) error {
 		return fmt.Errorf("setup: --%s was passed together with --config: an existing configuration "+
 			"already carries identity.namespaceKey, and generating a second one would re-key this host",
 			flagGenerateKey)
+	}
+
+	// Before ReadDir, which follows a reparse point: a junction here would
+	// have this guard read somebody else's directory and answer about that.
+	// The same refusal the provisioning step makes, made earlier, because this
+	// one runs as a usage check before the reconciler starts.
+	if err := winsvc.CheckNotReparsePoint(layout.Dir); err != nil {
+		return fmt.Errorf("setup: --%s was passed but %w", flagGenerateKey, err)
 	}
 
 	entries, err := os.ReadDir(layout.Dir)

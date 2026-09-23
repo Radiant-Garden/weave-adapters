@@ -10,7 +10,8 @@ Tested:
 	confersWrite -> - TestConfersWrite_ShouldCatchEveryRightThatChangesTheObject:
 	                  including FILE_WRITE_DATA on its own, which is the token
 	                  store escalation and is granted independently of the
-	                  generic bit.
+	                  generic bit, and FILE_DELETE_CHILD, which deletes a child
+	                  whatever the child's own list says.
 	lockdownDACL -> - TestLockdownDACL_ShouldGrantExactlyTheTwoPrincipals
 	                - TestLockdownDACL_ShouldSetInheritFlagsOnlyForADirectory
 
@@ -18,9 +19,14 @@ Tested elsewhere:
 
 	Applying and reading back a real security descriptor: task service-gate,
 	elevated, against a live filesystem. Secure verifies its own result
-	through CheckGrants, and that function is unit-tested portably in
+	through CheckSecurity, and that function is unit-tested portably in
 	secure_test.go -- so what a unit test could add here is coverage of the
 	syscall, not of the decision.
+
+	That the read-back now includes the OWNER, and that a directory somebody
+	else owns is refused: the gate, for the same reason. Setting an owner needs
+	the admin token, so a host where the two answers could differ is a host no
+	unit test may run on.
 
 	Which paths are secured, and that install and `service secure` both call
 	this: cmd/weave-adapter-dhcp-windows/service_test.go.
@@ -32,7 +38,7 @@ Declined:
 	the test would fail there for a reason that is not a defect -- and on a
 	developer's elevated shell it would leave a re-owned file behind.
 
-	Asserting the NULL-DACL branch of ReadGrants. Producing one means building
+	Asserting the NULL-DACL branch of ReadSecurity. Producing one means building
 	a security descriptor with no DACL and applying it, which is the same
 	privileged mutation, to observe a branch that is three lines long.
 
@@ -71,6 +77,12 @@ func TestConfersWrite_ShouldCatchEveryRightThatChangesTheObject(t *testing.T) {
 		"should catch write owner": {mask: windows.WRITE_OWNER, want: true},
 		"should catch write dac":   {mask: windows.WRITE_DAC, want: true},
 		"should catch delete":      {mask: windows.DELETE, want: true},
+		// FILE_DELETE_CHILD on a DIRECTORY lets its holder delete or rename
+		// any child whatever the child's own list says — so this alone on the
+		// data directory removes the token store or the executable. Not a
+		// replacement, but a clean denial of service, and it is granted
+		// independently of DELETE.
+		"should catch delete child": {mask: fileDeleteChild, want: true},
 
 		"should allow read data":    {mask: windows.FILE_READ_DATA, want: false},
 		"should allow generic read": {mask: windows.GENERIC_READ, want: false},
@@ -133,7 +145,8 @@ func TestEveryoneWrites_ShouldReportTheWidestPossibleState(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Equal(t, "S-1-1-0", got[0].SID)
 	assert.True(t, got[0].CanWrite)
-	require.Error(t, CheckGrants(`C:\x`, got), "a NULL DACL must never pass")
+	require.Error(t, CheckSecurity(`C:\x`, Security{Owner: SIDAdministrators, Grants: got}, PolicyOwned),
+		"a NULL DACL must never pass")
 }
 
 func TestFileAllAccess_ShouldBeTheSpecificMaskNotTheGenericOne(t *testing.T) {

@@ -99,7 +99,7 @@ func setupDeps() (setup.Deps, *winsvctest.Manager, *winsvctest.Securer) {
 	return setup.Deps{
 		NewManager: func() (winsvc.Manager, error) { return m, nil },
 		Secure:     sec.Secure,
-		CheckDir:   func(string) error { return nil },
+		CheckDir:   func(string, winsvc.Policy) error { return nil },
 		Get: func(context.Context, string, string) (setup.Response, error) {
 			return setup.Response{Status: 200, Body: []byte(`{"components":[]}`)}, nil
 		},

@@ -119,7 +119,13 @@ func Install(opts InstallOptions, deps Deps) (InstallResult, error) {
 	//
 	// Checked, never repaired. The binary may live in Program Files, whose ACL
 	// is Windows' to own; rewriting it would be worse than reporting it.
-	if err := deps.CheckDir(filepath.Dir(binPath)); err != nil {
+	//
+	// PolicyNoForeignWrite for the same reason: what legitimately owns this
+	// directory is TrustedInstaller, which owns %ProgramFiles%, or the elevated
+	// operator who created the subdirectory under Windows' default owner
+	// policy. Demanding SYSTEM or Administrators would refuse every correct
+	// install. Foreign write is the escalation, and it is what is refused.
+	if err := deps.CheckDir(filepath.Dir(binPath), winsvc.PolicyNoForeignWrite); err != nil {
 		return InstallResult{}, fmt.Errorf(
 			"the service would run as LocalSystem from a directory others can write to:\n%w", err)
 	}

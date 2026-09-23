@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,21 +73,42 @@ func platformDeps() setup.Deps {
 	}
 }
 
-// checkDirectoryGrants reports whether dir grants write to anyone outside the
-// lockdown policy.
-func checkDirectoryGrants(dir string) error {
-	grants, err := winsvc.ReadGrants(dir)
-	if err != nil {
-		// Unreadable is not the same as insecure, and refusing to install over
-		// a descriptor this process could not read would block an operator for
-		// a permissions quirk rather than a risk. Reported at debug rather
-		// than swallowed silently, so it is findable if it ever matters.
-		slog.Debug("could not read the access list of the binary's directory", "dir", dir, "error", err)
-
-		return nil
+// checkDirectoryGrants reports whether dir is safe for the service at the
+// strictness the caller asked for.
+//
+// It fails CLOSED. The earlier version logged an unreadable descriptor at
+// debug and returned nil, on the reasoning that unreadable is not the same as
+// insecure — but the two are indistinguishable from here, and an owner can
+// make a descriptor unreadable on purpose by adding an explicit deny for
+// READ_CONTROL. That is a cheaper way past this check than crafting a
+// convincing access list, and it turned the check into one an attacker chooses
+// whether to take. An elevated operator can read what they are about to
+// install into; a refusal that names the path is the right answer when they
+// cannot.
+func checkDirectoryGrants(dir string, policy winsvc.Policy) error {
+	// First, because everything below resolves the directory by name: a
+	// junction here would have this check describe one directory while the
+	// service uses another.
+	if err := winsvc.CheckNotReparsePoint(dir); err != nil {
+		return err
 	}
 
-	return winsvc.CheckGrants(dir, grants)
+	sec, err := winsvc.ReadSecurity(dir)
+
+	switch {
+	case errors.Is(err, winsvc.ErrUnsupported):
+		// Off Windows there is no descriptor to read. Named rather than folded
+		// into the failure below: a platform with no answer and a descriptor
+		// somebody made unreadable are not the same fact, and it is the second
+		// one this function now refuses.
+		return nil
+
+	case err != nil:
+		return fmt.Errorf("the access list of %s could not be read, so this run cannot tell whether it "+
+			"is safe — an explicit deny for READ_CONTROL looks exactly like this: %w", dir, err)
+	}
+
+	return winsvc.CheckSecurity(dir, sec, policy)
 }
 
 // runService dispatches a service subcommand. newManager is injected; out

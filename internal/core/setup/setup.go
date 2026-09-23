@@ -35,8 +35,18 @@ type ManagerFactory func() (winsvc.Manager, error)
 // SecureFunc applies the file lockdown.
 type SecureFunc func([]winsvc.Securable) ([]winsvc.SecureResult, error)
 
-// CheckDirFunc reports whether a directory grants write beyond the policy.
-type CheckDirFunc func(dir string) error
+// CheckDirFunc reports whether a directory is safe for the service to use,
+// judged at the strictness the caller asks for.
+//
+// The policy is a parameter because the two directories this package inspects
+// pose different questions. The binary's directory is only ever CHECKED, and
+// it is %ProgramFiles% or a subdirectory of it — owned by TrustedInstaller, or
+// by the elevated operator who created it — so only foreign write can be
+// refused there. The provisioning directory is one this package CREATES AND
+// LOCKS DOWN, so it must also be owned inside the policy; an owner holds
+// WRITE_DAC implicitly, and a directory pre-created by an unprivileged user
+// under C:\ProgramData would otherwise pass with a clean-looking access list.
+type CheckDirFunc func(dir string, policy winsvc.Policy) error
 
 // Deps are the platform operations these steps need.
 //

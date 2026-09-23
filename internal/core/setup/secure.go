@@ -23,5 +23,16 @@ func SecurePaths(deps Deps, configPath string, values *config.Values) ([]winsvc.
 		values.String(config.KeyLogFile),
 	)
 
+	// Before anything is applied, because the lockdown is not undone by
+	// noticing afterwards: its entries are protected and inheriting, so a
+	// directory target that turned out to be a volume root or a shared system
+	// directory would have had every other application's inherited rights
+	// stripped across its whole subtree. The way in is an ordinary typo —
+	// `logFile = C:\adapter.log` makes the log directory C:\ — and
+	// CheckServicePaths, which only asks whether a path is absolute, passes it.
+	if err := winsvc.CheckSecurables(targets); err != nil {
+		return nil, err
+	}
+
 	return deps.Secure(targets)
 }
