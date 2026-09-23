@@ -151,9 +151,19 @@ func printGeneratedKey(p *printer, provisioned []config.Provisioned, configPath 
 //
 // O_EXCL, so it can never overwrite something — an operator who points this at
 // an existing file has almost certainly made a mistake, and the one thing
-// worse than refusing is destroying whatever was there. The lockdown follows
-// immediately, because a file created under a directory's inherited grants is
-// a plaintext credential readable by whoever that directory admits.
+// worse than refusing is destroying whatever was there.
+//
+// The order is lock-then-write, and it used to be the other way round. A file
+// created under a destination directory's inherited grants is readable by
+// whoever that directory admits, so writing the credential first left it in
+// plaintext under those grants for as long as the lockdown took — and if the
+// lockdown then failed, the function returned an error and left the plaintext
+// file behind. Creating it EMPTY, securing it, and only then writing means the
+// only thing ever exposed is a zero-byte file.
+//
+// The handle stays open across the lockdown rather than being closed and
+// reopened: the write must land in the file this call created, and a reopen by
+// name is a window in which that is no longer true.
 func writeToken(path, token string, secure setup.SecureFunc) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, tokenFileMode) //nolint:gosec // the operator named this path on the command line, which is the point of the flag
 	if err != nil {
@@ -164,16 +174,23 @@ func writeToken(path, token string, secure setup.SecureFunc) error {
 		return err
 	}
 
-	if _, err := f.WriteString(token + "\n"); err != nil {
+	// From here every failure removes the file. It is this call's to remove —
+	// O_EXCL proves nothing else created it — and leaving an empty or
+	// half-written credential file behind is how a later run is told the
+	// destination is already occupied.
+	if err := writeSecuredToken(f, path, token, secure); err != nil {
 		_ = f.Close()
+		_ = os.Remove(path) //nolint:gosec // G703: the operator named this path on the command line, and O_EXCL above proves this call created what it is removing
 
 		return err
 	}
 
-	if err := f.Close(); err != nil {
-		return err
-	}
+	return nil
+}
 
+// writeSecuredToken locks the created file down and then writes the credential
+// into it.
+func writeSecuredToken(f *os.File, path, token string, secure setup.SecureFunc) error {
 	// Through the injected seam rather than winsvc.Secure directly, like every
 	// other lockdown in this binary. Calling the platform function here would
 	// make this one path untestable off Windows — and it is the path that
@@ -187,7 +204,11 @@ func writeToken(path, token string, secure setup.SecureFunc) error {
 		return fmt.Errorf("locking down %q: %w", path, err)
 	}
 
-	return nil
+	if _, err := f.WriteString(token + "\n"); err != nil {
+		return err
+	}
+
+	return f.Close()
 }
 
 // printProvisioned reports what a run put into a generated config, naming

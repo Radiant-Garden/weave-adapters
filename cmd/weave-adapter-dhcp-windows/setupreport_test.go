@@ -15,6 +15,8 @@ Tested:
     - TestReportToken_ShouldSayNothingWhenNothingWasMinted
     - TestReportToken_ShouldWriteTheTokenWhenAskedTo
     - TestReportToken_ShouldRefuseToOverwriteAnExistingTokenFile: O_EXCL, and the token is still shown.
+    - TestReportToken_ShouldLockTheFileDownBeforeWritingTheCredentialIntoIt
+    - TestReportToken_ShouldNotLeaveAFileBehindWhenTheLockdownFails
   printGeneratedKey
     - TestPrintGeneratedKey_ShouldShowTheFingerprintAndNeverTheKey
     - TestPrintGeneratedKey_ShouldSayNothingForAKeyThatWasSupplied
@@ -45,9 +47,16 @@ Additional Remarks:
   to be written to anyway. The fingerprint carries the whole affordance without
   the risk.
 
-  A written token file is created with O_EXCL and locked down immediately. It
-  is a live credential at rest, and the one thing worse than refusing to write
-  over an existing file is destroying whatever was there.
+  A written token file is created with O_EXCL, locked down, and only THEN
+  written into. It is a live credential at rest, and the one thing worse than
+  refusing to write over an existing file is destroying whatever was there.
+
+  The lock-then-write order is a security assertion too. A file created under
+  a destination directory's inherited grants is readable by whoever that
+  directory admits, so writing first left the credential in plaintext under
+  those grants until the lockdown landed — and a lockdown that then failed
+  returned an error and left the plaintext behind. Creating it empty means the
+  only thing ever exposed is a zero-byte file.
 */
 
 package main
@@ -65,6 +74,7 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/adapters/dhcpwindows"
 	"github.com/radiantgarden/weave-adapters/internal/core/config"
 	"github.com/radiantgarden/weave-adapters/internal/core/setup"
+	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
 	"github.com/radiantgarden/weave-adapters/internal/core/winsvc/winsvctest"
 )
 
@@ -349,4 +359,65 @@ func TestPrintHealth_ShouldExplainAnUnhealthyBackendRatherThanJustReportingIt(t 
 	assert.Contains(t, out, "installed and running")
 	assert.Contains(t, out, "no reachable DHCP backend")
 	assert.Contains(t, out, "The service itself is fine")
+}
+
+func TestReportToken_ShouldLockTheFileDownBeforeWritingTheCredentialIntoIt(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// The securer reads the file as it is locked down, which is the moment the
+	// old order had a plaintext credential sitting under the destination
+	// directory's inherited grants.
+	path := filepath.Join(t.TempDir(), "token")
+
+	var atLockdown []byte
+
+	secure := func(targets []winsvc.Securable) ([]winsvc.SecureResult, error) {
+		atLockdown, _ = os.ReadFile(targets[0].Path)
+
+		return []winsvc.SecureResult{{Target: targets[0], Applied: true}}, nil
+	}
+
+	var out bytes.Buffer
+
+	// ACT
+	require.NoError(t, reportToken(&printer{w: &out},
+		setup.Result{Token: testToken}, setup.Options{TokenLabel: "weave-prod"}, path, secure))
+
+	// ASSERT
+	// Empty at the lockdown, and the credential there afterwards. A file
+	// carrying the token before it is locked is readable by whoever the
+	// directory admits for as long as the lockdown takes.
+	assert.Empty(t, atLockdown, "the credential was on disk before the lockdown ran")
+
+	written, err := os.ReadFile(path) //nolint:gosec // a path this test created
+	require.NoError(t, err)
+	assert.Contains(t, string(written), testToken)
+}
+
+func TestReportToken_ShouldNotLeaveAFileBehindWhenTheLockdownFails(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	path := filepath.Join(t.TempDir(), "token")
+	sec := &winsvctest.Securer{Err: errors.New("this needs an elevated prompt")}
+
+	var out bytes.Buffer
+
+	// ACT
+	err := reportToken(&printer{w: &out},
+		setup.Result{Token: testToken}, setup.Options{TokenLabel: "weave-prod"}, path, sec.Secure)
+
+	// ASSERT
+	// The file is this call's to remove — O_EXCL proves nothing else created
+	// it — and an orphan left under the directory's inherited grants is both a
+	// credential nobody knows is there and the reason the next run is told the
+	// destination is occupied.
+	require.Error(t, err)
+	assert.NoFileExists(t, path)
+
+	// The token was minted and is already a hash in the store, so it must
+	// still be shown: losing it here means an operator has a credential they
+	// cannot use and a label they cannot reuse.
+	assert.Contains(t, out.String(), testToken)
 }
