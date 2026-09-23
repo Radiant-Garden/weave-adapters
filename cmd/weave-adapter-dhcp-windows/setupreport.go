@@ -255,6 +255,15 @@ func printHealth(p *printer, result setup.Result) {
 	switch {
 	case result.Health.AuthProved:
 		p.printf("An authenticated call reached %s, so the token store is being read.\n", protectedPath)
+
+	case result.Health.AuthRejected != "":
+		// Its own arm, because the 401 is neither proof nor a skip. Rendered
+		// through the skip arm, it told an operator "the authenticated call was
+		// not made" and then explained that it was made and refused.
+		p.printf("The authenticated call was REFUSED: %s\n", result.Health.AuthRejected)
+		p.printf("The service is running but will reject every request weave sends, so this run is\n")
+		p.printf("reported as a failure rather than as an install with a note.\n")
+
 	case result.Health.AuthSkipReason != "":
 		p.printf("The authenticated call was not made: %s\n", result.Health.AuthSkipReason)
 	}

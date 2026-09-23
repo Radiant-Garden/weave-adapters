@@ -58,6 +58,27 @@ func (s verifyStep) Apply(ctx context.Context, p *Plan) error {
 
 	s.proveAuth(ctx, p, base)
 
+	// A REJECTED token is a failure, and it is the one outcome here that says
+	// the run did not do what it said. This step wrote a token into the store
+	// and the service answered 401 to it, which means the service is not
+	// reading the store this run just wrote — a provisioning run that ends with
+	// an unusable credential.
+	//
+	// It used to return nil, and setupExitCode reads only whether the health
+	// component was checked and healthy. So on a host with a working DHCP
+	// backend — the production case — a service that could not authenticate
+	// exited 0, and on a developer host it exited 4, indistinguishable from
+	// "no backend". The exit table is the whole machine-readable contract for
+	// the MSI custom action, so nothing downstream could tell.
+	//
+	// A failed step rather than a sixth exit code: the table stays as it is,
+	// and this maps to 1, which already means "a step did not do its job".
+	if !p.health.AuthSkipped && !p.health.AuthProved {
+		return fmt.Errorf("%s answered 401 to the token this run minted, so %s is not reading %s: "+
+			"the service was started before the token was written, or it is reading a different store",
+			p.opts.ProtectedPath, p.opts.Definition.Name, p.Values.String(config.KeyAuthTokensFile))
+	}
+
 	// An unhealthy component is NOT an error. It is what every developer
 	// machine and every CI runner answers, because neither has a DHCP backend,
 	// and the caller distinguishes it by exit code rather than by a failed
@@ -176,7 +197,10 @@ func (verifyStep) proveAuth(ctx context.Context, p *Plan, base string) {
 	p.health.AuthProved = resp.Status != http.StatusUnauthorized
 
 	if !p.health.AuthProved {
-		p.health.AuthSkipReason = fmt.Sprintf(
+		// AuthRejected, not AuthSkipReason. The call WAS made and was answered
+		// 401; recording that in the skip field made the report say "the
+		// authenticated call was not made" and then explain that it was.
+		p.health.AuthRejected = fmt.Sprintf(
 			"%s answered 401 to the token this run minted: the service is not reading %s",
 			p.opts.ProtectedPath, p.Values.String(config.KeyAuthTokensFile))
 	}

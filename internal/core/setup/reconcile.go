@@ -182,6 +182,17 @@ type HealthReport struct {
 	// saying nothing.
 	AuthSkipped    bool
 	AuthSkipReason string
+
+	// AuthRejected records a verification that WAS made and came back 401,
+	// which is neither proof nor a skip. It is its own field because the two
+	// read as opposites to an operator: the 401 used to be recorded in
+	// AuthSkipReason, so the report said "the authenticated call was not made"
+	// and then gave a reason explaining that it was made and refused.
+	//
+	// Non-empty here is a failed run. verifyStep.Apply returns an error for it,
+	// so it reaches the caller as exit 1 rather than as a note under a
+	// successful install.
+	AuthRejected string
 }
 
 // Failed reports whether any step errored.

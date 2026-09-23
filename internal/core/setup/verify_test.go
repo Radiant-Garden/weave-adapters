@@ -12,7 +12,7 @@ Tested:
     - TestVerifyStep_ShouldFailWhenTheServiceNeverAnswers
     - TestVerifyStep_ShouldRetryUntilTheServiceComesUp
     - TestVerifyStep_ShouldProveTheTokenStoreIsReadByAnythingButA401
-    - TestVerifyStep_ShouldReportA401AsAFailureToProveRatherThanAsProof
+    - TestVerifyStep_ShouldReportA401AsAFailureToProveRatherThanAsProof: a failed STEP, so it reaches the caller as exit 1.
     - TestVerifyStep_ShouldSkipTheAuthenticatedCallWhenAuthIsDisabled
     - TestVerifyStep_ShouldSkipTheAuthenticatedCallWhenNoTokenWasMinted
 
@@ -41,6 +41,13 @@ Additional Remarks:
   demanding 200 would fail every developer machine while establishing nothing
   extra. What is being proved is only that the token store was read through the
   ACL this run applied, and 401 is the single answer that says it was not.
+
+  And a 401 has to FAIL the step, not merely be recorded on it. setupExitCode
+  reads only whether the health component was checked and healthy, so a step
+  that returned nil here exited 0 on exactly the host where it matters — one
+  with a working DHCP backend. The exit table is the whole machine-readable
+  contract for the MSI custom action, and the service gate asserts on stdout
+  rather than on the code, so nothing else pinned it.
 */
 
 package setup
@@ -324,15 +331,28 @@ func TestVerifyStep_ShouldReportA401AsAFailureToProveRatherThanAsProof(t *testin
 	p := verifyPlan(t, opts, deps, "authTokensFile = 'the-store'\n")
 
 	// ACT
-	require.NoError(t, verifyStep{}.Apply(context.Background(), p))
+	err := verifyStep{}.Apply(context.Background(), p)
 
 	// ASSERT
-	// The service is running and rejecting the credential this run just
-	// created, which means it is not reading the store this run wrote — the
+	// A FAILED STEP, which is what carries it to exit 1. The service is running
+	// and rejecting the credential this run just created, which means it is not
+	// reading the store this run wrote — and this used to return nil, so on a
+	// host with a working DHCP backend the run exited 0 and on a developer host
+	// it exited 4, indistinguishable from "no backend". This assertion and the
+	// comment above it disagreed until then: the comment already called it the
 	// one failure a green "installed and running" would otherwise hide.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "401")
+
 	assert.False(t, p.health.AuthProved)
-	assert.Contains(t, p.health.AuthSkipReason, "401")
-	assert.Contains(t, p.health.AuthSkipReason, "the-store")
+	assert.False(t, p.health.AuthSkipped, "the call was made; it was refused")
+
+	// AuthRejected, not AuthSkipReason. Recorded in the skip field, the report
+	// said "the authenticated call was not made" and then gave a reason
+	// explaining that it was made and answered 401.
+	assert.Empty(t, p.health.AuthSkipReason)
+	assert.Contains(t, p.health.AuthRejected, "401")
+	assert.Contains(t, p.health.AuthRejected, "the-store")
 }
 
 func TestVerifyStep_ShouldSkipTheAuthenticatedCallWhenAuthIsDisabled(t *testing.T) {
