@@ -18,7 +18,8 @@ Tested:
 	Client.UpdateScope
 	  - TestUpdateScope_ShouldSetAndReturnTheUpdatedScope: two spawns, the updated scope decoded and its identity stable.
 	  - TestUpdateScope_ShouldReturnNotFoundForAnUnknownWadaptID: absent is ErrScopeNotFound, and the set never runs.
-	  - TestUpdateScope_ShouldRejectARangeThatLeavesTheSubnet: an out-of-subnet resize is ErrRangeOutsideSubnet before any set.
+	  - TestUpdateScope_ShouldRejectARangeThatLeavesTheSubnet: an out-of-subnet resize is ErrRangeUnusable before any set.
+	  - TestUpdateScope_ShouldRejectAOneSidedInversionBeforeTheShellSeesIt: the client mistake that used to come back as a backend outage.
 	  - TestUpdateScope_ShouldSplatBothRangeEndsForAOneSidedResize: a one-sided resize still passes both -StartRange and -EndRange.
 	  - TestUpdateScope_ShouldRejectAScopeWhoseIdentityMoved: a -PassThru scope on a different subnet is a backend error, not a served resource.
 	  - TestUpdateScope_ShouldRebaselineDriftSilently: an intentional PATCH emits no DHCP-002, while a later external change still does.
@@ -181,7 +182,7 @@ func TestUpdateScope_ShouldRejectARangeThatLeavesTheSubnet(t *testing.T) {
 
 	// ASSERT — refused before the set, because a resize that leaves the subnet
 	// would change the derived identity.
-	require.ErrorIs(t, err, ErrRangeOutsideSubnet)
+	require.ErrorIs(t, err, ErrRangeUnusable)
 	assert.Len(t, fake.scripts, 1, "a rejected resize must not reach the set")
 }
 
@@ -263,4 +264,34 @@ func TestUpdateScope_ShouldRebaselineDriftSilently(t *testing.T) {
 	// ASSERT — now DHCP-002 fires, exactly once: the re-baseline updated the
 	// fingerprint rather than discarding detection.
 	rec.AssertEmittedN(t, adapterevents.DHCP002, 1)
+}
+
+func TestUpdateScope_ShouldRejectAOneSidedInversionBeforeTheShellSeesIt(t *testing.T) {
+	t.Parallel()
+
+	for name, in := range map[string]ScopeUpdate{
+		"an end below the untouched start": {EndRange: new("10.0.30.5")},
+		"a start above the untouched end":  {StartRange: new("10.0.30.251")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// ARRANGE — the scope runs 10.0.30.10-10.0.30.250.
+			fake := &fakeRunner{stdout: []byte(scopeListJSON("lab"))}
+			client := clientWith(fake)
+			target := wadaptIDFor(client, "10.0.30.0")
+
+			// ACT
+			_, err := client.UpdateScope(context.Background(), target, in)
+
+			// ASSERT
+			// Refused, and the SET never spawned. That second assertion is the
+			// one that matters: the set used to run with start > end, the
+			// cmdlet threw, and the non-zero exit was classified
+			// ErrBackendUnavailable — so the caller got a 502 and an operator
+			// got a BACKEND-101 at ERROR about a healthy DHCP server.
+			require.ErrorIs(t, err, ErrRangeUnusable)
+			assert.Len(t, fake.scripts, 1, "an inverted resize must not reach the set")
+		})
+	}
 }

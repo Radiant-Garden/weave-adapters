@@ -478,7 +478,9 @@ func TestScopeItem_ShouldAnswer400ForAResizeThatLeavesTheSubnet(t *testing.T) {
 	// ARRANGE — the client method rejects a range that would move the identity,
 	// naming the offending field.
 	backend := &fakeLister{updateScope: func(string, ScopeUpdate) (Scope, error) {
-		return Scope{}, &rangeOutsideSubnetError{scopeID: "10.0.30.0", fields: []string{"endRange"}}
+		return Scope{}, &effectiveRangeError{scopeID: "10.0.30.0", fields: []apierror.FieldError{
+			fieldError("endRange", "must be a leasable address inside the scope's existing subnet 10.0.30.0"),
+		}}
 	}}
 
 	// ACT

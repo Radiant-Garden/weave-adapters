@@ -202,23 +202,22 @@ func (h *ScopeHandler) update(w http.ResponseWriter, r *http.Request) error {
 // updateProblemFor maps an update failure, which has two outcomes list does not.
 //
 // A missing scope is a 404 — the answer weave treats as "target gone, re-create
-// next cycle". A range that would leave the subnet is a validation failure
-// naming the range field(s) that actually left it, because it is the client's
-// input to fix and would have moved the scope's identity. Everything else is a
-// backend code, distinct so the fault the adapter reports is the one weave reads.
+// next cycle". A range the server would not set is a validation failure naming
+// the range field(s) that are wrong and why, because it is the client's input
+// to fix. Everything else is a backend code, distinct so the fault the adapter
+// reports is the one weave reads.
+//
+// The field errors arrive already worded. They used to be built here from a
+// list of names and one hardcoded sentence, which could only ever describe one
+// of the three ways a range is refused — and it was the wrong sentence for an
+// inverted one.
 func updateProblemFor(err error, wadaptID string) error {
 	if errors.Is(err, ErrScopeNotFound) {
 		return apierror.NotFound("scope " + truncateWadaptID(wadaptID))
 	}
 
-	if rangeErr, ok := errors.AsType[*rangeOutsideSubnetError](err); ok {
-		fieldErrors := make([]apierror.FieldError, 0, len(rangeErr.fields))
-		for _, field := range rangeErr.fields {
-			fieldErrors = append(fieldErrors,
-				fieldError(field, "must be a leasable address inside the scope's existing subnet "+rangeErr.scopeID))
-		}
-
-		return apierror.Validation(fieldErrors...)
+	if rangeErr, ok := errors.AsType[*effectiveRangeError](err); ok {
+		return apierror.Validation(rangeErr.fields...)
 	}
 
 	return problemFor(err, opUpdateScope)

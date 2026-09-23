@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 )
 
 // ErrScopeNotFound reports that no scope on the server carries the requested
@@ -16,29 +18,44 @@ import (
 // the outcome weave treats as "target missing, re-create next cycle".
 var ErrScopeNotFound = errors.New("no scope with that wadaptID")
 
-// ErrRangeOutsideSubnet reports that a requested range change would move the
-// pool out of the scope's subnet, and so would change the derived identity — or
-// would rest an end on the subnet's network or broadcast address, which stays
-// inside the subnet and is still not a range Windows will set. The handler
-// renders it as a field validation failure rather than a backend error, because
-// it is the client's input to fix.
-var ErrRangeOutsideSubnet = errors.New("range would leave the scope's leasable subnet")
+// ErrRangeUnusable reports that the range a requested change would produce is
+// not one the DHCP server will set.
+//
+// Three ways in, all of them the client's input to fix, which is why the
+// handler renders this as a field validation failure rather than a backend
+// error: an end outside the existing subnet, which would move the derived
+// identity; an end resting on the subnet's network or broadcast address, which
+// stays inside the subnet and is still not leasable; and an effective range
+// whose end comes before its start.
+//
+// It was ErrRangeOutsideSubnet until the inversion joined it. The name had
+// stopped describing two of the three.
+var ErrRangeUnusable = errors.New("range is not one the DHCP server will set")
 
-// rangeOutsideSubnetError carries which range fields left the subnet, so the
-// handler can render a field error against the ones the caller actually got
-// wrong rather than a hardcoded field. It wraps ErrRangeOutsideSubnet, so
+// effectiveRangeError carries the field errors describing what is wrong with
+// the effective range, so the handler renders the fields the caller actually
+// got wrong with the reason each one is wrong. It wraps ErrRangeUnusable, so
 // errors.Is still recognises it.
-type rangeOutsideSubnetError struct {
+//
+// Field ERRORS rather than names: the three rules behind it do not share a
+// message, and a handler that supplied one hardcoded sentence would have to
+// pick the wrong one for two of them.
+type effectiveRangeError struct {
 	scopeID string
-	fields  []string
+	fields  []apierror.FieldError
 }
 
-func (e *rangeOutsideSubnetError) Error() string {
-	return fmt.Sprintf("%s: %s not leasable in subnet %s",
-		ErrRangeOutsideSubnet, strings.Join(e.fields, ", "), e.scopeID)
+func (e *effectiveRangeError) Error() string {
+	names := make([]string, 0, len(e.fields))
+	for _, f := range e.fields {
+		names = append(names, f.Field)
+	}
+
+	return fmt.Sprintf("%s: %s against subnet %s",
+		ErrRangeUnusable, strings.Join(names, ", "), e.scopeID)
 }
 
-func (e *rangeOutsideSubnetError) Unwrap() error { return ErrRangeOutsideSubnet }
+func (e *effectiveRangeError) Unwrap() error { return ErrRangeUnusable }
 
 // resolveScope lists the server's scopes and returns the one matching wadaptID.
 //
@@ -110,20 +127,25 @@ func (c *Client) DeleteScope(ctx context.Context, wadaptID string) error {
 // so the derived scopeId cannot move. After: the -PassThru scope is re-derived
 // and its wadaptID asserted equal to the requested one — the same guard
 // CreateScope makes against a backend that did something other than asked.
+//
+// The same pre-flight is what keeps a client mistake from reading as an outage.
+// An effective range the server would throw on reaches runError as a non-zero
+// exit and is classified ErrBackendUnavailable, so a 400 the caller can fix
+// would arrive as a 502 and a BACKEND-101 at ERROR naming a healthy server.
 func (c *Client) UpdateScope(ctx context.Context, wadaptID string, in ScopeUpdate) (Scope, error) {
 	existing, err := c.resolveScope(ctx, wadaptID)
 	if err != nil {
 		return Scope{}, err
 	}
 
-	offending, err := in.rangeFieldsOutsideSubnet(existing)
+	offending, err := in.validateEffectiveRange(existing)
 	if err != nil {
 		// An unparseable existing mask: a backend fault, not the client's.
 		return Scope{}, c.backendError(ctx, opUpdateScope, err)
 	}
 
 	if len(offending) > 0 {
-		return Scope{}, &rangeOutsideSubnetError{scopeID: existing.ScopeID, fields: offending}
+		return Scope{}, &effectiveRangeError{scopeID: existing.ScopeID, fields: offending}
 	}
 
 	ctx, cancel := c.bounded(ctx)

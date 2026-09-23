@@ -20,11 +20,13 @@ Tested:
 	ScopeUpdate.env
 	  - TestScopeUpdateEnv_ShouldSplatOnlyProvidedFields: an absent field is not in the environment.
 	  - TestScopeUpdateEnv_ShouldSplatBothRangeEndsWhenEitherIsProvided: the WithRange set is mandatory-both, so a one-sided resize fills the other end from the existing scope.
-	ScopeUpdate.rangeFieldsOutsideSubnet
+	ScopeUpdate.validateEffectiveRange
 	  - TestScopeUpdate_ShouldAcceptAResizeWithinTheSubnet: a range that stays in the subnet moves no identity.
 	  - TestScopeUpdate_ShouldNameARangeFieldThatLeavesTheSubnet: the offending end is reported, using the existing counterpart for the side left out.
 	  - TestScopeUpdate_ShouldNameARangeEndOnTheNetworkOrBroadcastAddress: inside the subnet and still not leasable — the same rule create enforces, through the same error.
 	  - TestScopeUpdate_ShouldNotJudgeLeasabilityOfAnUnparseableEnd: a value that does not parse is named once, for not parsing, and the leasable check does not touch the zero address.
+	  - TestScopeUpdate_ShouldRejectAOneSidedResizeThatInvertsTheRange: the bug this function exists to prevent, on both sides.
+	  - TestScopeUpdate_ShouldNameAFieldOnceWhenItBreaksTwoRules: an end outside the subnet is usually inverted as well.
 
 Tested elsewhere:
 
@@ -38,6 +40,11 @@ Declined:
 	Asserting the exact wording of every field message. The messages reach the
 	client and are covered by the handler test where it matters; pinning each
 	string here would break on a reword while proving nothing new.
+
+	The one exception is the inversion, where the message IS the assertion: the
+	point of naming the provided side is that the caller is told about a field
+	they actually sent, so a test that checked only the field name would pass
+	with the two messages swapped.
 
 Additional Remarks:
 
@@ -54,6 +61,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/radiantgarden/weave-adapters/internal/core/apierror"
 )
 
 // existingScope is the scope an update is applied against: a /24 with a pool
@@ -219,6 +228,17 @@ func TestScopeUpdateEnv_ShouldSplatBothRangeEndsWhenEitherIsProvided(t *testing.
 		"the omitted end is filled from the existing scope, so the pair is always complete")
 }
 
+// fieldNames lists the fields a set of validation failures complains about, so
+// a test can assert on which fields were named without restating every message.
+func fieldNames(errs []apierror.FieldError) []string {
+	names := make([]string, 0, len(errs))
+	for _, e := range errs {
+		names = append(names, e.Field)
+	}
+
+	return names
+}
+
 func TestScopeUpdate_ShouldAcceptAResizeWithinTheSubnet(t *testing.T) {
 	t.Parallel()
 
@@ -226,7 +246,7 @@ func TestScopeUpdate_ShouldAcceptAResizeWithinTheSubnet(t *testing.T) {
 	in := ScopeUpdate{StartRange: new("10.0.30.5"), EndRange: new("10.0.30.200")}
 
 	// ACT
-	offending, err := in.rangeFieldsOutsideSubnet(existingScope())
+	offending, err := in.validateEffectiveRange(existingScope())
 
 	// ASSERT — nothing leaves the subnet, so the identity does not move.
 	require.NoError(t, err)
@@ -263,12 +283,12 @@ func TestScopeUpdate_ShouldNameARangeEndOnTheNetworkOrBroadcastAddress(t *testin
 			t.Parallel()
 
 			// ACT
-			offending, err := tt.in.rangeFieldsOutsideSubnet(existingScope())
+			offending, err := tt.in.validateEffectiveRange(existingScope())
 
 			// ASSERT — named, so the resize is a 400 rather than the 502 the
 			// thrown Set-DhcpServerv4Scope exception produced.
 			require.NoError(t, err)
-			assert.Equal(t, tt.want, offending)
+			assert.Equal(t, tt.want, fieldNames(offending))
 		})
 	}
 }
@@ -282,11 +302,11 @@ func TestScopeUpdate_ShouldNotJudgeLeasabilityOfAnUnparseableEnd(t *testing.T) {
 	in := ScopeUpdate{EndRange: new("not-an-address")}
 
 	// ACT
-	offending, err := in.rangeFieldsOutsideSubnet(existingScope())
+	offending, err := in.validateEffectiveRange(existingScope())
 
 	// ASSERT — named exactly once.
 	require.NoError(t, err)
-	assert.Equal(t, []string{"endRange"}, offending)
+	assert.Equal(t, []string{"endRange"}, fieldNames(offending))
 }
 
 func TestScopeUpdate_ShouldNameARangeFieldThatLeavesTheSubnet(t *testing.T) {
@@ -298,10 +318,81 @@ func TestScopeUpdate_ShouldNameARangeFieldThatLeavesTheSubnet(t *testing.T) {
 	in := ScopeUpdate{EndRange: new("10.0.31.10")}
 
 	// ACT
-	offending, err := in.rangeFieldsOutsideSubnet(existingScope())
+	offending, err := in.validateEffectiveRange(existingScope())
 
 	// ASSERT — the offending field is named so the handler can render a precise
 	// 400; the in-subnet start is not.
 	require.NoError(t, err)
-	assert.Equal(t, []string{"endRange"}, offending)
+	assert.Equal(t, []string{"endRange"}, fieldNames(offending))
+}
+
+func TestScopeUpdate_ShouldRejectAOneSidedResizeThatInvertsTheRange(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]struct {
+		in          ScopeUpdate
+		wantField   string
+		wantMessage string
+	}{
+		// The existing scope runs 10.0.30.10-10.0.30.250. Both of these are in
+		// the subnet, both are leasable addresses, and both describe a range
+		// that runs backwards once the untouched end is filled in.
+		"an end below the untouched start": {
+			in:          ScopeUpdate{EndRange: new("10.0.30.5")},
+			wantField:   "endRange",
+			wantMessage: "must not be before startRange",
+		},
+		"a start above the untouched end": {
+			in:          ScopeUpdate{StartRange: new("10.0.30.251")},
+			wantField:   "startRange",
+			wantMessage: "must not be after endRange",
+		},
+	}
+
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// ACT
+			offending, err := tt.in.validateEffectiveRange(existingScope())
+
+			// ASSERT
+			// A 400 naming the field the caller actually sent. Without this the
+			// update reached Set-DhcpServerv4Scope with start > end, the cmdlet
+			// threw, $ErrorActionPreference = 'Stop' exited non-zero, and
+			// runError classified it ErrBackendUnavailable — so a client typo
+			// came back as a 502 and a BACKEND-101 at ERROR naming a DHCP
+			// server that was working perfectly.
+			require.NoError(t, err)
+			require.Len(t, offending, 1)
+			assert.Equal(t, tt.wantField, offending[0].Field)
+
+			// The message is pinned here, unlike everywhere else in this file:
+			// naming the provided side is the whole behaviour, and a test that
+			// checked the field alone would pass with the two swapped.
+			assert.Equal(t, tt.wantMessage, offending[0].Message)
+		})
+	}
+}
+
+func TestScopeUpdate_ShouldNameAFieldOnceWhenItBreaksTwoRules(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// An end in the previous subnet: outside 10.0.30.0/24 AND below the
+	// untouched start. One mistake, and Windows would refuse it for either
+	// reason.
+	in := ScopeUpdate{EndRange: new("10.0.29.5")}
+
+	// ACT
+	offending, err := in.validateEffectiveRange(existingScope())
+
+	// ASSERT
+	// Named once, for the first rule it broke. Reporting the same field twice
+	// reads as two problems and is one — the same reason the subnet check
+	// already deduplicated against the leasable one.
+	require.NoError(t, err)
+	require.Len(t, offending, 1)
+	assert.Equal(t, "endRange", offending[0].Field)
+	assert.Contains(t, offending[0].Message, "existing subnet")
 }

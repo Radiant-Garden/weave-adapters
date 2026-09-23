@@ -130,8 +130,9 @@ func (in ScopeUpdate) validateRange() []apierror.FieldError {
 		errs = append(errs, fieldError("endRange", "must be an IPv4 address"))
 	}
 
-	// end >= start only when both ends were provided and parsed; a one-sided
-	// resize is compared against the side left unchanged in UpdateScope.
+	// end >= start only when both ends were provided and parsed. A one-sided
+	// resize has nothing here to compare against — the other end lives on the
+	// existing scope — so it is judged in validateEffectiveRange, which has it.
 	if in.StartRange != nil && in.EndRange != nil && startOK && endOK && end.Less(start) {
 		errs = append(errs, fieldError("endRange", "must not be before startRange"))
 	}
@@ -178,17 +179,37 @@ func (in ScopeUpdate) env(existing Scope) map[string]string {
 	return env
 }
 
-// rangeFieldsOutsideSubnet names the range fields whose effective value would
-// leave the existing subnet, and therefore change the scope's identity.
+// validateEffectiveRange reports every range field whose EFFECTIVE value — the
+// one provided, or the existing one where the caller left it out — describes a
+// range the DHCP server would refuse.
 //
-// Effective (provided-or-existing) endpoints, so a one-sided resize is judged
-// against the side left unchanged, and also names an end that lands on the
-// subnet's network or broadcast address — inside the subnet, but not leasable.
-// Returns no fields when no range change was requested. The second return is a
-// backend fault reserved for an existing mask that will not parse — which
-// decode should have caught, but which cannot be a client error if it ever
-// reaches here.
-func (in ScopeUpdate) rangeFieldsOutsideSubnet(existing Scope) ([]string, error) {
+// Three rules, all of them needing the existing scope, which is why they are
+// here rather than in validateRange:
+//
+//   - both ends must stay inside the existing subnet, or the derived scopeId
+//     moves and the update reaches a different resource than the caller named;
+//   - neither end may rest on the subnet's network or broadcast address, which
+//     is inside the subnet and still not leasable — the same rule create
+//     enforces, through the same function;
+//   - the end must not come before the start.
+//
+// The third was missing, and its absence was the bug this function exists to
+// prevent. `{"endRange": "10.0.30.5"}` against a scope running .10–.250
+// produced no field errors, no offending fields, and an environment carrying
+// start=10.0.30.10 end=10.0.30.5. Set-DhcpServerv4Scope throws,
+// $ErrorActionPreference = 'Stop' exits non-zero, runError classifies it as
+// ErrBackendUnavailable — and the client is told the DHCP server is
+// unreachable, with a BACKEND-101 at ERROR pointing an operator at a server
+// that is working perfectly. A client mistake must not be able to manufacture
+// an outage signal; that is the same class 2db3f9d closed for unleasable
+// ranges, and the reason create bounds leases and control characters at all.
+//
+// Field ERRORS rather than field names, because the three rules do not share a
+// message and the caller renders them verbatim. Returns nothing when no range
+// change was requested. The second return is a backend fault reserved for an
+// existing mask that will not parse — which decode should have caught, but
+// which cannot be a client error if it ever reaches here.
+func (in ScopeUpdate) validateEffectiveRange(existing Scope) ([]apierror.FieldError, error) {
 	if in.StartRange == nil && in.EndRange == nil {
 		return nil, nil
 	}
@@ -199,7 +220,7 @@ func (in ScopeUpdate) rangeFieldsOutsideSubnet(existing Scope) ([]string, error)
 			ErrBackendMalformed, existing.WadaptID, existing.SubnetMask)
 	}
 
-	var offending []string
+	var offending []apierror.FieldError
 
 	ends := make([]netip.Addr, 0, 2)
 	parsed := true
@@ -210,7 +231,8 @@ func (in ScopeUpdate) rangeFieldsOutsideSubnet(existing Scope) ([]string, error)
 	} {
 		addr, ok := parseIPv4(f.value)
 		if !ok || networkOf(addr, mask) != existing.ScopeID {
-			offending = append(offending, f.name)
+			offending = append(offending, fieldError(f.name,
+				"must be a leasable address inside the scope's existing subnet "+existing.ScopeID))
 		}
 
 		parsed = parsed && ok
@@ -224,14 +246,48 @@ func (in ScopeUpdate) rangeFieldsOutsideSubnet(existing Scope) ([]string, error)
 	// Only judged on parsed ends: an unparseable one is already named above,
 	// and the zero Addr has no bytes to mask.
 	if parsed {
-		for _, e := range checkLeasableEnds(ends[0], ends[1], mask) {
-			if !slices.Contains(offending, e.Field) {
-				offending = append(offending, e.Field)
-			}
-		}
+		offending = appendUnnamed(offending, checkLeasableEnds(ends[0], ends[1], mask)...)
+		offending = appendUnnamed(offending, in.invertedRange(ends[0], ends[1])...)
 	}
 
 	return offending, nil
+}
+
+// invertedRange names the range field to fix when the effective ends are the
+// wrong way round.
+//
+// Whichever end the CALLER provided is the one named, because that is the one
+// they can change: a body of {"endRange": …} is told about endRange even though
+// the comparison also involves a startRange they never sent. When both were
+// provided this agrees with validateRange and names endRange, so one mistake
+// reads the same however it arrives.
+func (in ScopeUpdate) invertedRange(start, end netip.Addr) []apierror.FieldError {
+	if !end.Less(start) {
+		return nil
+	}
+
+	if in.EndRange != nil {
+		return []apierror.FieldError{fieldError("endRange", "must not be before startRange")}
+	}
+
+	return []apierror.FieldError{fieldError("startRange", "must not be after endRange")}
+}
+
+// appendUnnamed adds each field error for a field not already named.
+//
+// Windows commonly makes one mistake fail two rules at once — an end outside
+// the subnet is often also inverted — and reporting the same field twice reads
+// as two problems.
+func appendUnnamed(into []apierror.FieldError, more ...apierror.FieldError) []apierror.FieldError {
+	for _, e := range more {
+		if slices.ContainsFunc(into, func(have apierror.FieldError) bool { return have.Field == e.Field }) {
+			continue
+		}
+
+		into = append(into, e)
+	}
+
+	return into
 }
 
 // parseProvidedIPv4 parses an optional address field: nil is (zero, true) so a
