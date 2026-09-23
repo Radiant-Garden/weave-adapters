@@ -60,6 +60,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -68,6 +69,17 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
 	"github.com/radiantgarden/weave-adapters/internal/core/winsvc/winsvctest"
 )
+
+// runningStatus is what the SCM reports for a service that is installed and up
+// — the only state in which the destination binary cannot simply be replaced,
+// and therefore the one a test asserting on that refusal has to arrange.
+func runningStatus(opts Options) winsvc.ServiceStatus {
+	return winsvc.ServiceStatus{
+		Installed: true,
+		Name:      opts.Definition.Name,
+		State:     winsvc.StateRunning,
+	}
+}
 
 // writeBinary writes a stand-in executable and returns its path.
 func writeBinary(t *testing.T, dir, name, content string) string {
@@ -157,22 +169,75 @@ func TestBinaryStep_ShouldLeaveAnIdenticalBinaryAlone(t *testing.T) {
 func TestBinaryStep_ShouldBlockAnUpgradeWhileTheServiceHoldsTheBinaryOpen(t *testing.T) {
 	t.Parallel()
 
-	// ARRANGE — a DIFFERENT binary already installed.
+	// ARRANGE — a DIFFERENT binary already installed, and the service RUNNING.
+	// The running part has to be arranged: it is the only state in which the
+	// destination cannot simply be overwritten.
 	opts := runOptions(t)
 	writeBinary(t, opts.Layout.BinDir, filepath.Base(opts.BinPath), "an older build")
 
-	deps, _, _ := okDeps()
+	deps, m, _ := okDeps()
+	m.Reported = runningStatus(opts)
 
 	// ACT
 	verdict, err := binaryStep{}.Check(context.Background(), planFor(opts, deps))
 
 	// ASSERT
-	// The service holds its own executable open, so overwriting it fails with
-	// a sharing violation until it is stopped. A named refusal that says which
-	// flag clears it beats a copy error nobody can act on.
+	// A running service holds its own executable open, so overwriting it fails
+	// with a sharing violation until it is stopped. A named refusal that says
+	// which flag clears it beats a copy error nobody can act on.
 	require.NoError(t, err)
 	assert.Equal(t, Blocked, verdict.Condition)
 	assert.Contains(t, verdict.Detail, "--restart")
+	assert.Contains(t, verdict.Detail, "is running")
+}
+
+func TestBinaryStep_ShouldReplaceAStaleBinaryWithoutDemandingARestart(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]winsvc.ServiceStatus{
+		// What `service uninstall` leaves behind.
+		"no service is registered": {Installed: false},
+		// What a manual stop, or a crash, leaves behind.
+		"the service is stopped": {Installed: true, State: winsvc.StateStopped},
+	}
+
+	for name, reported := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			// ARRANGE — a different binary at the destination, nothing holding it.
+			opts := runOptions(t)
+			writeBinary(t, opts.Layout.BinDir, filepath.Base(opts.BinPath), "an older build")
+
+			deps, m, _ := okDeps()
+			m.Reported = reported
+
+			p := planFor(opts, deps)
+
+			// ACT
+			verdict, err := binaryStep{}.Check(context.Background(), p)
+
+			// ASSERT
+			// Pending, not Blocked. This used to report "the service holds it
+			// open" and demand --restart for ANY hash mismatch, without ever
+			// asking the SCM — so the commonest case got a message that was
+			// simply false, and clearing it bounced a service that was not up.
+			require.NoError(t, err)
+			assert.Equal(t, Pending, verdict.Condition)
+			assert.NotContains(t, verdict.Detail, "--restart")
+			assert.Empty(t, p.restartWanted, "nothing is running, so nothing needs restarting")
+
+			// And it goes through: stopForReplace already tolerated both states.
+			require.NoError(t, binaryStep{}.Apply(context.Background(), p))
+
+			destSum, err := fileSum(p.BinPath)
+			require.NoError(t, err)
+
+			sourceSum, err := fileSum(opts.BinPath)
+			require.NoError(t, err)
+			assert.Equal(t, sourceSum, destSum)
+		})
+	}
 }
 
 func TestBinaryStep_ShouldReplaceTheBinaryWhenRestartWasAskedFor(t *testing.T) {
@@ -184,6 +249,8 @@ func TestBinaryStep_ShouldReplaceTheBinaryWhenRestartWasAskedFor(t *testing.T) {
 	writeBinary(t, opts.Layout.BinDir, filepath.Base(opts.BinPath), "an older build")
 
 	deps, m, _ := okDeps()
+	m.Reported = runningStatus(opts)
+
 	p := planFor(opts, deps)
 
 	// ACT
@@ -275,15 +342,23 @@ func TestInstallStep_ShouldLeaveAMatchingRegistrationAlone(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE
+	// The fixture is built from what INSTALL ACTUALLY REGISTERED, not from the
+	// plan's own fields. Built from p.BinPath and p.ConfigPath it mirrored the
+	// assertion — Check compares against exactly those — so it passed whether
+	// or not the registered command and the compared one agreed, and that is
+	// how a relative --config stayed permanently Blocked with every test green.
 	opts := runOptions(t)
 	deps, m, _ := okDeps()
 	p := installPlan(t, opts, deps)
 
-	// The registration Windows would report back, decomposed.
+	require.NoError(t, installStep{}.Apply(context.Background(), p))
+	require.Len(t, m.Installed, 1)
+
+	registered := m.Installed[0]
 	m.Reported = winsvc.ServiceStatus{
-		Name:      opts.Definition.Name,
+		Name:      registered.Name,
 		Installed: true,
-		Command:   []string{p.BinPath, configFlag, p.ConfigPath},
+		Command:   append([]string{registered.BinPath}, registered.Args...),
 	}
 
 	// ACT
@@ -293,6 +368,40 @@ func TestInstallStep_ShouldLeaveAMatchingRegistrationAlone(t *testing.T) {
 	// Compared against Command, never BinPath: BinPath is the ImagePath with
 	// the SCM's escaping still on it, and comparing it to a Definition's
 	// unescaped values would need a re-implementation of EscapeArg.
+	require.NoError(t, err)
+	assert.Equal(t, Satisfied, verdict.Condition)
+}
+
+func TestInstallStep_ShouldMatchARegistrationThatDiffersOnlyInCase(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	opts := runOptions(t)
+	deps, m, _ := okDeps()
+	p := installPlan(t, opts, deps)
+
+	require.NoError(t, installStep{}.Apply(context.Background(), p))
+	require.Len(t, m.Installed, 1)
+
+	registered := m.Installed[0]
+	m.Reported = winsvc.ServiceStatus{
+		Name:      registered.Name,
+		Installed: true,
+		Command: []string{
+			strings.ToUpper(registered.BinPath),
+			configFlag,
+			strings.ToUpper(registered.Args[1]),
+		},
+	}
+
+	// ACT
+	verdict, err := installStep{}.Check(context.Background(), p)
+
+	// ASSERT
+	// Windows paths are case-insensitive, so an operator who spelled
+	// --bin-dir "C:\Program Files\…" once and "c:\program files\…" the next
+	// time named the same directory. Answering Blocked would demand --reinstall
+	// to fix a difference that is not one.
 	require.NoError(t, err)
 	assert.Equal(t, Satisfied, verdict.Condition)
 }

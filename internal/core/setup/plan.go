@@ -1,6 +1,8 @@
 package setup
 
 import (
+	"path/filepath"
+
 	"github.com/radiantgarden/weave-adapters/internal/core/config"
 	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
 )
@@ -68,13 +70,50 @@ type Plan struct {
 }
 
 // newPlan builds the starting state for a run.
+//
+// ConfigPath is CANONICALISED here, the way binaryStep canonicalises the binary
+// before the install step compares it. It has to be, because Install registers
+// filepath.Abs(ConfigPath) while installStep.Check built its expectation from
+// the raw string: a run with `--config config.toml` registered the absolute
+// path and then, on every later run, reported
+//
+//	wadapt-… is registered but runs [… --config /abs/config.toml],
+//	not [… --config config.toml]; re-run with --reinstall
+//
+// — permanently Blocked, permanently exit 3, and --reinstall re-registered the
+// absolute form and mismatched again next time. Options.check now refuses a
+// relative override outright, so what this mostly does is agree with Install
+// about the spelling of an absolute one; doing it here is what makes the plan
+// hold exactly the string that will be registered, rather than one that has to
+// be kept in step by hand.
+//
+// A failure is swallowed rather than returned. filepath.Abs fails only when the
+// working directory cannot be read, the raw value is no worse than what this
+// function used to use unconditionally, and Options.check has already refused
+// the relative paths this would have been rescuing.
 func newPlan(opts Options, deps Deps) *Plan {
 	return &Plan{
 		opts:       opts,
 		deps:       deps,
-		ConfigPath: opts.configPath(),
+		ConfigPath: canonicalPath(opts.configPath()),
 		BinPath:    opts.BinPath,
 	}
+}
+
+// canonicalPath is the one spelling of a path this package compares and
+// registers.
+//
+// A failure is swallowed rather than returned. filepath.Abs fails only when the
+// working directory cannot be read, the raw value is no worse than what callers
+// used before, and Options.check has already refused the relative paths this
+// would have been rescuing.
+func canonicalPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+
+	return abs
 }
 
 // steps returns the provisioning sequence, in the only order it is correct in.

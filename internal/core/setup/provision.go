@@ -119,8 +119,14 @@ func (s directoryStep) Apply(_ context.Context, p *Plan) error {
 }
 
 // owns reports whether this run is provisioning into its own layout.
+//
+// Compared canonically, because p.ConfigPath is: newPlan resolves it so the
+// plan holds exactly the string Install will register. A raw comparison against
+// the layout's own spelling would answer "not ours" for a layout written with
+// so much as a "." segment in it, and silently skip the lockdown this step
+// exists to apply.
 func (directoryStep) owns(p *Plan) bool {
-	return p.ConfigPath == p.opts.Layout.ConfigPath
+	return p.ConfigPath == canonicalPath(p.opts.Layout.ConfigPath)
 }
 
 // ---------------------------------------------------------------------------

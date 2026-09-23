@@ -13,6 +13,7 @@ Tested:
     - TestRun_ShouldChangeNothingWhenAnyStepIsBlocked: a refusal is answered before a half-provisioned host exists.
     - TestRun_ShouldReportACheckThatCouldNotBeDetermined: an errored check is exit 1, not a blocked verdict.
     - TestRun_ShouldRefuseIncompleteOptions
+    - TestRun_ShouldBeIdempotentAcrossTwoRealRuns: the whole point of the reconciler, driven through the real steps.
   Condition.String
     - TestConditionString_ShouldNameEveryCondition
   Result.Failed
@@ -23,6 +24,12 @@ Tested elsewhere:
   verify_test.go. The steps here are stubs on purpose — this file is about the
   machinery, and a test of Run that depended on the config step's rules would
   fail for reasons that have nothing to do with ordering.
+
+  The one exception is the idempotency test, which drives the REAL steps end to
+  end. Idempotency is not a property of any single step and is the promise the
+  whole command makes; stubs cannot break it, and the bug that motivated the
+  test — the plan comparing a raw --config against the absolute one Install
+  registers — lived in the seam between two of them.
 
   The exit codes the Result maps onto, and the operator-facing rendering of a
   plan: cmd/weave-adapter-dhcp-windows/setup_test.go.
@@ -46,10 +53,13 @@ package setup
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
 )
 
 // journal records what the stub steps did, in order, across a whole run.
@@ -361,4 +371,93 @@ func TestResultFailed_ShouldReportWhetherAnyStepErrored(t *testing.T) {
 			assert.Equal(t, tc.want, Result{Steps: tc.steps}.Failed())
 		})
 	}
+}
+
+func TestRun_ShouldBeIdempotentAcrossTwoRealRuns(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// An operator's own config, at an absolute path spelled with a "." segment
+	// — which filepath.Abs cleans and Install therefore registers cleaned. That
+	// is C2's mechanism in the shape that is still allowed: the plan used to
+	// hold the raw string and compare it against the cleaned one the SCM
+	// reports, so the run was Blocked for ever.
+	configPath := writeConfig(t, "")
+	dir := filepath.Dir(configPath)
+
+	opts := runOptions(t)
+	// Concatenated, not filepath.Join: Join CLEANS, and the whole point is a
+	// spelling that filepath.Abs will change.
+	opts.ConfigPath = dir + string(filepath.Separator) + "." + string(filepath.Separator) + "config.toml"
+	opts.Provisioned = nil
+
+	deps, m, _ := okDeps()
+
+	// The registration steps only. The token step would open the token store
+	// and the verify step would poll a listener, neither of which this is
+	// about — and the token store's path is Windows-shaped, so opening it on a
+	// developer host creates a literal `C:\…` directory beside the package.
+	steps := []Step{configStep{}, binaryStep{}, installStep{}}
+
+	// ACT — the first run.
+	first, err := runOver(context.Background(), opts, newPlan(opts, deps), steps)
+	require.NoError(t, err)
+	require.Empty(t, first.Blocked)
+	require.Len(t, m.Installed, 1, "the first run must register the service")
+
+	// The SCM now reports what that run ACTUALLY registered — not what the plan
+	// intended, which is the distinction the old fixture lost.
+	registered := m.Installed[0]
+	m.Reported = winsvc.ServiceStatus{
+		Name:      registered.Name,
+		Installed: true,
+		BinPath:   registered.BinPath,
+		Command:   append([]string{registered.BinPath}, registered.Args...),
+		State:     winsvc.StateRunning,
+	}
+
+	// ACT — the second run, same options, against the host the first one left.
+	second, err := runOver(context.Background(), opts, newPlan(opts, deps), steps)
+
+	// ASSERT
+	// Nothing blocked and nothing registered twice. A run whose ConfigPath did
+	// not match what Install registers reported
+	//
+	//	… is registered but runs [… --config /abs/config.toml],
+	//	not [… --config ./config.toml]; re-run with --reinstall
+	//
+	// for ever — and --reinstall re-registered the same absolute form and
+	// mismatched again next time, so the invocation shape was permanently
+	// non-idempotent and permanently exit 3.
+	require.NoError(t, err)
+	assert.Empty(t, second.Blocked, "a re-run against an unchanged host must find nothing to refuse")
+	assert.Len(t, m.Installed, 1, "the second run registered the service again")
+
+	for _, step := range second.Steps {
+		assert.Equal(t, Satisfied, step.Verdict.Condition, "step %s", step.Name)
+	}
+}
+
+func TestRun_ShouldRefuseARelativeConfigOverride(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	opts := runOptions(t)
+	opts.ConfigPath = "config.toml"
+
+	deps, m, sec := okDeps()
+
+	// ACT
+	_, err := Run(context.Background(), opts, deps)
+
+	// ASSERT
+	// It becomes the SERVICE's --config argument, and under the SCM the working
+	// directory is C:\Windows\System32 — so it resolves at provisioning time
+	// against the operator's shell and at every boot against System32. Refused
+	// before anything is touched, rather than provisioned into a run that can
+	// never reach Satisfied.
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Options.ConfigPath must be absolute")
+	assert.Empty(t, m.Calls, "the SCM was contacted while refusing")
+	assert.Empty(t, sec.Targets)
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
 )
@@ -72,18 +73,55 @@ func (s binaryStep) Check(_ context.Context, p *Plan) (Verdict, error) {
 		return satisfied("%s is already this exact binary", dest), nil
 	}
 
-	// An upgrade. The service holds its own executable open, so overwriting it
-	// fails with a sharing violation until the service is stopped — which is
-	// the deferred release pipeline showing through, and is exactly the kind
-	// of thing that should be a named refusal rather than a copy error.
+	// An upgrade. A RUNNING service holds its own executable open, so
+	// overwriting it fails with a sharing violation until it is stopped — the
+	// deferred release pipeline showing through, and exactly the kind of thing
+	// that should be a named refusal rather than a copy error.
+	//
+	// Asked, not assumed. This used to report "the service holds it open" for
+	// any hash mismatch, whether or not a service was installed or running —
+	// and a stale executable left behind by `service uninstall`, or after a
+	// manual stop, is the common case. The message was simply false there, and
+	// --restart would have bounced a service that was not up to be bounced.
+	running, err := s.serviceRunning(p)
+	if err != nil {
+		return Verdict{}, err
+	}
+
+	if !running {
+		return pending("replace %s", dest), nil
+	}
+
 	if p.opts.Restart {
 		p.wantsRestart("the binary is being replaced")
 
 		return pending("stop the service and replace %s", dest), nil
 	}
 
-	return blocked("%s differs from this binary and the service holds it open; "+
-		"re-run with --restart to stop, replace and start it", dest), nil
+	return blocked("%s differs from this binary and %s is running, which holds it open; "+
+		"re-run with --restart to stop, replace and start it", dest, p.opts.Definition.Name), nil
+}
+
+// serviceRunning reports whether the service is installed and up, which is the
+// only state in which the destination binary cannot simply be replaced.
+//
+// stopForReplace already tolerates every other state — an absent registration
+// and an already-stopped service are both no-ops there — so this is the only
+// place that needed to learn the difference.
+func (binaryStep) serviceRunning(p *Plan) (bool, error) {
+	m, err := p.deps.NewManager()
+	if err != nil {
+		return false, err
+	}
+
+	defer func() { _ = m.Close() }()
+
+	status, err := m.Status(p.opts.Definition.Name)
+	if err != nil {
+		return false, fmt.Errorf("reading the state of %s: %w", p.opts.Definition.Name, err)
+	}
+
+	return status.Installed && status.State == winsvc.StateRunning, nil
 }
 
 func (s binaryStep) Apply(_ context.Context, p *Plan) error {
@@ -297,7 +335,7 @@ func (s installStep) Check(_ context.Context, p *Plan) (Verdict, error) {
 			def.Name, status.BinPath), nil
 	}
 
-	if slices.Equal(status.Command, want) {
+	if sameCommand(status.Command, want) {
 		return satisfied("%s is registered and already runs %s", def.Name, def.BinPath), nil
 	}
 
@@ -335,6 +373,21 @@ func (s installStep) Apply(_ context.Context, p *Plan) error {
 	p.Secured = append(p.Secured, result.Secured...)
 
 	return nil
+}
+
+// sameCommand reports whether the SCM's command line is the one this run would
+// register.
+//
+// Case-INSENSITIVE, because every element compared is a Windows path or an
+// ASCII flag name and Windows paths are case-insensitive: an operator who
+// passed `--bin-dir "C:\Program Files\weave-adapters"` once and
+// `"c:\program files\weave-adapters"` the next time named the same directory,
+// and answering Blocked for that would demand --reinstall to fix a difference
+// that is not one. The fold is safe only while that holds — an argument whose
+// VALUE is case-sensitive would need this comparing element by element against
+// what each one is.
+func sameCommand(got, want []string) bool {
+	return slices.EqualFunc(got, want, strings.EqualFold)
 }
 
 // removeExisting stops and deregisters a service that is already there, which

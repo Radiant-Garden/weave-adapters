@@ -240,6 +240,24 @@ func (o Options) check() error {
 			"core reports every component, and which one must be healthy is the binary's to name"))
 	}
 
+	// An override, when there is one, is held to the same rule as the layout's
+	// own paths. It is the one path a caller can name that Layout.check never
+	// sees, and it is the one that ends up in the SERVICE's argv: under the SCM
+	// the working directory is C:\Windows\System32, so `--config config.toml`
+	// resolves at provisioning time against the operator's shell and at every
+	// boot against System32. It is also what made a run non-idempotent, since
+	// Install registers the absolute form and the plan compared the raw one.
+	//
+	// Either rule satisfies it, exactly as in Layout.check and for the same
+	// reason: Windows' rule is the one that finally decides, and accepting the
+	// host's as well is what keeps this package drivable from a developer
+	// machine.
+	if o.ConfigPath != "" && !config.IsAbsoluteServicePath(o.ConfigPath) && !filepath.IsAbs(o.ConfigPath) {
+		errs = append(errs, fmt.Errorf(
+			"setup: Options.ConfigPath must be absolute, got %q: it becomes the service's --config "+
+				"argument, and a service resolves it from %s", o.ConfigPath, config.ServiceWorkingDirectory))
+	}
+
 	if err := o.Layout.check(); err != nil {
 		errs = append(errs, err)
 	}
