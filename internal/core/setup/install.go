@@ -126,8 +126,12 @@ func Install(opts InstallOptions, deps Deps) (InstallResult, error) {
 	// policy. Demanding SYSTEM or Administrators would refuse every correct
 	// install. Foreign write is the escalation, and it is what is refused.
 	if err := deps.CheckDir(filepath.Dir(binPath), winsvc.PolicyNoForeignWrite); err != nil {
+		// "not safe to run from" rather than "others can write to": the check
+		// refuses a redirection and an unreadable descriptor as well as a wide
+		// grant, and only the wrapped error knows which. A wrapper that named
+		// one of the three would be wrong about the other two.
 		return InstallResult{}, fmt.Errorf(
-			"the service would run as LocalSystem from a directory others can write to:\n%w", err)
+			"%s is not a directory a LocalSystem service may run from:\n%w", filepath.Dir(binPath), err)
 	}
 
 	m, err := deps.NewManager()

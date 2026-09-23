@@ -25,7 +25,10 @@ Tested:
 	                    - TestCheckSecurity_ShouldRejectAnUnownedDescriptor
 	CheckNotReparsePoint -> - TestCheckNotReparsePoint_ShouldAcceptARealDirectoryAndAnAbsentPath
 	                        - TestCheckNotReparsePoint_ShouldRefuseALinkStandingInForADirectory
-	IsProtectedLocation -> - TestIsProtectedLocation_ShouldRefuseVolumeRootsAndSharedSystemDirectories
+	IsProtectedLocation -> - TestIsProtectedLocation_ShouldRefuseVolumeRootsAndSharedSystemDirectories:
+	                         including the \\?\ and \\.\ spellings, which
+	                         IsAbsoluteServicePath accepts and which read as UNC
+	                         paths unless the prefix is stripped first.
 	                       - TestIsProtectedLocation_ShouldAcceptADirectoryOfTheAdaptersOwn
 	CheckSecurables  -> - TestCheckSecurables_ShouldRefuseADirectoryTargetAtAProtectedLocation
 	                    - TestCheckSecurables_ShouldAllowAFileAtAProtectedLocation
@@ -464,6 +467,12 @@ func TestIsProtectedLocation_ShouldRefuseVolumeRootsAndSharedSystemDirectories(t
 		`C:\Program Files`, `C:\Program Files (x86)`,
 		`C:\Users`, `C:\Users\Public`,
 		`\\fileserver`, `\\fileserver\share`, `\\fileserver\share\`,
+
+		// The extended-length and device spellings of the same directories.
+		// config.IsAbsoluteServicePath accepts them — they begin with two
+		// separators — so without the prefix strip they read as UNC paths with
+		// enough segments to fall through every rule.
+		`\\?\C:\ProgramData`, `\\?\C:\`, `\\?\c:\program files`, `\\.\C:\Windows`,
 	}
 
 	// ACT / ASSERT
@@ -482,6 +491,7 @@ func TestIsProtectedLocation_ShouldAcceptADirectoryOfTheAdaptersOwn(t *testing.T
 		`C:\Users\Public\wadapt`,
 		`\\fileserver\share\weave-adapters`,
 		`D:\wadapt`,
+		`\\?\C:\ProgramData\weave-adapters`,
 		"",
 	}
 

@@ -22,8 +22,11 @@ Tested:
     - TestPrintGeneratedKey_ShouldSayNothingForAKeyThatWasSupplied
   printProvisioned
     - TestPrintProvisioned_ShouldNameASecretWithoutShowingIt
-  printHealth
+  printHealth / printComponentHealth / printAuthOutcome
     - TestPrintHealth_ShouldExplainAnUnhealthyBackendRatherThanJustReportingIt
+    - TestPrintHealth_ShouldReportARefusedTokenAsTheFailureItIs
+    - TestPrintHealth_ShouldNotCallTheServiceFineWhenTheTokenWasRefused
+    - TestPrintHealth_ShouldSayNothingWhenTheServiceNeverAnswered
 
 Tested elsewhere:
   Everything the report describes: internal/core/setup produces the Result, and
@@ -50,6 +53,13 @@ Additional Remarks:
   A written token file is created with O_EXCL, locked down, and only THEN
   written into. It is a live credential at rest, and the one thing worse than
   refusing to write over an existing file is destroying whatever was there.
+
+  printHealth is reached on the FAILING path as well, and the refused-token arm
+  is only reachable there: a 401 fails the verify step, so a run that hits it
+  returns before the success path would have printed anything. The arm was dead
+  code until runSetup learned to call this before its failing return, which is
+  what TestRunSetup_ShouldReportARefusedTokenBeforeItFails pins from the other
+  side.
 
   The lock-then-write order is a security assertion too. A file created under
   a destination directory's inherited grants is readable by whoever that
@@ -420,4 +430,77 @@ func TestReportToken_ShouldNotLeaveAFileBehindWhenTheLockdownFails(t *testing.T)
 	// still be shown: losing it here means an operator has a credential they
 	// cannot use and a label they cannot reuse.
 	assert.Contains(t, out.String(), testToken)
+}
+
+func TestPrintHealth_ShouldReportARefusedTokenAsTheFailureItIs(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	// A working DHCP backend AND a refused token — the production case, and the
+	// combination that used to exit 0.
+	result := setup.Result{
+		Health: setup.HealthReport{
+			Checked: true, Reachable: true, Component: healthComponent,
+			Detail: "healthy", ComponentHealthy: true,
+			AuthRejected: protectedPath + " answered 401 to the token this run minted: " +
+				"the service is not reading the store",
+		},
+	}
+
+	// ACT
+	out := captured(func(p *printer) { printHealth(p, result) })
+
+	// ASSERT
+	// The call was MADE and refused, which is neither proof nor a skip.
+	// Rendered through the skip arm it read "the authenticated call was not
+	// made" followed by a reason explaining that it was.
+	assert.Contains(t, out, "REFUSED")
+	assert.Contains(t, out, "401")
+	assert.NotContains(t, out, "was not made")
+}
+
+func TestPrintHealth_ShouldNotCallTheServiceFineWhenTheTokenWasRefused(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — an unhealthy backend AND a refused token, so two things are
+	// wrong and only one of them is the normal answer on a dev host.
+	result := setup.Result{
+		Health: setup.HealthReport{
+			Checked: true, Reachable: true, Component: healthComponent,
+			Detail:       "unhealthy: no backend",
+			AuthRejected: "the service is not reading the store",
+		},
+	}
+
+	// ACT
+	out := captured(func(p *printer) { printHealth(p, result) })
+
+	// ASSERT
+	// The unhealthy-backend explanation still stands — it is why an operator
+	// must not undo a correct install — but the exit it names is wrong here.
+	// A refused token fails the run outright and exits 1, not 4, and "the
+	// service itself is fine" is the opposite of true beside it.
+	assert.Contains(t, out, "no reachable DHCP backend")
+	assert.NotContains(t, out, "The service itself is fine")
+	assert.NotContains(t, out, "rather than 0")
+	assert.Contains(t, out, "REFUSED")
+}
+
+func TestPrintHealth_ShouldSayNothingWhenTheServiceNeverAnswered(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE — polled to the deadline and never reachable.
+	result := setup.Result{
+		Health: setup.HealthReport{Checked: true, Component: healthComponent},
+	}
+
+	// ACT
+	out := captured(func(p *printer) { printHealth(p, result) })
+
+	// ASSERT
+	// Every sentence this function has to offer begins by asserting the service
+	// is installed and running. The run has already failed with a message
+	// saying it never answered, and repeating the opposite under it would be
+	// worse than silence.
+	assert.Empty(t, out)
 }

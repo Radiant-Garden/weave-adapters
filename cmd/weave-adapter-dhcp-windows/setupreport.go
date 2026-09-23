@@ -231,27 +231,55 @@ func printProvisioned(p *printer, provisioned []config.Provisioned) {
 	}
 }
 
-// printHealth says what verification found, which is what exit 4 means.
+// printHealth says what verification found.
 //
 // Said in words as well as in a code, because the code reaches automation and
 // the words reach the operator standing at the console — and "installed and
 // running, backend unhealthy" is the normal answer on every host without a
-// DHCP server, including every CI runner. An operator who reads only a
-// non-zero exit would undo a correct installation.
+// DHCP server, including every CI runner. An operator who read only a non-zero
+// exit would undo a correct installation.
+//
+// It is called on the FAILING path too, which is the only way the refused-token
+// arm below is reachable at all: a 401 fails the verify step, so the run
+// returns before the success path ever gets here.
 func printHealth(p *printer, result setup.Result) {
 	if !result.Health.Checked || result.DryRun {
 		return
 	}
 
-	if result.Health.ComponentHealthy {
-		p.printf("%s answered health and %s is healthy.\n", serviceName, result.Health.Component)
-	} else {
-		p.printf("%s is installed and running, but %s is not healthy: %s\n",
-			serviceName, result.Health.Component, result.Health.Detail)
-		p.printf("That is the expected answer on a host with no reachable DHCP backend, and it is\n")
-		p.printf("why this exits %d rather than 0. The service itself is fine.\n", exitUnhealthy)
+	// Never answered. The run has already failed with a message that says
+	// exactly that, and every sentence below would claim the service is
+	// installed and running when it is not.
+	if !result.Health.Reachable {
+		return
 	}
 
+	printComponentHealth(p, result)
+	printAuthOutcome(p, result)
+}
+
+// printComponentHealth reports the component the run required.
+func printComponentHealth(p *printer, result setup.Result) {
+	if result.Health.ComponentHealthy {
+		p.printf("%s answered health and %s is healthy.\n", serviceName, result.Health.Component)
+
+		return
+	}
+
+	p.printf("%s is installed and running, but %s is not healthy: %s\n",
+		serviceName, result.Health.Component, result.Health.Detail)
+	p.printf("That is the expected answer on a host with no reachable DHCP backend.\n")
+
+	// Only when nothing else failed is an unhealthy component the reason for
+	// the exit code. A refused token fails the run outright and exits 1, and
+	// "the service itself is fine" would be the wrong thing to say beside it.
+	if result.Health.AuthRejected == "" {
+		p.printf("It is why this exits %d rather than 0. The service itself is fine.\n", exitUnhealthy)
+	}
+}
+
+// printAuthOutcome reports whether the token this run minted was accepted.
+func printAuthOutcome(p *printer, result setup.Result) {
 	switch {
 	case result.Health.AuthProved:
 		p.printf("An authenticated call reached %s, so the token store is being read.\n", protectedPath)

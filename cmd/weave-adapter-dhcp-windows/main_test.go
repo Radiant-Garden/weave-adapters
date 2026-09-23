@@ -33,7 +33,7 @@ Tested:
 
 	checkFileSecurity / checkSecurable
 	  - TestCheckSecurable_ShouldRefuseATargetThatRedirectsSomewhereElse
-	  - TestCheckSecurable_ShouldSkipAnAbsentOptionalTargetAndRefuseAnAbsentRequiredOne
+	  - TestCheckSecurable_ShouldSkipAnAbsentTargetRatherThanRefuseIt
 	  - TestCheckFileSecurity_ShouldCoverTheBinaryAndItsDirectoryAsWellAsTheConfiguredPaths
 
 Tested elsewhere:
@@ -904,26 +904,26 @@ func TestCheckSecurable_ShouldRefuseATargetThatRedirectsSomewhereElse(t *testing
 	assert.Contains(t, err.Error(), "the log directory")
 }
 
-func TestCheckSecurable_ShouldSkipAnAbsentOptionalTargetAndRefuseAnAbsentRequiredOne(t *testing.T) {
+func TestCheckSecurable_ShouldSkipAnAbsentTargetRatherThanRefuseIt(t *testing.T) {
 	t.Parallel()
 
 	// ARRANGE
-	// The token store legitimately does not exist before the first mint, which
-	// is the one case that is genuinely not a refusal. Everything else being
-	// absent is a fact worth stopping for.
 	absent := filepath.Join(t.TempDir(), "not-there")
 
 	// ACT / ASSERT
+	// An absent path has no access list to be wrong. The token store is
+	// legitimately absent before the first mint, and every other path that MUST
+	// exist is opened a moment later by the step that needs it — buildAuth for
+	// the store, observability.Setup for the log directory — with an error that
+	// names it better than this check could. Refusing here would only pre-empt
+	// a clearer message with a vaguer one.
 	require.NoError(t, checkSecurable(winsvc.Securable{
 		Path: absent, Kind: winsvc.SecurableFile, Why: "the token store", Optional: true,
 	}, winsvc.PolicyOwned))
 
-	err := checkSecurable(winsvc.Securable{
+	require.NoError(t, checkSecurable(winsvc.Securable{
 		Path: absent, Kind: winsvc.SecurableFile, Why: "the config file",
-	}, winsvc.PolicyOwned)
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "the config file")
+	}, winsvc.PolicyOwned))
 }
 
 func TestCheckFileSecurity_ShouldCoverTheBinaryAndItsDirectoryAsWellAsTheConfiguredPaths(t *testing.T) {
@@ -963,9 +963,12 @@ func TestCheckFileSecurity_ShouldCoverTheBinaryAndItsDirectoryAsWellAsTheConfigu
 	assert.NotContains(t, paths, exe, "SecurablesFor must not start locking down the binary")
 	assert.NotContains(t, paths, filepath.Dir(exe))
 
-	// The redirection refusal reaches the executable's directory too, which is
+	// The redirection refusal reaches the executable's own path too, which is
 	// the observable half of "this target is checked" on a non-Windows host.
-	assert.Error(t, checkSecurable(winsvc.Securable{
-		Path: filepath.Join(dir, "absent-exe"), Kind: winsvc.SecurableFile, Why: "the service executable itself",
-	}, winsvc.PolicyNoForeignWrite))
+	link := filepath.Join(dir, "linked-exe")
+	require.NoError(t, os.Symlink(exe, link))
+
+	require.ErrorIs(t, checkSecurable(winsvc.Securable{
+		Path: link, Kind: winsvc.SecurableFile, Why: "the service executable itself",
+	}, winsvc.PolicyNoForeignWrite), winsvc.ErrReparsePoint)
 }

@@ -53,6 +53,17 @@ Declined:
   the end-to-end provisioning of a live host is task service-gate's, which
   M4b Phase 2 extends to install through this command.
 
+  Pinning that runSetup calls printHealth before its FAILING return, which is
+  the wiring that makes the refused-token arm reachable. Reaching that arm
+  needs a run that gets as far as verification and is then answered 401, and no
+  such run is constructible off Windows: authTokensFile and logFile are
+  FilePath keys, so CheckServicePaths demands Windows-absolute values on every
+  host — and a run that supplied them would have tokenStep.Apply open
+  `C:\…\tokens.toml`, creating a literal directory beside the package. Each
+  half is covered instead: that a 401 fails the step, in
+  internal/core/setup/verify_test.go, and that the arm renders what it should,
+  in setupreport_test.go. The seam between them is the gate's.
+
 Additional Remarks:
   The re-key guard is the one to keep honest, and its asymmetry is why it is
   tested from three directions. A wrong generate re-derives every wadaptID at

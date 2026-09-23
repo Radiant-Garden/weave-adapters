@@ -151,6 +151,13 @@ func runSetup(ctx context.Context, args []string, out io.Writer, deps setup.Deps
 	tokenErr := reportToken(p, result, opts, tokenOut, deps.Secure)
 
 	if runErr != nil {
+		// Verification is the step that fails with the run already half useful
+		// — the service is installed and up, and the one thing wrong is that it
+		// refused the token. Reporting what health found is the only way an
+		// operator sees that, and it is what makes printHealth's refused-token
+		// arm reachable at all.
+		printHealth(p, result)
+
 		return setupResult{code: exitFailed}, runErr
 	}
 

@@ -60,36 +60,45 @@ type Layout struct {
 }
 
 // check reports a layout that could not be used.
+//
+// The paths are walked as an ORDERED slice rather than a map. A map range is
+// randomised, so the joined error came out in a different order on every run —
+// which makes two runs of the same broken layout look like two different
+// problems, and makes the message impossible to assert on. repo-assessment-02
+// listed that under Minor; it is fixed here rather than left, because this
+// function gained a second loop with the same defect.
 func (l Layout) check() error {
 	var errs []error
 
-	// The two DIRECTORIES, checked before the paths below, because the failure
-	// is of a different kind: a lockdown applied to a volume root or a shared
-	// system directory replaces the inherited access list of everything under
-	// it. `--data-dir C:\ProgramData` is one missing path segment away from
-	// what an operator meant, needs only the Administrator they already have,
-	// and is not undone by re-running anything.
+	// The two DIRECTORIES first, because the failure is of a different kind: a
+	// lockdown applied to a volume root or a shared system directory replaces
+	// the inherited access list of everything under it. `--data-dir
+	// C:\ProgramData` is one missing path segment away from what an operator
+	// meant, needs only the Administrator they already have, and is not undone
+	// by re-running anything.
 	//
 	// BinDir is here too although nothing locks it down today: it is the other
 	// directory a caller names on the command line, and it is copied into.
-	for name, dir := range map[string]string{"Dir": l.Dir, "BinDir": l.BinDir} {
-		if dir != "" && winsvc.IsProtectedLocation(dir) {
-			errs = append(errs, fmt.Errorf(
-				"setup: Layout.%s is %q, which is a volume root or a shared system directory: this "+
-					"provisions into it and locks it to SYSTEM and Administrators, which would strip every "+
-					"other application's access to its own files. Name a directory of this adapter's own",
-				name, dir))
+	for _, d := range []struct{ name, path string }{{"Dir", l.Dir}, {"BinDir", l.BinDir}} {
+		if d.path == "" || !winsvc.IsProtectedLocation(d.path) {
+			continue
 		}
+
+		errs = append(errs, fmt.Errorf(
+			"setup: Layout.%s is %q, which is a volume root or a shared system directory: this "+
+				"provisions into it and locks it to SYSTEM and Administrators, which would strip every "+
+				"other application's access to its own files. Name a directory of this adapter's own",
+			d.name, d.path))
 	}
 
-	for name, path := range map[string]string{
-		"Dir":            l.Dir,
-		"ConfigPath":     l.ConfigPath,
-		"TokenStorePath": l.TokenStorePath,
-		"LogPath":        l.LogPath,
+	for _, f := range []struct{ name, path string }{
+		{"Dir", l.Dir},
+		{"ConfigPath", l.ConfigPath},
+		{"TokenStorePath", l.TokenStorePath},
+		{"LogPath", l.LogPath},
 	} {
-		if path == "" {
-			errs = append(errs, fmt.Errorf("setup: Layout.%s is required", name))
+		if f.path == "" {
+			errs = append(errs, fmt.Errorf("setup: Layout.%s is required", f.name))
 
 			continue
 		}
@@ -105,10 +114,10 @@ func (l Layout) check() error {
 		// So nothing is loosened where it matters, and accepting the host's
 		// rule keeps this package drivable from a developer machine, which is
 		// the entire reason its platform operations are injected.
-		if !config.IsAbsoluteServicePath(path) && !filepath.IsAbs(path) {
+		if !config.IsAbsoluteServicePath(f.path) && !filepath.IsAbs(f.path) {
 			errs = append(errs, fmt.Errorf(
 				"setup: Layout.%s must be absolute, got %q: a service resolves it from %s",
-				name, path, config.ServiceWorkingDirectory))
+				f.name, f.path, config.ServiceWorkingDirectory))
 		}
 	}
 

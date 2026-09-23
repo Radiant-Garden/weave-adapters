@@ -457,6 +457,24 @@ func protectedLocations() []string {
 func normalizeLocation(path string) string {
 	norm := strings.ReplaceAll(strings.TrimSpace(path), "/", `\`)
 
+	// The extended-length and device prefixes are stripped first, or they
+	// defeat the whole comparison: `\\?\C:\ProgramData` IS C:\ProgramData, and
+	// config.IsAbsoluteServicePath accepts it because it begins with two
+	// separators — so without this it read as a UNC path with enough segments
+	// to fall through every rule below.
+	//
+	// Only the drive form is recovered. `\\?\UNC\server\share` re-spells a UNC
+	// path and is left alone: it names somebody else's share rather than a
+	// system directory, and a rule guessing at it would be a rule nobody can
+	// check.
+	for _, prefix := range []string{`\\?\`, `\\.\`} {
+		if rest, found := strings.CutPrefix(norm, prefix); found && isDriveRooted(rest) {
+			norm = rest
+
+			break
+		}
+	}
+
 	// A UNC prefix is two separators by definition, so the trim has to leave
 	// them alone; everything else loses every trailing one.
 	if prefix, rest, found := strings.Cut(norm, `\\`); found && prefix == "" {
@@ -464,6 +482,17 @@ func normalizeLocation(path string) string {
 	}
 
 	return strings.ToLower(strings.TrimRight(norm, `\`))
+}
+
+// isDriveRooted reports whether a path begins with a drive letter and a colon,
+// which is what makes an extended-length prefix safe to strip.
+func isDriveRooted(path string) bool {
+	return len(path) >= 2 && path[1] == ':' && isASCIILetter(path[0])
+}
+
+// isASCIILetter reports whether c names a drive.
+func isASCIILetter(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // containsSID reports whether sid is in the list, case-insensitively: Windows

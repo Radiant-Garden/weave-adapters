@@ -586,8 +586,16 @@ func checkFileSecurity(values *config.Values, cfg *config.Config) error {
 	return errors.Join(errs...)
 }
 
-// checkSecurable reads one target back and judges it, treating an absent
-// optional target as nothing to judge.
+// checkSecurable reads one target back and judges it, treating an absent one as
+// nothing to judge.
+//
+// Absent is not a refusal, for any target. A path that is not there has no
+// access list to be wrong, and every path that MUST be there is opened a moment
+// later by the step that needs it, with an error that names it better than this
+// one could: the token store by buildAuth, the log directory by
+// observability.Setup. The token store is legitimately absent before the first
+// mint, which is why Securable carries Optional at all — but refusing the
+// others here would only pre-empt a clearer message with a vaguer one.
 //
 // Lstat before the descriptor read does two jobs: it is how "absent" is told
 // apart from "unreadable" without decoding a Windows error number, and it is
@@ -600,7 +608,7 @@ func checkSecurable(target winsvc.Securable, policy winsvc.Policy) error {
 	}
 
 	if _, err := os.Lstat(target.Path); err != nil {
-		if target.Optional && errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 
