@@ -220,10 +220,20 @@ func init() {
 			{Name: "remoteAddr", Type: "string", Required: true, Description: "Client address."},
 			{Name: "requestId", Type: "string", Required: false, Description: "Correlation ID, if the request-ID middleware already ran."},
 			{Name: "panic", Type: "string", Required: true, Description: "The recovered panic value."},
-			{Name: "stack", Type: "string", Required: false, Description: "Stack trace captured at the panic."},
+			{
+				Name: "stack", Type: "string", Required: false,
+				Description: "Stack trace captured at the panic. In the log file only — see EventLogOmit.",
+				// The Application Event Log is readable by every local user and
+				// recovery runs outside authentication, so an unauthenticated
+				// request that panics would otherwise publish a full stack trace
+				// to anyone with a console. The log file still carries it, and
+				// that file is locked to SYSTEM and Administrators.
+				EventLogOmit: true,
+			},
 		},
 		Example: `{"eventId":"API-011","data":{"method":"GET","path":"/x","remoteAddr":"192.0.2.1:1234","requestId":"…","panic":"runtime error: invalid memory address"}}`,
-		Troubleshooting: "A handler bug caused a panic. Read the stack field, reproduce via method+path, and fix the root cause " +
+		Troubleshooting: "A handler bug caused a panic. Read the stack field in the LOG FILE — the Event Log entry omits it, " +
+			"because that log is readable by every local user — then reproduce via method+path and fix the root cause " +
 			"(often a nil dereference or out-of-range index). Correlate other events by requestId.",
 	})
 

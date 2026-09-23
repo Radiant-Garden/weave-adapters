@@ -37,11 +37,11 @@
 | remoteAddr | string | true | Client address. |
 | requestId | string | false | Correlation ID, if the request-ID middleware already ran. |
 | panic | string | true | The recovered panic value. |
-| stack | string | false | Stack trace captured at the panic. |
+| stack | string | false | Stack trace captured at the panic. In the log file only — see EventLogOmit. |
 
 **Example:** `{"eventId":"API-011","data":{"method":"GET","path":"/x","remoteAddr":"192.0.2.1:1234","requestId":"…","panic":"runtime error: invalid memory address"}}`
 
-**Troubleshooting:** A handler bug caused a panic. Read the stack field, reproduce via method+path, and fix the root cause (often a nil dereference or out-of-range index). Correlate other events by requestId.
+**Troubleshooting:** A handler bug caused a panic. Read the stack field in the LOG FILE — the Event Log entry omits it, because that log is readable by every local user — then reproduce via method+path and fix the root cause (often a nil dereference or out-of-range index). Correlate other events by requestId.
 
 ## API-012 — response too large to tag
 

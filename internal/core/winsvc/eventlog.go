@@ -3,6 +3,7 @@ package winsvc
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"github.com/radiantgarden/weave-adapters/internal/core/events"
@@ -13,8 +14,8 @@ import (
 // seam the events system exposes and it hands over a record.
 const eventIDAttr = "eventId"
 
-// eventLogIDOf returns the Windows Event Log number for a record, and whether
-// the record belongs in the Event Log at all.
+// mirroredEvent returns the catalog entry behind a record, and whether the
+// record belongs in the Event Log at all.
 //
 // The decision is the registry's, not this function's: an event carries its own
 // EventLogID, declared by the package that owns it, and a zero means "not
@@ -22,9 +23,13 @@ const eventIDAttr = "eventId"
 // cannot drift from the catalog, and a conformance test in internal/catalogs
 // holds the catalog to the eligibility rule.
 //
+// The whole entry is returned rather than just the number, because rendering
+// needs it too: a field the catalog marks EventLogOmit is left out of the
+// entry, and the catalog is the only place that says which.
+//
 // A record carrying no eventId is a raw slog call. Those are developer
 // breadcrumbs by convention, so they stay out of an operator's Event Viewer.
-func eventLogIDOf(r slog.Record) (uint32, bool) {
+func mirroredEvent(r slog.Record) (*events.Event, bool) {
 	var id events.EventID
 
 	r.Attrs(func(a slog.Attr) bool {
@@ -38,15 +43,36 @@ func eventLogIDOf(r slog.Record) (uint32, bool) {
 	})
 
 	if id == "" {
-		return 0, false
+		return nil, false
 	}
 
 	event, known := events.Get(id)
 	if !known || event.EventLogID == 0 {
-		return 0, false
+		return nil, false
 	}
 
-	return event.EventLogID, true
+	return event, true
+}
+
+// omittedFields is the set of field names an event keeps out of its Event Log
+// entry.
+//
+// Matched on the LEAF name, which is the name a FieldDef carries: Emit nests
+// an event's data under a "data" group, so the attribute this sink walks is
+// "stack" inside that group rather than "data.stack". A leaf match also covers
+// the same field wherever else it were to appear on the record, which for a
+// field declared too sensitive for this log is the answer that errs the right
+// way.
+func omittedFields(event *events.Event) []string {
+	var out []string
+
+	for _, f := range event.Fields {
+		if f.EventLogOmit {
+			out = append(out, f.Name)
+		}
+	}
+
+	return out
 }
 
 // eventLogWriter is what the platform half implements: one entry, at a level.
@@ -87,20 +113,20 @@ func (h *eventLogHandler) Enabled(_ context.Context, level slog.Level) bool {
 
 // Handle writes one entry, or drops the record when it is not mirrored.
 func (h *eventLogHandler) Handle(_ context.Context, r slog.Record) error {
-	eid, mirrored := eventLogIDOf(r)
+	event, mirrored := mirroredEvent(r)
 	if !mirrored {
 		return nil
 	}
 
-	msg := h.render(r)
+	msg := h.render(r, omittedFields(event))
 
 	switch {
 	case r.Level >= slog.LevelError:
-		return h.w.error(eid, msg)
+		return h.w.error(event.EventLogID, msg)
 	case r.Level >= slog.LevelWarn:
-		return h.w.warning(eid, msg)
+		return h.w.warning(event.EventLogID, msg)
 	default:
-		return h.w.info(eid, msg)
+		return h.w.info(event.EventLogID, msg)
 	}
 }
 
@@ -125,17 +151,17 @@ func (h *eventLogHandler) WithGroup(string) slog.Handler { return h }
 // The message first, then every attribute as key=value, because that is the
 // order an operator reads: Event Viewer shows the opening words in its list
 // column, and the detail only once an entry is selected.
-func (h *eventLogHandler) render(r slog.Record) string {
+func (h *eventLogHandler) render(r slog.Record, omit []string) string {
 	var b strings.Builder
 
 	b.WriteString(r.Message)
 
 	for _, a := range h.attrs {
-		appendAttr(&b, "", a)
+		appendAttr(&b, "", a, omit)
 	}
 
 	r.Attrs(func(a slog.Attr) bool {
-		appendAttr(&b, "", a)
+		appendAttr(&b, "", a, omit)
 
 		return true
 	})
@@ -143,8 +169,13 @@ func (h *eventLogHandler) render(r slog.Record) string {
 	return b.String()
 }
 
-// appendAttr writes one attribute, flattening a group into dotted keys.
-func appendAttr(b *strings.Builder, prefix string, a slog.Attr) {
+// appendAttr writes one attribute, flattening a group into dotted keys and
+// dropping anything the event keeps out of this log.
+func appendAttr(b *strings.Builder, prefix string, a slog.Attr, omit []string) {
+	if slices.Contains(omit, a.Key) {
+		return
+	}
+
 	a.Value = a.Value.Resolve()
 
 	key := a.Key
@@ -162,7 +193,7 @@ func appendAttr(b *strings.Builder, prefix string, a slog.Attr) {
 		}
 
 		for _, nested := range group {
-			appendAttr(b, key, nested)
+			appendAttr(b, key, nested, omit)
 		}
 
 		return

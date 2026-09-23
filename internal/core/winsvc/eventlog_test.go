@@ -5,9 +5,9 @@ Pending:
 
 Tested:
 
-	eventLogIDOf -> - TestEventLogIDOf_ShouldReadTheNumberFromTheRegistry
-	                - TestEventLogIDOf_ShouldDropARecordTheCatalogDoesNotMirror
-	                - TestEventLogIDOf_ShouldDropARawSlogCall: breadcrumbs stay
+	mirroredEvent -> - TestMirroredEvent_ShouldReadTheNumberFromTheRegistry
+	                - TestMirroredEvent_ShouldDropARecordTheCatalogDoesNotMirror
+	                - TestMirroredEvent_ShouldDropARawSlogCall: breadcrumbs stay
 	                  out of an operator's Event Viewer.
 	Enabled      -> - TestEventLogHandlerEnabled_ShouldFloorAtInfo: the fan-out
 	                  ORs its children, so answering true everywhere would build
@@ -15,8 +15,9 @@ Tested:
 	Handle       -> - TestEventLogHandlerHandle_ShouldRouteBySeverity
 	                - TestEventLogHandlerHandle_ShouldWriteNothingForAnUnmirroredEvent
 	                - TestEventLogHandlerHandle_ShouldReportAWriteFailure
-	render       -> - TestEventLogHandlerHandle_ShouldFlattenGroupsIntoTheMessage
-	                - TestEventLogHandlerHandle_ShouldElideAnEmptyGroup
+	render / omittedFields -> - TestEventLogHandlerHandle_ShouldFlattenGroupsIntoTheMessage
+	                          - TestEventLogHandlerHandle_ShouldElideAnEmptyGroup
+	                          - TestEventLogHandlerHandle_ShouldLeaveOutAFieldTheCatalogOmits
 	WithAttrs    -> - TestEventLogHandlerWithAttrs_ShouldCarryThemOntoEveryEntry
 	WithGroup    -> - TestEventLogHandlerWithGroup_ShouldReturnTheHandlerUnchanged
 
@@ -42,6 +43,14 @@ Additional Remarks:
 	These tests register throwaway events in the global registry, so they
 	cannot run in parallel with anything that walks it. The IDs are outside
 	every allocated range so a mistake here cannot look like a real event.
+
+	The omitted-field rule exists for one real field, API-011's stack, and the
+	reason is not tidiness: the Application Event Log is readable by every
+	local user and the recovery middleware runs OUTSIDE authentication, so an
+	unauthenticated request that panicked a handler would publish a full Go
+	stack trace to anyone with a console. That the catalog still declares the
+	field, and the log FILE still carries it, is asserted in
+	internal/core/events/catalog and internal/core/middleware.
 */
 package winsvc
 
@@ -95,6 +104,7 @@ func (f *fakeEventLog) Close() error { return nil }
 const (
 	mirroredID   events.EventID = "TEST-901"
 	unmirroredID events.EventID = "TEST-902"
+	omittingID   events.EventID = "TEST-903"
 )
 
 // registerTestEvents puts two throwaway events in the registry: one mirrored to
@@ -124,6 +134,20 @@ func registerTestEvents(t *testing.T) {
 		Category:        "TEST",
 		Topic:           "Testing",
 	})
+
+	events.Register(&events.Event{
+		ID:              omittingID,
+		Level:           slog.LevelError,
+		EventLogID:      996,
+		MessageTemplate: "test event with a field this log does not carry",
+		Description:     "Registered by winsvc's tests.",
+		Category:        "TEST",
+		Topic:           "Testing",
+		Fields: []events.FieldDef{
+			{Name: "method", Type: "string", Required: true, Description: "Kept."},
+			{Name: "stack", Type: "string", Required: false, Description: "Dropped.", EventLogOmit: true},
+		},
+	})
 }
 
 // mirroredRecord builds a record the way Emit does: the catalog ID as an
@@ -140,39 +164,39 @@ func mirroredRecord(level slog.Level, id events.EventID, data ...any) slog.Recor
 }
 
 //nolint:paralleltest // registers into the process-global event registry
-func TestEventLogIDOf_ShouldReadTheNumberFromTheRegistry(t *testing.T) {
+func TestMirroredEvent_ShouldReadTheNumberFromTheRegistry(t *testing.T) {
 	// ARRANGE
 	registerTestEvents(t)
 
 	// ACT
-	eid, mirrored := eventLogIDOf(mirroredRecord(slog.LevelWarn, mirroredID))
+	event, mirrored := mirroredEvent(mirroredRecord(slog.LevelWarn, mirroredID))
 
 	// ASSERT
 	// Read back from the catalog rather than from a table here, so the sink
 	// cannot drift from what the owning package declared.
-	assert.True(t, mirrored)
-	assert.Equal(t, uint32(997), eid)
+	require.True(t, mirrored)
+	assert.Equal(t, uint32(997), event.EventLogID)
 }
 
 //nolint:paralleltest // registers into the process-global event registry
-func TestEventLogIDOf_ShouldDropARecordTheCatalogDoesNotMirror(t *testing.T) {
+func TestMirroredEvent_ShouldDropARecordTheCatalogDoesNotMirror(t *testing.T) {
 	// ARRANGE
 	registerTestEvents(t)
 
 	// ACT
-	_, mirrored := eventLogIDOf(mirroredRecord(slog.LevelWarn, unmirroredID))
+	_, mirrored := mirroredEvent(mirroredRecord(slog.LevelWarn, unmirroredID))
 
 	// ASSERT
 	assert.False(t, mirrored)
 }
 
 //nolint:paralleltest // reads the process-global event registry
-func TestEventLogIDOf_ShouldDropARawSlogCall(t *testing.T) {
+func TestMirroredEvent_ShouldDropARawSlogCall(t *testing.T) {
 	// ARRANGE — no eventId attribute at all.
 	r := slog.NewRecord(time.Time{}, slog.LevelError, "a raw slog call", 0)
 
 	// ACT
-	_, mirrored := eventLogIDOf(r)
+	_, mirrored := mirroredEvent(r)
 
 	// ASSERT
 	// slog.Debug is for developer breadcrumbs by convention, and an operator's
@@ -330,4 +354,30 @@ func TestEventLogHandlerEnabled_ShouldFloorAtInfo(t *testing.T) {
 	assert.True(t, h.Enabled(t.Context(), slog.LevelInfo))
 	assert.True(t, h.Enabled(t.Context(), slog.LevelWarn))
 	assert.True(t, h.Enabled(t.Context(), slog.LevelError))
+}
+
+//nolint:paralleltest // registers into the process-global event registry
+func TestEventLogHandlerHandle_ShouldLeaveOutAFieldTheCatalogOmits(t *testing.T) {
+	// ARRANGE
+	registerTestEvents(t)
+
+	f := &fakeEventLog{}
+	h := &eventLogHandler{w: f}
+
+	// ACT
+	require.NoError(t, h.Handle(t.Context(), mirroredRecord(slog.LevelError, omittingID,
+		"method", "GET", "stack", "goroutine 1 [running]:\nmain.handler(...)")))
+
+	// ASSERT
+	// The Application Event Log is readable by every local user, and this is
+	// the shape of API-011: recovery runs outside authentication, so an
+	// unauthenticated request that panicked would otherwise put a full stack
+	// trace — package paths, file names, line numbers — somewhere anyone with
+	// a console can read it.
+	require.Len(t, f.entries, 1)
+
+	msg := f.entries[0].msg
+	assert.Contains(t, msg, "data.method=GET", "a field the catalog does not omit must survive")
+	assert.NotContains(t, msg, "stack")
+	assert.NotContains(t, msg, "goroutine")
 }

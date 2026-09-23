@@ -66,6 +66,14 @@ func TestRecovery_ShouldReturn500AndEmitOnPanic(t *testing.T) { //nolint:paralle
 	rec.AssertData(t, catalog.API011, "panic", "boom")
 	rec.AssertMatchesCatalog(t)
 
+	// The stack is still emitted. It is marked EventLogOmit in the catalog, so
+	// the Windows Event Log entry leaves it out — but the log FILE is where a
+	// panic is actually diagnosed, and that file is locked to SYSTEM and
+	// Administrators.
+	panicked := rec.FindByID(catalog.API011)
+	require.Len(t, panicked, 1)
+	assert.Contains(t, panicked[0].Data("stack"), "runtime/debug.Stack")
+
 	// One panic, one event: Recovery renders the body itself rather than going
 	// through WriteError, which would emit API-901 on top of API-011.
 	rec.AssertNotEmitted(t, catalog.API901)

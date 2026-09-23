@@ -113,6 +113,25 @@ type FieldDef struct {
 	Type        string // Field type (string, int, bool, time, ...)
 	Required    bool   // Whether the field is required
 	Description string // Field description
+
+	// EventLogOmit keeps this field out of the Windows Event Log entry while
+	// leaving it in the log file.
+	//
+	// It is declared per field, by the package that owns the event, for the
+	// same reason EventLogID is declared per event: only the owner knows what
+	// the value contains. The two logs are not two copies of one stream — the
+	// file carries the whole structured record and is locked down to SYSTEM
+	// and Administrators, while the Application Event Log is readable by every
+	// local user and carries the handful of lines an operator opens Event
+	// Viewer for.
+	//
+	// One field has needed it so far and is the reason it exists: API-011's
+	// stack. The recovery middleware is the OUTERMOST middleware, so it runs
+	// before authentication — which means an unauthenticated request that
+	// panicked a handler would put a full Go stack trace, with package paths,
+	// file names and line numbers, into a log an unprivileged local account
+	// can read.
+	EventLogOmit bool
 }
 
 // MaxEventLogID is the highest Windows Event Log ID that renders.
