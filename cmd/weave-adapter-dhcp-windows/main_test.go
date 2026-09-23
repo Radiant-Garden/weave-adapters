@@ -34,7 +34,9 @@ Tested:
 	checkFileSecurity / checkSecurable
 	  - TestCheckSecurable_ShouldRefuseATargetThatRedirectsSomewhereElse
 	  - TestCheckSecurable_ShouldSkipAnAbsentTargetRatherThanRefuseIt
-	  - TestCheckFileSecurity_ShouldCoverTheBinaryAndItsDirectoryAsWellAsTheConfiguredPaths
+	  - TestCheckFileSecurity_ShouldCoverTheBinaryAndItsDirectoryAsWellAsTheConfiguredPaths:
+	    which asserts the REFUSAL on Windows, where the descriptor is real.
+	  - TestCheckSecurable_ShouldRefuseTheExecutableThroughASymlink
 
 Tested elsewhere:
   Each wired component (config.Load, observability.Setup, httpserver.New/Run,
@@ -64,6 +66,16 @@ Additional Remarks:
   exercised here is the part a developer host can answer: the reparse-point
   refusal, the absent-target rule, and which targets are covered at all.
 
+  One assertion here is deliberately platform-split, and it is the one that
+  taught the lesson. TestCheckFileSecurity_… originally required NO error from
+  checkFileSecurity, which is true only off Windows, where ReadSecurity answers
+  ErrUnsupported and every target is skipped. ci:windows failed it immediately:
+  `go test` builds the test binary into a go-build temp directory under the
+  runner's own profile, which grants write to the account running the test, so
+  the check correctly refuses. The assertion now requires the REFUSAL on
+  Windows and names the executable in it — the same fact, asserted where it
+  means something, instead of a green tick that proved the check was inert.
+
   Tests bind a port discovered by the OS rather than a hard-coded one. Config
   validation rejects port 0, so the port cannot be left for the kernel to pick at
   bind time — there is a small window between discovering the port and run
@@ -84,6 +96,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -930,29 +943,23 @@ func TestCheckFileSecurity_ShouldCoverTheBinaryAndItsDirectoryAsWellAsTheConfigu
 	t.Parallel()
 
 	// ARRANGE
-	// The binary and the directory it runs from are not in SecurablesFor: the
-	// lockdown never touches them, install checks the directory once, and the
-	// executable's own list was never checked at all. Both are the escalation
-	// the install-time check exists to prevent, and an access list can be
-	// widened at any time after an install.
-	dir := t.TempDir()
-
 	values, err := config.LoadWithoutEnvironment(adapterSpec(), withIdentity(t))
 	require.NoError(t, err)
 
 	cfg, err := config.Core(values)
 	require.NoError(t, err)
 
-	// ACT
-	// Off Windows ReadSecurity answers ErrUnsupported and every target is
-	// skipped, so what this asserts is the SHAPE — that the binary is reached
-	// at all, which a missing executable makes visible.
-	require.NoError(t, checkFileSecurity(values, cfg))
-
 	exe, err := os.Executable()
 	require.NoError(t, err)
 
+	// ACT
+	checkErr := checkFileSecurity(values, cfg)
+
 	// ASSERT
+	// The binary is NOT in SecurablesFor, and must not be: that list is what
+	// the installer SECURES from, and install's rule about Program Files is
+	// "checked, never repaired" — putting the binary in it would start
+	// re-ACLing %ProgramFiles%.
 	targets := winsvc.SecurablesFor(values.ConfigPath(), cfg.AuthTokensFile, cfg.LogFile)
 
 	paths := make([]string, 0, len(targets))
@@ -963,11 +970,45 @@ func TestCheckFileSecurity_ShouldCoverTheBinaryAndItsDirectoryAsWellAsTheConfigu
 	assert.NotContains(t, paths, exe, "SecurablesFor must not start locking down the binary")
 	assert.NotContains(t, paths, filepath.Dir(exe))
 
-	// The redirection refusal reaches the executable's own path too, which is
-	// the observable half of "this target is checked" on a non-Windows host.
-	link := filepath.Join(dir, "linked-exe")
+	// And it is checked anyway, which is the half that needs a real security
+	// descriptor to observe.
+	//
+	// This assertion is inverted from what it was, and the WS2022 runner is why.
+	// It used to require NO error — which held only off Windows, where
+	// ReadSecurity answers ErrUnsupported and every target is skipped. On a host
+	// where the check actually works it cannot hold: `go test` builds the test
+	// binary into a go-build temp directory under the runner's own profile, and
+	// that directory grants write to the account running the test. So the
+	// original assertion passed for the reason that proved nothing and failed
+	// the moment it met a descriptor.
+	if runtime.GOOS != "windows" {
+		require.NoError(t, checkErr, "off Windows there is no descriptor, so every target is skipped")
+
+		return
+	}
+
+	// A test binary lives somewhere its own account can write, which is exactly
+	// what this refuses — so the refusal naming the executable is the proof that
+	// the executable is judged at all.
+	require.Error(t, checkErr)
+	assert.Contains(t, checkErr.Error(), exe, "the executable itself must be judged")
+	assert.Contains(t, checkErr.Error(), filepath.Dir(exe), "the directory it runs from must be judged")
+}
+
+func TestCheckSecurable_ShouldRefuseTheExecutableThroughASymlink(t *testing.T) {
+	t.Parallel()
+
+	// ARRANGE
+	exe, err := os.Executable()
+	require.NoError(t, err)
+
+	link := filepath.Join(t.TempDir(), "linked-exe")
 	require.NoError(t, os.Symlink(exe, link))
 
+	// ACT / ASSERT
+	// The redirection refusal reaches the executable's own path, not just the
+	// directories — replacing what LocalSystem runs is the escalation, and a
+	// link is a way to do it without touching the real file's access list.
 	require.ErrorIs(t, checkSecurable(winsvc.Securable{
 		Path: link, Kind: winsvc.SecurableFile, Why: "the service executable itself",
 	}, winsvc.PolicyNoForeignWrite), winsvc.ErrReparsePoint)
