@@ -117,8 +117,10 @@ import (
 const (
 	// usersSID widens a target on purpose, in steps 18 and 18c.
 	usersSID = "*S-1-5-32-545"
-	// systemSID is the account the service runs as; 18b denies it READ_CONTROL.
-	systemSID = winsvc.SIDLocalSystem
+	// everyoneSID is what 18b denies READ_CONTROL to. Everyone rather than
+	// SYSTEM, because the LocalSystem token also carries Administrators and
+	// would read the descriptor through that group's grant.
+	everyoneSID = "*S-1-1-0"
 	// administratorsSID is the owner `service secure` must restore, in 18a.
 	administratorsSID = winsvc.SIDAdministrators
 )
@@ -455,19 +457,31 @@ func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
 		// on, which made it optional to anyone who could make one unreadable.
 		// Denying READ_CONTROL is cheaper than crafting a convincing list.
 		//
-		// Denied to SYSTEM specifically, which is what the service runs as. A
-		// deny for Everyone would also lock out the elevated repair below.
+		// DENIED TO EVERYONE, and the first attempt at this test is why.
+		// Denying only S-1-5-18 does nothing: the LocalSystem token also
+		// carries BUILTIN\Administrators, the lockdown grants that group full
+		// control, and the read succeeds through the group ACE. That version
+		// passed once for the wrong reason — the preceding step had aborted
+		// before its repair, so the start was refused by the OWNER check and
+		// the assertion matched a refusal it had not caused.
+		//
+		// Everyone locks out the elevated repair too, which is why the repair
+		// below takes ownership first: SeTakeOwnershipPrivilege does not go
+		// through the DACL, and an owner holds WRITE_DAC implicitly, so an
+		// administrator can always climb back in.
 		g.mustAdapter(t, "service", "stop")
 		waitState(t, "STOPPED", time.Minute)
 
-		ps(t, fmt.Sprintf(`icacls '%s' /deny '*%s:(RC)'`, g.tokenStore, systemSID))
+		ps(t, fmt.Sprintf(`icacls '%s' /deny '%s:(RC)'`, g.tokenStore, everyoneSID))
 
 		_, err := g.adapterCmd(t, "service", "start")
 		require.Error(t, err, "a descriptor the service cannot read must refuse the start")
 		assert.Contains(t, eventLog(t, 20), "could not be read",
 			"the refusal must say it could not tell, rather than claiming the path is safe")
 
-		ps(t, fmt.Sprintf(`icacls '%s' /remove:d '*%s'`, g.tokenStore, systemSID))
+		// Take it back, then repair. Ownership first, for the reason above.
+		ps(t, fmt.Sprintf(`icacls '%s' /setowner '*%s'`, g.tokenStore, administratorsSID))
+		ps(t, fmt.Sprintf(`icacls '%s' /remove:d '%s'`, g.tokenStore, everyoneSID))
 		g.mustAdapter(t, "service", "secure", "--config", g.configPath)
 		g.mustAdapter(t, "service", "start")
 		waitState(t, "RUNNING", time.Minute)
