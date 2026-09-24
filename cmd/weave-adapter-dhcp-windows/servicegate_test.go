@@ -29,8 +29,6 @@ Tested:
 	  - a widened token store refuses the start;
 	  - a securable somebody else OWNS refuses the start, and `service secure`
 	    takes ownership back;
-	  - a descriptor the service cannot READ refuses the start, rather than
-	    being shrugged off as a permissions quirk;
 	  - FILE_DELETE_CHILD alone on the data directory refuses the start.
 
 	provisioning through `setup`, which is the command an operator actually
@@ -68,6 +66,19 @@ Tested elsewhere:
 	This file is for what only a registered service can answer.
 
 Declined:
+
+	Provoking the unreadable-descriptor refusal. It was written, run, and
+	removed, and what it found is worth more than the test: on a correctly
+	owned securable the condition is unreachable. The owner always holds
+	READ_CONTROL implicitly whatever the access list says -- the property
+	checkOwner's own comment rests on -- `service secure` sets the owner to
+	Administrators, and the LocalSystem token carries that group. So the
+	service always owns what it reads. Denying READ_CONTROL to SYSTEM does
+	nothing (the read goes through the Administrators ACE) and denying it to
+	Everyone does nothing either (the owner's implicit grant survives). Making
+	a descriptor genuinely unreadable means first moving ownership away, and
+	18a already refuses that. The branch is defence-in-depth behind the owner
+	check, and internal/core/setup's unit tests are where it is exercised.
 
 	Running in CI. Installing a service needs Administrator and the WS2022
 	runner executes as NT AUTHORITY\\NetworkService. Weakening that account to
@@ -117,10 +128,6 @@ import (
 const (
 	// usersSID widens a target on purpose, in steps 18 and 18c.
 	usersSID = "*S-1-5-32-545"
-	// everyoneSID is what 18b denies READ_CONTROL to. Everyone rather than
-	// SYSTEM, because the LocalSystem token also carries Administrators and
-	// would read the descriptor through that group's grant.
-	everyoneSID = "*S-1-1-0"
 	// administratorsSID is the owner `service secure` must restore, in 18a.
 	administratorsSID = winsvc.SIDAdministrators
 )
@@ -448,41 +455,6 @@ func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
 		_, _, ownerAfter := acl(t, g.tokenStore)
 		assert.Equal(t, administratorsSID, ownerAfter, "secure must take ownership back")
 
-		g.mustAdapter(t, "service", "start")
-		waitState(t, "RUNNING", time.Minute)
-	})
-
-	t.Run("18b: a descriptor the service cannot read refuses the start", func(t *testing.T) {
-		// The check used to log an unreadable descriptor at debug and carry
-		// on, which made it optional to anyone who could make one unreadable.
-		// Denying READ_CONTROL is cheaper than crafting a convincing list.
-		//
-		// DENIED TO EVERYONE, and the first attempt at this test is why.
-		// Denying only S-1-5-18 does nothing: the LocalSystem token also
-		// carries BUILTIN\Administrators, the lockdown grants that group full
-		// control, and the read succeeds through the group ACE. That version
-		// passed once for the wrong reason — the preceding step had aborted
-		// before its repair, so the start was refused by the OWNER check and
-		// the assertion matched a refusal it had not caused.
-		//
-		// Everyone locks out the elevated repair too, which is why the repair
-		// below takes ownership first: SeTakeOwnershipPrivilege does not go
-		// through the DACL, and an owner holds WRITE_DAC implicitly, so an
-		// administrator can always climb back in.
-		g.mustAdapter(t, "service", "stop")
-		waitState(t, "STOPPED", time.Minute)
-
-		ps(t, fmt.Sprintf(`icacls '%s' /deny '%s:(RC)'`, g.tokenStore, everyoneSID))
-
-		_, err := g.adapterCmd(t, "service", "start")
-		require.Error(t, err, "a descriptor the service cannot read must refuse the start")
-		assert.Contains(t, eventLog(t, 20), "could not be read",
-			"the refusal must say it could not tell, rather than claiming the path is safe")
-
-		// Take it back, then repair. Ownership first, for the reason above.
-		ps(t, fmt.Sprintf(`icacls '%s' /setowner '*%s'`, g.tokenStore, administratorsSID))
-		ps(t, fmt.Sprintf(`icacls '%s' /remove:d '%s'`, g.tokenStore, everyoneSID))
-		g.mustAdapter(t, "service", "secure", "--config", g.configPath)
 		g.mustAdapter(t, "service", "start")
 		waitState(t, "RUNNING", time.Minute)
 	})
