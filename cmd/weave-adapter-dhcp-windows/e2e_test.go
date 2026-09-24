@@ -1004,6 +1004,60 @@ func TestE2E_ShouldRejectAResizeThatLeavesTheSubnet(t *testing.T) {
 	assert.Equal(t, testEndRange, fetched.EndRange, "a rejected resize must leave the scope as it was")
 }
 
+// host and make a slow query look like a flaky test.
+//
+//nolint:paralleltest // each case starts its own adapter process and mutates the one real
+func TestE2E_ShouldRejectAOneSidedInvertedResizeWithoutCallingItABackendFault(t *testing.T) {
+	// ARRANGE
+	a := startE2E(t)
+	a.requireHealthyBackend(t)
+	reserveTestSubnet(t)
+
+	status, created, _ := a.createScope(t, createBody("e2e-inverted"))
+	require.Equal(t, http.StatusCreated, status)
+
+	item := a.base + "/api/v1/scopes/" + created.WadaptID
+
+	// ACT
+	// A new end BELOW the untouched start. Both ends stay inside the subnet and
+	// both are leasable addresses, so every rule that existed before this one
+	// passes it — and the effective range runs backwards once the side the
+	// caller left out is filled in from the existing scope.
+	status, body := patch(t, item, a.token, `{"endRange":"198.51.100.5"}`)
+
+	// ASSERT
+	// 400, and emphatically NOT 502. Before the fix this reached
+	// Set-DhcpServerv4Scope with start > end, the cmdlet threw,
+	// $ErrorActionPreference = 'Stop' exited non-zero, and runError classified
+	// it as ErrBackendUnavailable — so a client typo came back as "the DHCP
+	// server is unreachable" plus a BACKEND-101 at ERROR naming a server that
+	// was working perfectly. This test exists to keep a client mistake from
+	// being able to manufacture an outage signal.
+	require.Equal(t, http.StatusBadRequest, status, "body: %s", body)
+	assert.NotEqual(t, http.StatusBadGateway, status, "an inverted range is the caller's mistake, not a backend fault")
+	assert.Contains(t, string(body), "weave-adapters:validation-failed")
+
+	// The field named is the one the CALLER sent, even though the comparison
+	// also involves a startRange they never mentioned.
+	assert.Contains(t, string(body), "endRange")
+	assert.Contains(t, string(body), "must not be before startRange")
+
+	// And the mirror: a start above the untouched end names startRange.
+	status, body = patch(t, item, a.token, `{"startRange":"198.51.100.250"}`)
+	require.Equal(t, http.StatusBadRequest, status, "body: %s", body)
+	assert.Contains(t, string(body), "startRange")
+	assert.Contains(t, string(body), "must not be after endRange")
+
+	// Neither attempt half-applied.
+	getStatus, getBody := get(t, item, a.token)
+	require.Equal(t, http.StatusOK, getStatus)
+
+	var fetched scope
+	require.NoError(t, json.Unmarshal(getBody, &fetched))
+	assert.Equal(t, testStartRange, fetched.StartRange, "a rejected resize must leave the scope as it was")
+	assert.Equal(t, testEndRange, fetched.EndRange)
+}
+
 // DHCP server; running them concurrently would put N powershell.exe spawns on a shared
 // host and make a slow query look like a flaky test.
 //

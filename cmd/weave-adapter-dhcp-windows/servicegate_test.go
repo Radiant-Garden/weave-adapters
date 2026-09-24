@@ -26,7 +26,12 @@ Tested:
 	  - it does NOT retry a clean stop;
 	  - a stop issued mid-drain waits instead of erroring;
 	  - the drain completes rather than being truncated;
-	  - a widened token store refuses the start.
+	  - a widened token store refuses the start;
+	  - a securable somebody else OWNS refuses the start, and `service secure`
+	    takes ownership back;
+	  - a descriptor the service cannot READ refuses the start, rather than
+	    being shrugged off as a permissions quirk;
+	  - FILE_DELETE_CHILD alone on the data directory refuses the start.
 
 	provisioning through `setup`, which is the command an operator actually
 	runs
@@ -39,6 +44,14 @@ Tested:
 	  - a re-run reports every step satisfied, mints no second token and does
 	    not rewrite the configuration;
 	  - a conflicting server name is refused rather than applied.
+
+	the three checks above are the ones no unit test can reach, and they are
+	why this gate exists at all: each needs a real Windows security descriptor
+	manipulated into a hostile shape, and off Windows ReadSecurity answers
+	ErrUnsupported so every target is skipped. 18a is the sharpest -- the owner
+	it sets is the INTERACTIVE ADMINISTRATOR, which is the owner Windows' own
+	default policy ("object creator") gives a directory an operator made by
+	hand, so it is the realistic case rather than a contrived one.
 
 	the lockdown, read back through Get-Acl rather than our own reader
 	  - the scratch directory before anything is registered, so a broken
@@ -95,9 +108,20 @@ import (
 	"github.com/radiantgarden/weave-adapters/internal/core/winsvc"
 )
 
-// usersSID is the local Users group, used to widen the token store on purpose
-// in step 18. A SID, not a name: this host may not be English.
-const usersSID = "*S-1-5-32-545"
+// The principals the ACL steps manipulate, as SIDs and not names: this host
+// may not be English, and Get-Acl renders a name in the host's language.
+//
+// The leading * is icacls' own marker for "this is a SID, not an account
+// name". winsvc.SIDAdministrators and SIDLocalSystem carry the bare form,
+// which is what Get-Acl returns and what the assertions compare against.
+const (
+	// usersSID widens a target on purpose, in steps 18 and 18c.
+	usersSID = "*S-1-5-32-545"
+	// systemSID is the account the service runs as; 18b denies it READ_CONTROL.
+	systemSID = winsvc.SIDLocalSystem
+	// administratorsSID is the owner `service secure` must restore, in 18a.
+	administratorsSID = winsvc.SIDAdministrators
+)
 
 //nolint:paralleltest,funlen // ordered, stateful, and one host; the steps are the test.
 func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
@@ -376,6 +400,97 @@ func TestServiceGate_ShouldInstallServeRecoverAndRemove(t *testing.T) {
 		assert.Contains(t, eventLog(t, 20), "S-1-5-32-545", "the refusal must name the offending SID")
 
 		// And `service secure` repairs it.
+		g.mustAdapter(t, "service", "secure", "--config", g.configPath)
+		g.mustAdapter(t, "service", "start")
+		waitState(t, "RUNNING", time.Minute)
+	})
+
+	// 18a-18c continue 18's technique -- provoke a refusal with a real
+	// descriptor, observe it in the Event Log, repair with `service secure` --
+	// against the three startup checks that had no host coverage. Lettered
+	// rather than renumbered so the numbers below, which appear in the M4a
+	// sign-off, keep meaning what they meant.
+
+	t.Run("18a: a securable somebody else owns refuses the start", func(t *testing.T) {
+		// The half of S1 that the access list cannot express. An owner holds
+		// READ_CONTROL and WRITE_DAC implicitly, so a perfectly-locked list on
+		// an object somebody else owns is a list they can replace whenever
+		// they like -- which is what an unprivileged user gets by creating the
+		// directory under C:\ProgramData before setup runs.
+		//
+		// The owner used is the INTERACTIVE ADMINISTRATOR, not some hostile
+		// account, and that is the point: Windows' default owner policy is
+		// "object creator", so this is the owner a directory an operator made
+		// by hand actually has. It is outside {SYSTEM, Administrators} and
+		// must be refused on a securable this tool locks down.
+		g.mustAdapter(t, "service", "stop")
+		waitState(t, "STOPPED", time.Minute)
+
+		me := strings.TrimSpace(ps(t, `[Security.Principal.WindowsIdentity]::GetCurrent().User.Value`))
+		require.NotEmpty(t, me)
+
+		ps(t, fmt.Sprintf(`icacls '%s' /setowner '*%s'`, g.tokenStore, me))
+
+		_, _, ownerBefore := acl(t, g.tokenStore)
+		require.Equal(t, me, ownerBefore, "the test must actually have moved the owner")
+
+		_, err := g.adapterCmd(t, "service", "start")
+		require.Error(t, err, "a securable owned outside the policy must refuse the start")
+		assert.Contains(t, eventLog(t, 20), "owned by", "the refusal must say the owner is the problem")
+
+		// `service secure` takes it back -- it sets the owner as part of
+		// applying the list, which is the whole reason the strict check is
+		// answerable on what this tool touches.
+		g.mustAdapter(t, "service", "secure", "--config", g.configPath)
+
+		_, _, ownerAfter := acl(t, g.tokenStore)
+		assert.Equal(t, administratorsSID, ownerAfter, "secure must take ownership back")
+
+		g.mustAdapter(t, "service", "start")
+		waitState(t, "RUNNING", time.Minute)
+	})
+
+	t.Run("18b: a descriptor the service cannot read refuses the start", func(t *testing.T) {
+		// The check used to log an unreadable descriptor at debug and carry
+		// on, which made it optional to anyone who could make one unreadable.
+		// Denying READ_CONTROL is cheaper than crafting a convincing list.
+		//
+		// Denied to SYSTEM specifically, which is what the service runs as. A
+		// deny for Everyone would also lock out the elevated repair below.
+		g.mustAdapter(t, "service", "stop")
+		waitState(t, "STOPPED", time.Minute)
+
+		ps(t, fmt.Sprintf(`icacls '%s' /deny '*%s:(RC)'`, g.tokenStore, systemSID))
+
+		_, err := g.adapterCmd(t, "service", "start")
+		require.Error(t, err, "a descriptor the service cannot read must refuse the start")
+		assert.Contains(t, eventLog(t, 20), "could not be read",
+			"the refusal must say it could not tell, rather than claiming the path is safe")
+
+		ps(t, fmt.Sprintf(`icacls '%s' /remove:d '*%s'`, g.tokenStore, systemSID))
+		g.mustAdapter(t, "service", "secure", "--config", g.configPath)
+		g.mustAdapter(t, "service", "start")
+		waitState(t, "RUNNING", time.Minute)
+	})
+
+	t.Run("18c: delete-child alone on the data directory refuses the start", func(t *testing.T) {
+		// FILE_DELETE_CHILD is granted independently of DELETE and lets its
+		// holder remove or rename any child whatever the child's own list
+		// says -- so this alone takes out the token store or the executable.
+		// It was missing from writeMask, which means a directory carrying only
+		// this read as clean.
+		//
+		// The DIRECTORY, because the right is meaningless on a file.
+		g.mustAdapter(t, "service", "stop")
+		waitState(t, "STOPPED", time.Minute)
+
+		logDir := filepath.Dir(g.logFile)
+		ps(t, fmt.Sprintf(`icacls '%s' /grant '%s:(DC)'`, logDir, usersSID))
+
+		_, err := g.adapterCmd(t, "service", "start")
+		require.Error(t, err, "delete-child on the data directory must refuse the start")
+		assert.Contains(t, eventLog(t, 20), "S-1-5-32-545", "the refusal must name the offending SID")
+
 		g.mustAdapter(t, "service", "secure", "--config", g.configPath)
 		g.mustAdapter(t, "service", "start")
 		waitState(t, "RUNNING", time.Minute)
