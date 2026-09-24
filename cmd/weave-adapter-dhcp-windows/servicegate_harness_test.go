@@ -283,10 +283,19 @@ type aclEntry struct {
 	InheritanceFlags string
 }
 
-// acl reads a path's access rules through Get-Acl.
+// acl reads a path's owner and access rules through Get-Acl, both as SIDs.
 //
-// A different implementation from winsvc.ReadGrants on purpose: our own
+// A different implementation from winsvc.ReadSecurity on purpose: our own
 // reader confirming our own writer would agree with a bug in either.
+//
+// The OWNER is translated too, and that was a real gap rather than tidiness.
+// It used to come back as `$a.Owner`, a locale-dependent NAME, and the only
+// assertion on it was a substring match for "administrator" — which
+// `WIN-01\Administrator`, the interactive USER account, satisfies just as well
+// as the Administrators group does. So the gate could not tell the two apart,
+// and that distinction is the whole of S1: an object owned by the user who
+// created it is the default Windows outcome and the thing the startup check
+// now refuses. Step 18a failed against the name and passes against the SID.
 func acl(t *testing.T, path string) (entries []aclEntry, protected bool, owner string) {
 	t.Helper()
 
@@ -301,7 +310,7 @@ func acl(t *testing.T, path string) (entries []aclEntry, protected bool, owner s
 	// same rule instead of translating at the one boundary that mangles them.
 	raw := ps(t, fmt.Sprintf(`$a = Get-Acl -LiteralPath '%s'
 [pscustomobject]@{
-  Owner     = $a.Owner
+  Owner     = $a.GetOwner([Security.Principal.SecurityIdentifier]).Value
   Protected = $a.AreAccessRulesProtected
   Rules     = @($a.Access | ForEach-Object { [pscustomobject]@{
       SID              = $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value

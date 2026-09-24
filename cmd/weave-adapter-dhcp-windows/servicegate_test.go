@@ -691,8 +691,15 @@ func assertLockedDown(t *testing.T, path string, rules []aclEntry, protected boo
 
 	// The one write authorised by the admin token rather than by the DACL, so
 	// it is what proves install really had the rights it claimed.
-	assert.Contains(t, strings.ToLower(owner), "administrator",
-		"%s is owned by %q, not Administrators", path, owner)
+	//
+	// An EXACT SID, not a substring of a name. The old form matched
+	// "administrator" anywhere in a lower-cased name, which the interactive
+	// `WIN-01\Administrator` account satisfies as readily as the
+	// Administrators group — so it could not see the one difference S1's owner
+	// check is about, and it leaned on a locale-dependent string on a host
+	// whose group is called "Administratoren".
+	assert.Equal(t, administratorsSID, owner,
+		"%s must be owned by the Administrators group, not by %q", path, owner)
 }
 
 // assertOnlyPolicyPrincipals checks that nobody outside the policy appears.
